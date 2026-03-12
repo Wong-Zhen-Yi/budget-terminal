@@ -1,0 +1,5 @@
+pandas
+yfinance
+PyQt6
+pyqtgraph
+requests
