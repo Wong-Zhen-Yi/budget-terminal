@@ -10,11 +10,25 @@ class PieChartWidget(QWidget):
         """Initialize the object."""
         super().__init__(parent)
         self.slices = []
+        self.slice_colors = tuple(self.COLORS)
+        self.legend_text_color = '#ffffff'
         self.setMinimumWidth(200)
+
+    def set_theme(self, slice_colors: Any, legend_text_color: Any) -> None:
+        """Apply a theme-aware color palette to the pie chart."""
+        if isinstance(slice_colors, (list, tuple)) and slice_colors:
+            self.slice_colors = tuple(str(color) for color in slice_colors)
+        self.legend_text_color = str(legend_text_color or '#ffffff')
+        if self.slices:
+            self.slices = [
+                (label, value, self.slice_colors[index % len(self.slice_colors)])
+                for index, (label, value, _color) in enumerate(self.slices)
+            ]
+        self.update()
 
     def set_data(self, weights: dict) -> None:
         """Handle set data."""
-        colors = self.COLORS
+        colors = self.slice_colors or tuple(self.COLORS)
         self.slices = [(t, v, colors[i % len(colors)]) for i, (t, v) in enumerate(weights.items()) if v > 0]
         self.update()
 
@@ -48,7 +62,7 @@ class PieChartWidget(QWidget):
         painter.setFont(QFont('Arial', 8))
         for label, val, color in self.slices:
             painter.fillRect(lx, ly, 10, 10, QColor(color))
-            painter.setPen(QColor('white'))
+            painter.setPen(QColor(self.legend_text_color))
             painter.drawText(lx + 14, ly + 10, f'{label} {val:.1f}%')
             ly += 16
             if ly > h - margin:

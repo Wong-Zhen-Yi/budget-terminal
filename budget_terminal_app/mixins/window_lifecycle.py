@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.paths import user_data_path
 
 class WindowLifecycleMixin:
     def _get_tzinfo(self, idx: Any) -> Any:
@@ -139,7 +140,7 @@ class WindowLifecycleMixin:
         """Handle take screenshot."""
         screen = QApplication.primaryScreen()
         screenshot = screen.grabWindow(self.winId())
-        folder = Path(__file__).resolve().parent / 'screenshots'
+        folder = user_data_path('screenshots')
         folder.mkdir(exist_ok=True)
         path = folder / f"screenshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         screenshot.save(str(path), 'png')

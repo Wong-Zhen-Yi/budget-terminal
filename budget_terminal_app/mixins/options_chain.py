@@ -20,12 +20,6 @@ class OptionsChainMixin:
         ('Rho', 'rho_calc', '{:.3f}'),
     ]
     _P5_STRATEGIES = ('None', 'Covered Call', 'Cash Secured Put')
-    _P5_STRATEGY_COLORS = {
-        1: '#123524',
-        2: '#2f5a3f',
-        3: '#3f6f4a',
-    }
-
     def init_page5(self) -> None:
         """Build the Options Chain page UI."""
         layout = QVBoxLayout(self.page5)
@@ -49,9 +43,9 @@ class OptionsChainMixin:
         self.p5_strategy_combo.addItems(list(self._P5_STRATEGIES))
         self.p5_strategy_combo.currentIndexChanged.connect(self._p5_refresh_strategy_view)
         self.p5_status_lbl = QLabel('Enter a ticker to view the full options chain.')
-        self.p5_status_lbl.setStyleSheet('color: #888;')
+        self.set_theme_role(self.p5_status_lbl, 'status_muted')
         self.p5_price_lbl = QLabel('')
-        self.p5_price_lbl.setStyleSheet('font-size: 16px; font-weight: bold; color: #00e5cc; margin-left: 10px;')
+        self.p5_price_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {self.theme_color('accent_positive')}; margin-left: 10px;")
         self._p5_chain_df = pd.DataFrame()
         self._p5_chain_spot_price = 0.0
         self._p5_chain_expiry = ''
@@ -101,7 +95,6 @@ class OptionsChainMixin:
         t.verticalHeader().setVisible(False)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         t.setAlternatingRowColors(True)
-        t.setStyleSheet('QTableWidget { background-color: #0d0d1f; gridline-color: #1a1a3a; }')
         return t
 
     def _p5_load_expiries(self) -> None:
@@ -109,8 +102,7 @@ class OptionsChainMixin:
         ticker = self.p5_ticker_input.text().upper().strip()
         if not ticker:
             return
-        self.p5_status_lbl.setText(f'Fetching expiries for {ticker}...')
-        self.p5_status_lbl.setStyleSheet('color: #f0c040;')
+        self.set_status_text(self.p5_status_lbl, f'Fetching expiries for {ticker}...', status='warning')
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
         self.p5_expiry_combo.blockSignals(False)
@@ -145,15 +137,13 @@ class OptionsChainMixin:
                 self._invoke_main.emit(_update_ui)
             except Exception as e:
                 logger.error(f'P5 expiry fetch failed for {ticker}: {e}')
-                self._invoke_main.emit(lambda: self.p5_status_lbl.setText(f'Error: {e}'))
-                self._invoke_main.emit(lambda: self.p5_status_lbl.setStyleSheet('color: #ff5555;'))
+                self._invoke_main.emit(lambda: self.set_status_text(self.p5_status_lbl, f'Error: {e}', status='negative'))
         threading.Thread(target=_run, daemon=True).start()
 
     def _p5_populate_expiries(self, exps: Any) -> None:
         """Populate the expiry selector."""
         if not exps:
-            self.p5_status_lbl.setText('No options found.')
-            self.p5_status_lbl.setStyleSheet('color: #888;')
+            self.set_status_text(self.p5_status_lbl, 'No options found.', status='muted')
             return
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
@@ -166,8 +156,7 @@ class OptionsChainMixin:
             except Exception:
                 self.p5_expiry_combo.addItem(exp, exp)
         self.p5_expiry_combo.blockSignals(False)
-        self.p5_status_lbl.setText('Expiries loaded.')
-        self.p5_status_lbl.setStyleSheet('color: #80ff80;')
+        self.set_status_text(self.p5_status_lbl, 'Expiries loaded.', status='positive')
         self._p5_load_chain()
 
     def _p5_load_chain(self) -> None:
@@ -176,8 +165,7 @@ class OptionsChainMixin:
         expiry = self.p5_expiry_combo.currentData()
         if not ticker or not expiry:
             return
-        self.p5_status_lbl.setText(f'Loading {ticker} {expiry} chain...')
-        self.p5_status_lbl.setStyleSheet('color: #f0c040;')
+        self.set_status_text(self.p5_status_lbl, f'Loading {ticker} {expiry} chain...', status='warning')
         spot_price = float(getattr(self, '_p5_chain_spot_price', 0.0) or 0.0)
 
         def _run() -> None:
@@ -216,8 +204,7 @@ class OptionsChainMixin:
                 self._invoke_main.emit(lambda: self._p5_update_chain_view(enriched, expiry, current_spot, greek_inputs))
             except Exception as e:
                 logger.error(f'P5 chain load failed for {ticker} {expiry}: {e}')
-                self._invoke_main.emit(lambda: self.p5_status_lbl.setText(f'Error: {e}'))
-                self._invoke_main.emit(lambda: self.p5_status_lbl.setStyleSheet('color: #ff5555;'))
+                self._invoke_main.emit(lambda: self.set_status_text(self.p5_status_lbl, f'Error: {e}', status='negative'))
         threading.Thread(target=_run, daemon=True).start()
 
     def _p5_enrich_chain(self, df: Any, expiry: str, spot_price: float, risk_free_rate: float, dividend_yield: float) -> Any:
@@ -429,8 +416,7 @@ class OptionsChainMixin:
         self.p5_calls_table.setRowCount(0)
         self.p5_puts_table.setRowCount(0)
         if df is None or df.empty:
-            self.p5_status_lbl.setText('No chain data available.')
-            self.p5_status_lbl.setStyleSheet('color: #888;')
+            self.set_status_text(self.p5_status_lbl, 'No chain data available.', status='muted')
             return
         calls = df[df['type'] == 'Call'].sort_values('strike').reset_index(drop=True)
         puts = df[df['type'] == 'Put'].sort_values('strike').reset_index(drop=True)
@@ -445,8 +431,7 @@ class OptionsChainMixin:
         if strategy != 'None' and strategy_count:
             side = 'call' if strategy == 'Covered Call' else 'put'
             status_text += f' | {strategy}: highlighted top {strategy_count} {side} candidates'
-        self.p5_status_lbl.setText(status_text)
-        self.p5_status_lbl.setStyleSheet('color: #80ff80;')
+        self.set_status_text(self.p5_status_lbl, status_text, status='positive')
 
     def _p5_fill_chain_table(self, table: Any, data: Any, ranks: dict[int, int]) -> None:
         """Populate a single chain table with optional recommendation styling."""
@@ -455,15 +440,15 @@ class OptionsChainMixin:
             rank = ranks.get(i)
             for col_idx, (label, key, fmt) in enumerate(self._P5_CHAIN_COLUMNS):
                 color = None
-                bg_color = self._P5_STRATEGY_COLORS.get(rank)
+                bg_color = self._p5_strategy_bg(rank)
                 value = row.get(key)
                 if label == 'Chg':
                     try:
-                        color = 'lime' if float(row.get('change', 0) or 0) >= 0 else 'red'
+                        color = self.theme_color('accent_positive' if float(row.get('change', 0) or 0) >= 0 else 'accent_negative')
                     except Exception:
                         color = None
                 elif label == 'IV':
-                    color = '#aaa'
+                    color = self.theme_color('text_muted')
                 if label == 'Strike' and rank:
                     try:
                         strike_txt = fmt.format(float(row.get('strike', 0.0) or 0.0))
@@ -479,6 +464,27 @@ class OptionsChainMixin:
                 if bg_color:
                     item.setBackground(QColor(bg_color))
                 table.setItem(i, col_idx, item)
+
+    def _p5_strategy_bg(self, rank: int | None) -> str | None:
+        """Resolve recommendation highlight backgrounds from theme tokens."""
+        if not rank:
+            return None
+        return {
+            1: self.theme_color('accent_positive_bg'),
+            2: self.theme_color('info_bg'),
+            3: self.theme_color('accent_soft'),
+        }.get(rank, self.theme_color('background_secondary'))
+
+    def _apply_options_chain_theme(self) -> None:
+        """Refresh options-chain page styling after a theme change."""
+        if hasattr(self, 'p5_price_lbl'):
+            self.p5_price_lbl.setStyleSheet(
+                f"font-size: 16px; font-weight: bold; color: {self.theme_color('accent_positive')}; margin-left: 10px;"
+            )
+        if hasattr(self, 'p5_status_lbl'):
+            self.set_status_text(self.p5_status_lbl, self.p5_status_lbl.text(), status=self.p5_status_lbl.property('bt_status') or 'muted')
+        if not getattr(self, '_p5_chain_df', pd.DataFrame()).empty:
+            self._p5_populate_tables(self._p5_chain_df, self._p5_chain_expiry)
 
     def _p5_format_chain_value(self, value: Any, fmt: str) -> str:
         """Format a chain cell value for display."""

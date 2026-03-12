@@ -22,9 +22,9 @@ class SectorsMixin:
         layout.setSpacing(8)
         header = QHBoxLayout()
         title_lbl = QLabel('<b>Sectors</b>')
-        title_lbl.setStyleSheet('font-size: 18px; color: white;')
+        self.set_theme_role(title_lbl, 'page_title')
         self.p8_status_lbl = QLabel('Ready')
-        self.p8_status_lbl.setStyleSheet('color: #888; font-size: 11px;')
+        self.set_theme_role(self.p8_status_lbl, 'status_muted')
         header.addWidget(title_lbl)
         header.addStretch()
         header.addWidget(self.p8_status_lbl)
@@ -32,7 +32,6 @@ class SectorsMixin:
         self.btn_page8.clicked.connect(self._p8_on_show)
         self.p8_scroll = QScrollArea()
         self.p8_scroll.setWidgetResizable(True)
-        self.p8_scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
         self.p8_container = QWidget()
         self.p8_container.setStyleSheet('background: transparent;')
         self.p8_container_layout = QGridLayout(self.p8_container)
@@ -56,13 +55,13 @@ class SectorsMixin:
     def _p8_create_sector_card(self, sector: str) -> None:
         """Create one reusable sector card and its table."""
         sec_box = QFrame()
-        sec_box.setStyleSheet('QFrame { background: #141428; border: 1px solid #2a2a4a; border-radius: 6px; }')
+        sec_box.setStyleSheet(f'QFrame {{ background: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}')
         sec_box.setMinimumWidth(self.p8_card_min_width)
         sec_layout = QVBoxLayout(sec_box)
         sec_layout.setContentsMargins(8, 8, 8, 8)
         sec_layout.setSpacing(5)
         sec_title = QLabel(f'<b>{sector}</b>')
-        sec_title.setStyleSheet('font-size: 13px; color: #ffd700; padding: 0 0 2px 2px;')
+        sec_title.setStyleSheet(f'font-size: 13px; color: {self.theme_color("warning")}; padding: 0 0 2px 2px;')
         sec_layout.addWidget(sec_title)
         table = QTableWidget(10, 5)
         table.setHorizontalHeaderLabels(['Ticker', 'Price', 'Chg %', 'Mkt Cap', ''])
@@ -82,7 +81,7 @@ class SectorsMixin:
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        table.setStyleSheet('QTableWidget { background: #1a1a2e; gridline-color: #242448; border: 1px solid #333; font-size: 11px; }QHeaderView::section { background: #20203a; color: #9aa0b8; border: 1px solid #2a2a4a; padding: 4px; font-size: 10px; }')
+        table.setAlternatingRowColors(True)
         table.setFixedHeight(300)
         for i, ticker in enumerate(SECTOR_DATA[sector]):
             item = QTableWidgetItem(ticker)
@@ -91,11 +90,12 @@ class SectorsMixin:
             for col in range(1, 4):
                 placeholder = QTableWidgetItem('...')
                 placeholder.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                placeholder.setForeground(QColor('#777'))
+                placeholder.setForeground(self.theme_qcolor('text_muted'))
                 table.setItem(i, col, placeholder)
             analyze_btn = QPushButton('View')
-            analyze_btn.setStyleSheet('background: #1a1a3a; color: #4a90e2; font-size: 10px; padding: 1px 4px;')
-            analyze_btn.setFixedHeight(20)
+            self.set_theme_variant(analyze_btn, 'accent')
+            analyze_btn.setStyleSheet('font-size: 10px; padding: 1px 4px;')
+            analyze_btn.setMinimumSize(58, 24)
             analyze_btn.clicked.connect(lambda checked=False, sym=ticker: self._p8_analyze_ticker(sym))
             table.setCellWidget(i, 4, analyze_btn)
         sec_layout.addWidget(table)
@@ -142,7 +142,7 @@ class SectorsMixin:
         now = datetime.datetime.now().timestamp()
         if now - self.p8_last_fetch > 120:
             self.p8_last_fetch = now
-            self.p8_status_lbl.setText('Refreshing sector data...')
+            self.set_status_text(self.p8_status_lbl, 'Refreshing sector data...', status='info')
             threading.Thread(target=self._p8_fetch_all_sectors, daemon=True).start()
 
     def _p8_fetch_all_sectors(self) -> None:
@@ -235,7 +235,7 @@ class SectorsMixin:
             self._invoke_main.emit(lambda results=all_results: self._p8_populate_all_tables(results))
         except Exception as e:
             logger.error(f'Failed to fetch all sector data: {e}')
-            self._invoke_main.emit(lambda: self.p8_status_lbl.setText('Sector data refresh failed'))
+            self._invoke_main.emit(lambda: self.set_status_text(self.p8_status_lbl, 'Sector data refresh failed', status='negative'))
 
     def _p8_populate_all_tables(self, all_results: Any) -> None:
         """Populate all sector cards with the latest fetched data."""

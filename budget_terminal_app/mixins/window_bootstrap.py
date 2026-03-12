@@ -167,13 +167,16 @@ class WindowBootstrapMixin:
         self.active_tracker_data = {}
         self.active_options_data = []
         self.networth_data = load_networth_data()
+        self.theme_settings = load_theme_settings()
         self.chart_page_state = load_chart_page_settings()
+        self.init_theme_system(apply=False)
         self.dashboard_chart_rows = [[], [], []]
         self.dashboard_chart_ma200 = [None, None, None]
         self.dashboard_chart_view_guards = [False, False, False]
         self._apply_main_portfolio_runtime()
         self._apply_active_portfolio_editor_state()
         self.init_ui()
+        self.theme_manager.apply_theme(self.current_theme_id, persist=False)
         self._sync_after_portfolio_change(refresh_main=False)
         self.refresh_data()
         if self.p2_ticker_input.text().strip():

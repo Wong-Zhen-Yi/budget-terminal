@@ -1,51 +1,256 @@
 from __future__ import annotations
+from importlib import resources
 from typing import Any
-from ..compat import *
+
+from PyQt6.QtGui import QImage, QPixmap
+from budget_terminal_app.compat import *
 
 
 class SettingsMixin:
+    SETTINGS_DONATION_URL = 'https://buymeacoffee.com/BudgetTerminal'
+    SETTINGS_CREATOR_IMAGE_SIZE = 208
 
     def init_page9(self) -> None:
         """Build the Settings page UI."""
+        logger.info('Settings page initialization started.')
         layout = QVBoxLayout(self.page9)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        title = QLabel('<b>Settings</b>')
-        title.setStyleSheet('font-size: 20px; color: white;')
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(12)
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(6)
+        title = QLabel('Settings')
+        self.set_theme_role(title, 'page_title')
         description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. Export creates one backup JSON file, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
         description.setWordWrap(True)
-        description.setStyleSheet('color: #bbbbbb; font-size: 12px;')
+        self.set_theme_role(description, 'muted')
+        title_col.addWidget(title)
+        title_col.addWidget(description)
+        self.settings_header_badge = QLabel('Live theme switching enabled')
+        self.settings_header_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(self.settings_header_badge, 'badge')
+        self.settings_header_badge.setMinimumHeight(34)
+        self.settings_header_badge.setMinimumWidth(220)
+        header_row.addLayout(title_col, 1)
+        header_row.addWidget(self.settings_header_badge, 0, Qt.AlignmentFlag.AlignTop)
+
+        theme_box = QGroupBox('Appearance')
+        self.set_theme_role(theme_box, 'panel')
+        theme_layout = QVBoxLayout(theme_box)
+        theme_layout.setContentsMargins(14, 16, 14, 14)
+        theme_layout.setSpacing(12)
+        theme_label = QLabel('Theme Selection')
+        self.set_theme_role(theme_label, 'section_title')
+        theme_hint = QLabel('Trading Dark is the current supported theme. The selector stays wired to the theme registry so additional themes can be restored cleanly later.')
+        theme_hint.setWordWrap(True)
+        self.set_theme_role(theme_hint, 'muted')
+        self.settings_theme_combo = QComboBox()
+        self.settings_theme_combo.setMinimumHeight(32)
+        available_themes = self.theme_manager.available_themes()
+        for theme_id, theme in available_themes.items():
+            self.settings_theme_combo.addItem(theme.name, theme_id)
+        self.settings_theme_combo.setEnabled(len(available_themes) > 1)
+        current_index = self.settings_theme_combo.findData(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id))
+        if current_index >= 0:
+            self.settings_theme_combo.setCurrentIndex(current_index)
+        self.settings_theme_combo.currentIndexChanged.connect(self._on_theme_selected)
+        self.settings_theme_preview = QLabel(self.theme_id_to_name(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id)))
+        self.set_theme_role(self.settings_theme_preview, 'badge')
+        self.settings_theme_preview.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.settings_theme_preview.setMinimumHeight(32)
+        theme_layout.addWidget(theme_label)
+        theme_layout.addWidget(theme_hint)
+        theme_layout.addWidget(self.settings_theme_combo)
+        theme_layout.addWidget(self.settings_theme_preview)
+
         actions_box = QGroupBox('User Data')
-        actions_box.setStyleSheet('QGroupBox { font-weight: bold; color: #cccccc; border: 1px solid #333; border-radius: 6px; padding-top: 12px; }QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }')
+        self.set_theme_role(actions_box, 'panel')
         actions_layout = QVBoxLayout(actions_box)
-        actions_layout.setContentsMargins(12, 14, 12, 12)
-        actions_layout.setSpacing(10)
+        actions_layout.setContentsMargins(14, 16, 14, 14)
+        actions_layout.setSpacing(12)
+        actions_intro = QLabel('Backup and restore your saved application state. Clear removes user data but keeps dashboard chart slots intact.')
+        actions_intro.setWordWrap(True)
+        self.set_theme_role(actions_intro, 'muted')
         export_btn = QPushButton('Export User Data')
+        self.set_theme_variant(export_btn, 'accent')
+        export_btn.setMinimumHeight(32)
         export_btn.clicked.connect(self._on_export_user_data)
         import_btn = QPushButton('Import User Data')
+        self.set_theme_variant(import_btn, 'accent')
+        import_btn.setMinimumHeight(32)
         import_btn.clicked.connect(self._on_import_user_data)
         clear_btn = QPushButton('Clear All User Data')
-        clear_btn.setStyleSheet('QPushButton { background: #3a1a1a; color: #f44336; border: 1px solid #6a2a2a; border-radius: 4px; padding: 6px 12px; font-weight: bold; }QPushButton:hover { background: #521818; }')
+        self.set_theme_variant(clear_btn, 'danger')
+        clear_btn.setMinimumHeight(32)
         clear_btn.clicked.connect(self._on_clear_user_data)
+        actions_layout.addWidget(actions_intro)
         actions_layout.addWidget(export_btn)
         actions_layout.addWidget(import_btn)
         actions_layout.addWidget(clear_btn)
+
+        note_box = QGroupBox("Creator's Note")
+        self.set_theme_role(note_box, 'panel')
+        note_layout = QVBoxLayout(note_box)
+        note_layout.setContentsMargins(14, 16, 14, 14)
+        note_layout.setSpacing(10)
+        note_title = QLabel('Built for retail investors')
+        self.set_theme_role(note_title, 'section_title')
+        note_body = QLabel("Wong here, I made this with Claude, Codex and Gemini CLI tools. Some of the data might not be accurate because of yfinance API limitations so always double check with the official sources.")
+        note_body.setWordWrap(True)
+        self.set_theme_role(note_body, 'muted')
+        note_footer = QLabel(f'If you find this terminal useful donate here. Thanks! <a href="{self.SETTINGS_DONATION_URL}">buymeacoffee.com/BudgetTerminal</a>')
+        note_footer.setOpenExternalLinks(True)
+        self.set_theme_role(note_footer, 'accent')
+        self.settings_creator_image_label = QLabel()
+        self.settings_creator_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.settings_creator_image_label.setMinimumSize(self.SETTINGS_CREATOR_IMAGE_SIZE, self.SETTINGS_CREATOR_IMAGE_SIZE)
+        self.settings_creator_image_label.setMaximumSize(self.SETTINGS_CREATOR_IMAGE_SIZE, self.SETTINGS_CREATOR_IMAGE_SIZE)
+        self.settings_creator_image_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.settings_creator_image_label.setScaledContents(False)
+        self.settings_creator_image_pixmap = None
+        self._refresh_settings_creator_image()
+        note_layout.addWidget(note_title)
+        note_layout.addWidget(note_body)
+        note_layout.addWidget(note_footer)
+        note_layout.addWidget(self.settings_creator_image_label, 0, Qt.AlignmentFlag.AlignCenter)
+        note_layout.addStretch()
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        grid.addWidget(theme_box, 0, 0)
+        grid.addWidget(actions_box, 0, 1)
+        grid.addWidget(note_box, 1, 0, 1, 2)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 2)
+
         self.settings_status_label = QLabel('Ready')
-        self.settings_status_label.setStyleSheet('color: #888888; font-size: 11px;')
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addWidget(actions_box)
+        self.set_theme_role(self.settings_status_label, 'status_muted')
+        layout.addLayout(header_row)
+        layout.addLayout(grid)
         layout.addWidget(self.settings_status_label)
         layout.addStretch()
+        logger.info('Settings page initialization complete.')
 
-    def _set_settings_status(self, text: Any, color: Any='#888888') -> None:
+    def _settings_creator_image_path(self) -> Any:
+        """Return the bundled Creator's Note image asset path."""
+        return resources.files('budget_terminal_app').joinpath('assets').joinpath('qr-code.png')
+
+    def _load_settings_image_pixmap_from_bytes(self, raw_bytes: bytes, source: str) -> Any:
+        """Decode the Creator's Note image bytes with explicit format hints."""
+        if not raw_bytes:
+            logger.warning("Settings creator image decode skipped because %s returned no data.", source)
+            return None
+        pixmap = QPixmap()
+        if pixmap.loadFromData(raw_bytes, 'PNG'):
+            logger.info("Settings creator image decoded from %s via QPixmap.loadFromData.", source)
+            return pixmap
+        qt_image = QImage.fromData(raw_bytes, 'PNG')
+        if not qt_image.isNull():
+            logger.info("Settings creator image decoded from %s via QImage.fromData.", source)
+            return QPixmap.fromImage(qt_image)
+        logger.warning("Settings creator image decode failed for %s.", source)
+        return None
+
+    def _load_settings_creator_image_pixmap(self) -> Any:
+        """Load the bundled Creator's Note image asset."""
+        image_path = self._settings_creator_image_path()
+        logger.info("Loading Settings creator image from %s.", image_path)
+        try:
+            raw_bytes = image_path.read_bytes()
+        except OSError:
+            logger.exception("Settings creator image could not be read from %s.", image_path)
+            return None
+        pixmap = self._load_settings_image_pixmap_from_bytes(raw_bytes, f'asset {image_path.name}')
+        if pixmap is not None:
+            logger.info("Settings creator image loaded successfully from %s.", image_path)
+            return pixmap
+        logger.warning("Settings creator image decode failed for %s after byte-based fallback.", image_path)
+        return None
+
+    def _build_settings_creator_image(self) -> Any:
+        """Load and scale the Creator's Note image asset."""
+        image_pixmap = self._load_settings_creator_image_pixmap()
+        if image_pixmap is None or image_pixmap.isNull():
+            raise RuntimeError(
+                "Unable to render the Creator's Note image. Verify budget_terminal_app/assets/qr-code.png exists and is a readable PNG."
+            )
+        return image_pixmap.scaled(
+            self.SETTINGS_CREATOR_IMAGE_SIZE,
+            self.SETTINGS_CREATOR_IMAGE_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    def _refresh_settings_creator_image(self) -> None:
+        """Show the Creator's Note image when available, otherwise a clear fallback message."""
+        if not hasattr(self, 'settings_creator_image_label'):
+            return
+        try:
+            creator_image = self._build_settings_creator_image()
+        except Exception as exc:
+            logger.exception("Settings creator image refresh failed.")
+            creator_image = None
+            error_message = str(exc)
+        else:
+            error_message = ''
+        if creator_image is not None:
+            self.set_theme_role(self.settings_creator_image_label, None)
+            self.settings_creator_image_label.clear()
+            self.settings_creator_image_label.setStyleSheet('')
+            self.settings_creator_image_pixmap = creator_image
+            self.settings_creator_image_label.setPixmap(creator_image)
+            logger.info(
+                "Settings creator image rendered at label size %sx%s with pixmap size %sx%s.",
+                self.settings_creator_image_label.width(),
+                self.settings_creator_image_label.height(),
+                creator_image.width(),
+                creator_image.height(),
+            )
+            return
+        self.settings_creator_image_pixmap = None
+        self.settings_creator_image_label.setPixmap(QPixmap())
+        self.settings_creator_image_label.setText(error_message or "Creator image unavailable: asset load failed.")
+        self.set_theme_role(self.settings_creator_image_label, 'badge')
+        logger.warning("Settings creator image fallback text shown: %s", self.settings_creator_image_label.text())
+
+    def _set_settings_status(self, text: Any, status: Any='muted') -> None:
         """Update the settings page and window status messages together."""
         if hasattr(self, 'settings_status_label'):
-            self.settings_status_label.setText(str(text))
-            self.settings_status_label.setStyleSheet(f'color: {color}; font-size: 11px;')
+            self.set_status_text(self.settings_status_label, text, status=str(status))
         if hasattr(self, 'status_bar'):
-            self.status_bar.setText(str(text))
-            self.status_bar.setStyleSheet(f'color: {color}; font-size: 11px; padding: 2px;')
+            self.set_status_text(self.status_bar, text, status=str(status))
+
+    def _on_theme_selected(self, index: int) -> None:
+        """Switch themes immediately from the Settings page."""
+        if index < 0:
+            return
+        theme_id = self.settings_theme_combo.itemData(index)
+        if not theme_id:
+            return
+        self.apply_theme_selection(str(theme_id))
+
+    def _apply_settings_theme(self) -> None:
+        """Refresh Settings-page theme-dependent widgets."""
+        logger.info('Applying Settings page theme for %s.', self.theme().name)
+        if hasattr(self, 'settings_theme_preview'):
+            self.settings_theme_preview.setText(self.theme().name)
+        if hasattr(self, 'settings_header_badge'):
+            self.settings_header_badge.setText(f'Active Theme: {self.theme().name}')
+        if hasattr(self, 'settings_theme_combo'):
+            current_index = self.settings_theme_combo.findData(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id))
+            if current_index >= 0 and current_index != self.settings_theme_combo.currentIndex():
+                self.settings_theme_combo.blockSignals(True)
+                self.settings_theme_combo.setCurrentIndex(current_index)
+                self.settings_theme_combo.blockSignals(False)
+        if hasattr(self, 'settings_creator_image_label'):
+            self._refresh_settings_creator_image()
+        if hasattr(self, 'settings_status_label'):
+            self.set_status_text(self.settings_status_label, self.settings_status_label.text(), status=self.settings_status_label.property('bt_status') or 'muted')
 
     def _sync_chart_slot_inputs(self) -> None:
         """Keep chart input fields aligned with the current saved chart slots."""
@@ -154,10 +359,10 @@ class SettingsMixin:
         try:
             export_user_data_backup(path)
         except Exception as exc:
-            self._set_settings_status(f'Export failed: {exc}', '#f44336')
+            self._set_settings_status(f'Export failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Export Failed', f'Unable to export user data.\n\n{exc}')
             return
-        self._set_settings_status(f'User data exported to {path}', '#80ff80')
+        self._set_settings_status(f'User data exported to {path}', 'positive')
         QMessageBox.information(self, 'Export Complete', f'User data exported successfully.\n\n{path}')
 
     def _on_import_user_data(self) -> None:
@@ -169,7 +374,7 @@ class SettingsMixin:
         try:
             payload = load_user_data_backup(path)
         except Exception as exc:
-            self._set_settings_status(f'Import failed: {exc}', '#f44336')
+            self._set_settings_status(f'Import failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Import Failed', f'Unable to import user data.\n\n{exc}')
             return
         reply = QMessageBox.question(self, 'Import User Data', 'Importing will overwrite current saved user data. Continue?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
@@ -180,10 +385,10 @@ class SettingsMixin:
             normalized = apply_user_data_backup(payload)
             self._apply_runtime_user_data(normalized)
         except Exception as exc:
-            self._set_settings_status(f'Import failed: {exc}', '#f44336')
+            self._set_settings_status(f'Import failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Import Failed', f'Unable to apply imported data.\n\n{exc}')
             return
-        self._set_settings_status(f'Imported user data from {path}', '#80ff80')
+        self._set_settings_status(f'Imported user data from {path}', 'positive')
         QMessageBox.information(self, 'Import Complete', 'User data imported successfully.')
 
     def _on_clear_user_data(self) -> None:
@@ -196,8 +401,8 @@ class SettingsMixin:
             normalized = reset_user_data(self.chart_slots)
             self._apply_runtime_user_data(normalized)
         except Exception as exc:
-            self._set_settings_status(f'Clear failed: {exc}', '#f44336')
+            self._set_settings_status(f'Clear failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Clear Failed', f'Unable to clear user data.\n\n{exc}')
             return
-        self._set_settings_status('All user data cleared.', '#80ff80')
+        self._set_settings_status('All user data cleared.', 'positive')
         QMessageBox.information(self, 'Clear Complete', 'All saved user data has been cleared.')

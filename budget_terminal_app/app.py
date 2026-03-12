@@ -18,9 +18,10 @@ from .mixins.sectors import SectorsMixin
 from .mixins.settings import SettingsMixin
 from .mixins.charts_page import ChartsPageMixin
 from .mixins.simple_charts import SimpleChartsMixin
+from .mixins.theme_support import ThemeSupportMixin
 from .mixins.window_bootstrap import WindowBootstrapMixin
 from .mixins.window_lifecycle import WindowLifecycleMixin
 from .mixins.window_setup import WindowSetupMixin
 
-class BudgetTerminalApp(WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, QMainWindow):
+class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, QMainWindow):
     _invoke_main = pyqtSignal(object)

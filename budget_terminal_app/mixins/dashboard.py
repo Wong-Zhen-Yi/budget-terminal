@@ -3,9 +3,9 @@ import math
 from typing import Any
 from ..compat import *
 
-P1_AUTO_ANCHOR = 0.85
 P1_DEFAULT_STARTUP_SPAN = 80.0
 P1_MIN_REUSABLE_SPAN = 10.0
+P1_RIGHT_PAD = 0.75
 
 class DashboardMixin:
 
@@ -47,6 +47,25 @@ class DashboardMixin:
         except Exception:
             return False
         return right > left and (right - left) >= P1_MIN_REUSABLE_SPAN
+
+    def _dashboard_normalize_x_range(self, slot_index: Any, x_range: Any) -> Any:
+        """Clamp dashboard x-ranges so the newest candle stays visible without a large trailing gap."""
+        rows = self.dashboard_chart_rows[slot_index]
+        if not x_range or not rows:
+            return None
+        left, right = (float(x_range[0]), float(x_range[1]))
+        span = max(2.0, right - left)
+        latest_index = float(len(rows) - 1)
+        max_right = latest_index + P1_RIGHT_PAD
+        max_left = max(0.0, max_right - span)
+        normalized_right = min(right, max_right)
+        normalized_left = max(0.0, min(left, max_left))
+        if normalized_right - normalized_left < span:
+            normalized_left = max(0.0, normalized_right - span)
+            normalized_right = min(max_right, normalized_left + span)
+        if normalized_right <= normalized_left:
+            normalized_right = min(max_right, normalized_left + max(2.0, min(span, latest_index + P1_RIGHT_PAD + 1.0)))
+        return (normalized_left, normalized_right)
 
     def _dashboard_get_visible_rows(self, slot_index: Any, x_range: Any=None) -> Any:
         """Return visible chart rows for the requested dashboard slot."""
@@ -96,7 +115,9 @@ class DashboardMixin:
             span = max(P1_MIN_REUSABLE_SPAN, float(source_range[1]) - float(source_range[0]))
         else:
             span = max(20.0, min(P1_DEFAULT_STARTUP_SPAN, float(len(rows))))
-        anchored = (latest_index - span * P1_AUTO_ANCHOR, latest_index + span * (1.0 - P1_AUTO_ANCHOR))
+        anchored = self._dashboard_normalize_x_range(slot_index, (latest_index - span + P1_RIGHT_PAD, latest_index + P1_RIGHT_PAD))
+        if not anchored:
+            return
         self._dashboard_set_x_range(slot_index, anchored)
         self._dashboard_apply_auto_y_range(slot_index, anchored)
 
@@ -208,7 +229,6 @@ class DashboardMixin:
         for i, (t, info) in enumerate(sorted_items):
             price = info['price']
             change_pct = info['change']
-            abs_change = info.get('abs_change', 0.0)
             shares = tracker.get(t, {}).get('shares', 0)
             avg_price = tracker.get(t, {}).get('avg_price', 0)
             mv = shares * price if shares else 0
@@ -216,27 +236,27 @@ class DashboardMixin:
             dollar_gain = (price - avg_price) * shares if shares else 0
             is_up = change_pct >= 0
             sign = '+' if is_up else ''
-            text_color = QColor(CLR_UP) if is_up else QColor(CLR_DOWN)
-            row_bg = QColor(CLR_UP_BG) if is_up else QColor(CLR_DOWN_BG)
-            gain_color = QColor(CLR_UP) if dollar_gain >= 0 else QColor(CLR_DOWN)
+            text_color = self.theme_qcolor('accent_positive' if is_up else 'accent_negative')
+            row_bg = self.theme_qcolor('accent_positive_bg' if is_up else 'accent_negative_bg')
+            gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
             gain_sign = '+' if dollar_gain >= 0 else ''
             weight_str = f'{weight_pct:.1f}%' if shares else '—'
             gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares else '—'
-            cols = [t, f'${price:.2f}', f'{sign}${abs_change:.2f}', f'{sign}{change_pct:.2f}%', weight_str, gain_str]
+            cols = [t, f'${price:.2f}', f'{sign}{change_pct:.2f}%', weight_str, gain_str]
             for col, val in enumerate(cols):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setBackground(row_bg)
-                if col in (2, 3):
+                if col == 2:
                     item.setForeground(text_color)
-                elif col == 5 and shares:
+                elif col == 4 and shares:
                     item.setForeground(gain_color)
                 self.port_table.setItem(i, col, item)
             del_btn = QPushButton('×')
             del_btn.setFixedSize(20, 20)
-            del_btn.setStyleSheet('background-color: #770000; color: white; border-radius: 10px; font-weight: bold;')
+            del_btn.setStyleSheet(f'background-color: {self.theme_color("accent_negative_bg")}; color: {self.theme_color("text_primary")}; border-radius: 10px; font-weight: bold; border: 1px solid {self.theme_color("accent_negative")};')
             del_btn.clicked.connect(lambda checked, sym=t: self.remove_ticker(sym))
-            self.port_table.setCellWidget(i, 6, del_btn)
+            self.port_table.setCellWidget(i, 5, del_btn)
 
     def update_ui(self, data: Any) -> Any:
         """Update ui."""
@@ -249,9 +269,9 @@ class DashboardMixin:
                 price = info['price']
                 change = info['change']
                 sign = '+' if change >= 0 else ''
-                color = 'lime' if change >= 0 else 'red'
+                color = self.theme_color('accent_positive' if change >= 0 else 'accent_negative')
                 self.index_labels[idx].setText(f'{idx}: {price:.2f} ({sign}{change:.2f}%)')
-                self.index_labels[idx].setStyleSheet(f'color: {color}; font-weight: bold;')
+                self.index_labels[idx].setStyleSheet(f'color: {color}; font-weight: bold; background: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px; padding: 4px 8px;')
         main_targets = [item for item in data.get('targets', []) if item.get('ticker') in self.tickers]
         self.target_table.setRowCount(len(main_targets))
         for i, item in enumerate(main_targets):
@@ -270,7 +290,7 @@ class DashboardMixin:
                 upside = (float(target) - float(current)) / float(current) * 100
                 upside_str = f'{upside:+.1f}%'
                 upside_item = QTableWidgetItem(upside_str)
-                upside_item.setForeground(QColor('lime') if upside >= 0 else QColor('red'))
+                upside_item.setForeground(self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative'))
             except (TypeError, ValueError, ZeroDivisionError):
                 upside_item = QTableWidgetItem('N/A')
             upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -294,9 +314,9 @@ class DashboardMixin:
                 type_item = QTableWidgetItem(str(opt['type']))
                 type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if opt['type'] == 'Call':
-                    type_item.setForeground(QColor('lime'))
+                    type_item.setForeground(self.theme_qcolor('accent_positive'))
                 else:
-                    type_item.setForeground(QColor('red'))
+                    type_item.setForeground(self.theme_qcolor('accent_negative'))
                 table.setItem(row, 1, type_item)
                 strike_item = QTableWidgetItem(f"{opt['strike']:.1f}")
                 strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -350,16 +370,25 @@ class DashboardMixin:
                             points.append((idx, r[1], r[4], r[3], r[2]))
                             last_price = r[4]
                     self.dashboard_chart_rows[i] = list(df.itertuples())
-                    item = CandlestickItem(points)
+                    item = CandlestickItem(
+                        points,
+                        up_color=self.theme_color('chart_up_candle'),
+                        down_color=self.theme_color('chart_down_candle'),
+                    )
                     self.charts[i].addItem(item)
                     ma200_series = self.dashboard_chart_ma200[i]
                     if i == 2 and ma200_series is not None:
                         ma_values = [float(value) if not pd.isna(value) else float('nan') for value in ma200_series]
                         if ma_values:
-                            self.charts[i].plot(list(range(len(ma_values))), ma_values, pen=pg.mkPen('#f59e0b', width=1.8))
-                    price_line = pg.InfiniteLine(pos=last_price, angle=0, pen=pg.mkPen('w', style=Qt.PenStyle.DashLine))
+                            self.charts[i].plot(list(range(len(ma_values))), ma_values, pen=self.theme_pen('chart_ma', width=1.8))
+                    price_line = pg.InfiniteLine(pos=last_price, angle=0, pen=self.theme_pen('chart_reference', style=Qt.PenStyle.DashLine))
                     self.charts[i].addItem(price_line)
                     dates = df.index.to_list()
                     self.date_axes[i].set_dates(dates, interval)
                     self._dashboard_apply_auto_view(i, previous_range)
                     self.charts[i].setTitle(f'{t} - Current: ${last_price:.2f}')
+
+    def _apply_dashboard_theme(self) -> None:
+        """Refresh dashboard colors after a theme change."""
+        if getattr(self, 'last_data', None):
+            self.update_ui(self.last_data)

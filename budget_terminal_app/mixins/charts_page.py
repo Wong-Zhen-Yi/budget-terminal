@@ -40,7 +40,7 @@ class ChartsPageMixin:
             self.p10_active_indicators.append('200 MA')
         self.p10_auto_follow = True
         self.p10_chart_df = None
-        self.p10_chart_rows = []
+        self._p10_chart_rows = []
         self.p10_chart_stats = {}
         self.p10_rsi_series = None
         self.p10_ma200_series = None
@@ -65,14 +65,16 @@ class ChartsPageMixin:
 
         toolbar = QHBoxLayout()
         title = QLabel('<b>Charts</b>')
-        title.setStyleSheet('font-size: 18px; color: white;')
+        self.set_theme_role(title, 'page_title')
         self.p10_symbol_input = QLineEdit(self.p10_symbol)
         self.p10_symbol_input.setPlaceholderText('Ticker')
         self.p10_symbol_input.setFixedWidth(110)
         self.p10_symbol_input.returnPressed.connect(self._p10_load_from_input)
         self.p10_load_btn = QPushButton('Load')
+        self.set_theme_variant(self.p10_load_btn, 'accent')
         self.p10_load_btn.clicked.connect(self._p10_load_from_input)
         self.p10_refresh_btn = QPushButton('Refresh')
+        self.set_theme_variant(self.p10_refresh_btn, 'accent')
         self.p10_refresh_btn.clicked.connect(self._p10_refresh_chart)
         self.p10_auto_btn = QPushButton('Auto')
         self.p10_auto_btn.setCheckable(True)
@@ -97,7 +99,7 @@ class ChartsPageMixin:
 
         indicator_row = QHBoxLayout()
         indicator_label = QLabel('Indicators')
-        indicator_label.setStyleSheet('font-size: 11px; color: #7b8794; font-weight: bold;')
+        self.set_theme_role(indicator_label, 'muted')
         indicator_row.addWidget(indicator_label)
         indicator_row.addSpacing(8)
         for name in ('Volume', 'RSI', '200 MA'):
@@ -111,15 +113,17 @@ class ChartsPageMixin:
 
         info_strip = QHBoxLayout()
         self.p10_symbol_label = QLabel(self.p10_symbol)
-        self.p10_symbol_label.setStyleSheet('font-size: 22px; font-weight: bold; color: white;')
+        self.p10_symbol_label.setStyleSheet('font-size: 22px; font-weight: bold;')
         self.p10_price_label = QLabel('--')
-        self.p10_price_label.setStyleSheet('font-size: 20px; font-weight: bold; color: #f3f5f7;')
+        self.p10_price_label.setMinimumHeight(30)
+        self.p10_price_label.setMinimumWidth(92)
+        self.p10_price_label.setStyleSheet('font-size: 20px; font-weight: bold;')
         self.p10_change_label = QLabel('--')
-        self.p10_change_label.setStyleSheet('font-size: 13px; font-weight: bold; color: #888888;')
+        self.p10_change_label.setStyleSheet('font-size: 13px; font-weight: bold;')
         self.p10_ohlc_label = QLabel('O --  H --  L --  C --')
-        self.p10_ohlc_label.setStyleSheet('font-size: 12px; color: #9aa4ad;')
+        self.p10_ohlc_label.setStyleSheet('font-size: 12px;')
         self.p10_status_label = QLabel('Ready')
-        self.p10_status_label.setStyleSheet('font-size: 11px; color: #888888;')
+        self.set_theme_role(self.p10_status_label, 'status_muted')
         info_strip.addWidget(self.p10_symbol_label)
         info_strip.addSpacing(16)
         info_strip.addWidget(self.p10_price_label)
@@ -137,41 +141,29 @@ class ChartsPageMixin:
         self.p10_panels = QSplitter(Qt.Orientation.Vertical)
         self.p10_chart_axis = DateAxisItem(orientation='bottom')
         self.p10_main_plot = pg.PlotWidget(axisItems={'bottom': self.p10_chart_axis})
-        self.p10_main_plot.setBackground('#0b1220')
         self.p10_main_plot.showGrid(x=True, y=True, alpha=0.15)
         self.p10_main_plot.getPlotItem().setMenuEnabled(False)
         self.p10_main_plot.getPlotItem().hideAxis('left')
         self.p10_main_plot.getPlotItem().showAxis('right')
-        self.p10_main_plot.getPlotItem().getAxis('right').setTextPen('#8b9cad')
-        self.p10_main_plot.getPlotItem().getAxis('bottom').setTextPen('#8b9cad')
-        self.p10_main_plot.setStyleSheet('border: 1px solid #1f2937; border-radius: 6px;')
         self.p10_main_plot.getPlotItem().vb.sigXRangeChanged.connect(self._p10_on_x_range_changed)
         self.p10_main_plot.getPlotItem().vb.sigRangeChanged.connect(self._p10_refresh_overlay_positions)
         self.p10_volume_axis = DateAxisItem(orientation='bottom')
         self.p10_volume_plot = pg.PlotWidget(axisItems={'bottom': self.p10_volume_axis})
-        self.p10_volume_plot.setBackground('#0b1220')
         self.p10_volume_plot.showGrid(x=True, y=False, alpha=0.1)
         self.p10_volume_plot.getPlotItem().setMenuEnabled(False)
         self.p10_volume_plot.getPlotItem().hideAxis('left')
         self.p10_volume_plot.getPlotItem().showAxis('right')
-        self.p10_volume_plot.getPlotItem().getAxis('right').setTextPen('#66778a')
-        self.p10_volume_plot.getPlotItem().getAxis('bottom').setTextPen('#8b9cad')
         self.p10_volume_plot.setMaximumHeight(160)
         self.p10_volume_plot.setXLink(self.p10_main_plot)
-        self.p10_volume_plot.setStyleSheet('border: 1px solid #1f2937; border-radius: 6px;')
         self.p10_volume_plot.getPlotItem().vb.sigRangeChanged.connect(self._p10_refresh_overlay_positions)
         self.p10_rsi_axis = DateAxisItem(orientation='bottom')
         self.p10_rsi_plot = pg.PlotWidget(axisItems={'bottom': self.p10_rsi_axis})
-        self.p10_rsi_plot.setBackground('#0b1220')
         self.p10_rsi_plot.showGrid(x=True, y=True, alpha=0.1)
         self.p10_rsi_plot.getPlotItem().setMenuEnabled(False)
         self.p10_rsi_plot.getPlotItem().hideAxis('left')
         self.p10_rsi_plot.getPlotItem().showAxis('right')
-        self.p10_rsi_plot.getPlotItem().getAxis('right').setTextPen('#66778a')
-        self.p10_rsi_plot.getPlotItem().getAxis('bottom').setTextPen('#8b9cad')
         self.p10_rsi_plot.setMaximumHeight(160)
         self.p10_rsi_plot.setXLink(self.p10_main_plot)
-        self.p10_rsi_plot.setStyleSheet('border: 1px solid #1f2937; border-radius: 6px;')
         self.p10_rsi_plot.getPlotItem().vb.sigRangeChanged.connect(self._p10_refresh_overlay_positions)
         self.p10_panels.addWidget(self.p10_main_plot)
         self.p10_panels.addWidget(self.p10_volume_plot)
@@ -187,9 +179,9 @@ class ChartsPageMixin:
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(8)
         watchlist_title = QLabel('Watchlist')
-        watchlist_title.setStyleSheet('font-size: 14px; font-weight: bold; color: white;')
+        self.set_theme_role(watchlist_title, 'section_title')
         watchlist_help = QLabel('Your custom chart symbols.')
-        watchlist_help.setStyleSheet('font-size: 11px; color: #7b8794;')
+        self.set_theme_role(watchlist_help, 'muted')
         watchlist_help.setWordWrap(True)
         add_row = QHBoxLayout()
         self.p10_watchlist_input = QLineEdit()
@@ -199,20 +191,19 @@ class ChartsPageMixin:
         add_btn.setFixedWidth(32)
         add_btn.clicked.connect(self._p10_add_watchlist_symbol)
         rm_btn = QPushButton('Remove')
+        self.set_theme_variant(rm_btn, 'danger')
         rm_btn.clicked.connect(self._p10_remove_watchlist_symbol)
         add_row.addWidget(self.p10_watchlist_input, 1)
         add_row.addWidget(add_btn)
         add_row.addWidget(rm_btn)
         self.p10_watchlist = QListWidget()
-        self.p10_watchlist.setStyleSheet('QListWidget { background: #0b1220; border: 1px solid #1f2937; border-radius: 6px; color: white; }QListWidget::item { padding: 6px 8px; border-bottom: 1px solid #111827; }QListWidget::item:selected { background: #162033; }')
         self.p10_watchlist.currentItemChanged.connect(self._p10_watchlist_selection_changed)
         portfolio_title = QLabel('Portfolio')
-        portfolio_title.setStyleSheet('font-size: 14px; font-weight: bold; color: white;')
+        self.set_theme_role(portfolio_title, 'section_title')
         portfolio_help = QLabel('Read-only symbols from your Portfolio page.')
-        portfolio_help.setStyleSheet('font-size: 11px; color: #7b8794;')
+        self.set_theme_role(portfolio_help, 'muted')
         portfolio_help.setWordWrap(True)
         self.p10_portfolio_list = QListWidget()
-        self.p10_portfolio_list.setStyleSheet('QListWidget { background: #0b1220; border: 1px solid #1f2937; border-radius: 6px; color: white; }QListWidget::item { padding: 6px 8px; border-bottom: 1px solid #111827; }QListWidget::item:selected { background: #162033; }')
         self.p10_portfolio_list.currentItemChanged.connect(self._p10_watchlist_selection_changed)
         sidebar_layout.addWidget(watchlist_title)
         sidebar_layout.addWidget(watchlist_help)
@@ -231,14 +222,13 @@ class ChartsPageMixin:
         self._p10_rebuild_watchlists()
         self._p10_render_indicator_panels()
         self.p10_crosshair_proxy = pg.SignalProxy(self.p10_main_plot.scene().sigMouseMoved, rateLimit=30, slot=self._p10_on_mouse_moved)
+        self._apply_charts_page_theme()
 
-    def _p10_set_status(self, text: Any, color: Any='#888888') -> None:
+    def _p10_set_status(self, text: Any, status: Any='muted') -> None:
         """Set charts page status text."""
-        self.p10_status_label.setText(str(text))
-        self.p10_status_label.setStyleSheet(f'font-size: 11px; color: {color};')
+        self.set_status_text(self.p10_status_label, text, status=str(status))
         if hasattr(self, 'status_bar'):
-            self.status_bar.setText(str(text))
-            self.status_bar.setStyleSheet(f'color: {color}; font-size: 11px; padding: 2px;')
+            self.set_status_text(self.status_bar, text, status=str(status))
 
     def _p10_save_state(self) -> None:
         """Persist charts page settings."""
@@ -255,10 +245,9 @@ class ChartsPageMixin:
         self.p10_auto_btn.blockSignals(True)
         self.p10_auto_btn.setChecked(self.p10_auto_follow)
         self.p10_auto_btn.blockSignals(False)
-        if self.p10_auto_follow:
-            self.p10_auto_btn.setStyleSheet('QPushButton { background: #7c3aed; color: white; border: 1px solid #8b5cf6; border-radius: 4px; padding: 4px 10px; font-weight: bold; }')
-        else:
-            self.p10_auto_btn.setStyleSheet('QPushButton { background: #111827; color: #cbd5e1; border: 1px solid #334155; border-radius: 4px; padding: 4px 10px; }QPushButton:hover { background: #172033; }')
+        self.set_theme_variant(self.p10_auto_btn, 'accent' if self.p10_auto_follow else None)
+        self.p10_auto_btn.setProperty('bt_checked', 'true' if self.p10_auto_follow else 'false')
+        self._repolish_widget(self.p10_auto_btn)
 
     def _p10_toggle_auto_follow(self, checked: Any=False) -> None:
         """Switch between auto-follow and manual viewport modes."""
@@ -386,13 +375,9 @@ class ChartsPageMixin:
 
     def _p10_update_timeframe_button_styles(self) -> None:
         """Highlight the active timeframe button."""
+        self.update_checked_button_state(self._p10_timeframe_buttons, self.p10_timeframe_label)
         for label, btn in self._p10_timeframe_buttons.items():
-            is_active = label == self.p10_timeframe_label
-            btn.setChecked(is_active)
-            if is_active:
-                btn.setStyleSheet('QPushButton { background: #2563eb; color: white; border: 1px solid #3b82f6; border-radius: 4px; padding: 4px 8px; font-weight: bold; }')
-            else:
-                btn.setStyleSheet('QPushButton { background: #111827; color: #cbd5e1; border: 1px solid #334155; border-radius: 4px; padding: 4px 8px; }QPushButton:hover { background: #172033; }')
+            btn.setChecked(label == self.p10_timeframe_label)
 
     def _p10_update_indicator_button_styles(self) -> None:
         """Highlight active indicator buttons."""
@@ -401,10 +386,9 @@ class ChartsPageMixin:
             btn.blockSignals(True)
             btn.setChecked(is_active)
             btn.blockSignals(False)
-            if is_active:
-                btn.setStyleSheet('QPushButton { background: #0f3d2e; color: #d1fae5; border: 1px solid #10b981; border-radius: 4px; padding: 4px 8px; font-weight: bold; }')
-            else:
-                btn.setStyleSheet('QPushButton { background: #111827; color: #cbd5e1; border: 1px solid #334155; border-radius: 4px; padding: 4px 8px; }QPushButton:hover { background: #172033; }')
+            self.set_theme_variant(btn, 'positive' if is_active else None)
+            btn.setProperty('bt_checked', 'true' if is_active else 'false')
+            self._repolish_widget(btn)
 
     def _p10_toggle_indicator(self, name: Any, checked: Any=False) -> None:
         """Toggle an indicator panel without refetching chart data."""
@@ -506,7 +490,7 @@ class ChartsPageMixin:
             for row, symbol in enumerate(self.p10_custom_watchlist):
                 item = QListWidgetItem(symbol)
                 item.setData(Qt.ItemDataRole.UserRole, symbol)
-                item.setForeground(QColor('#cbd5e1'))
+                item.setForeground(self.theme_qcolor('text_secondary'))
                 self.p10_watchlist.addItem(item)
                 if symbol == self.p10_symbol:
                     watchlist_row = row
@@ -516,7 +500,7 @@ class ChartsPageMixin:
             for row, symbol in enumerate(portfolio_symbols):
                 item = QListWidgetItem(symbol)
                 item.setData(Qt.ItemDataRole.UserRole, symbol)
-                item.setForeground(QColor('#93c5fd'))
+                item.setForeground(self.theme_qcolor('accent'))
                 self.p10_portfolio_list.addItem(item)
                 if symbol == self.p10_symbol:
                     portfolio_row = row
@@ -541,7 +525,7 @@ class ChartsPageMixin:
         self._p10_active_request = request_id
         self.p10_load_btn.setEnabled(False)
         self.p10_refresh_btn.setEnabled(False)
-        self._p10_set_status(f'Loading {symbol} {self.p10_timeframe_label}...', '#60a5fa')
+        self._p10_set_status(f'Loading {symbol} {self.p10_timeframe_label}...', 'info')
 
         def _run() -> None:
             """Fetch chart data in the background."""
@@ -685,7 +669,7 @@ class ChartsPageMixin:
         self._p10_pending_x_range = None
         self._p10_update_indicator_panel_labels()
         self._set_data_collection_info(['yfinance'])
-        self._p10_set_status(f'Loaded {symbol} {self.p10_timeframe_label}.', '#80ff80')
+        self._p10_set_status(f'Loaded {symbol} {self.p10_timeframe_label}.', 'positive')
 
     def _p10_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main candlestick chart and lower indicator panels."""
@@ -704,14 +688,19 @@ class ChartsPageMixin:
             volume_value = float(getattr(row, 'Volume', 0.0) or 0.0)
             points.append((idx, open_value, close_value, low_value, high_value))
             volumes.append(volume_value)
-            volume_brushes.append(pg.mkBrush(CLR_UP if close_value >= open_value else CLR_DOWN))
-        candle_item = CandlestickItem(points)
+            volume_brushes.append(self.theme_brush('chart_volume_up' if close_value >= open_value else 'chart_volume_down'))
+        candle_item = CandlestickItem(
+            points,
+            up_color=self.theme_color('chart_up_candle'),
+            down_color=self.theme_color('chart_down_candle'),
+        )
         self.p10_main_plot.addItem(candle_item)
         if ma200_series is not None and '200 MA' in self.p10_active_indicators:
             ma_values = [float(value) if not pd.isna(value) else float('nan') for value in ma200_series]
             if ma_values:
-                self.p10_main_plot.plot(list(range(len(ma_values))), ma_values, pen=pg.mkPen('#f59e0b', width=1.8))
-        last_price_line = pg.InfiniteLine(pos=stats['close'], angle=0, pen=pg.mkPen('#94a3b8', width=1, style=Qt.PenStyle.DashLine))
+                self.p10_main_plot.plot(list(range(len(ma_values))), ma_values, pen=self.theme_pen('chart_ma', width=2.0), antialias=True)
+        last_close = float(stats.get('close', 0.0)) if isinstance(stats, dict) else 0.0
+        last_price_line = pg.InfiniteLine(pos=last_close, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
         self.p10_main_plot.addItem(last_price_line)
         dates = self.p10_chart_df.index.to_list()
         self.p10_chart_axis.set_dates(dates, interval)
@@ -723,9 +712,9 @@ class ChartsPageMixin:
         if rsi_series is not None:
             x_values = list(range(len(rsi_series)))
             y_values = [float(value) if not pd.isna(value) else float('nan') for value in rsi_series]
-            self.p10_rsi_plot.plot(x_values, y_values, pen=pg.mkPen('#a78bfa', width=1.6))
-            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=70, angle=0, pen=pg.mkPen('#f59e0b', width=1, style=Qt.PenStyle.DashLine)))
-            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=30, angle=0, pen=pg.mkPen('#10b981', width=1, style=Qt.PenStyle.DashLine)))
+            self.p10_rsi_plot.plot(x_values, y_values, pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
+            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine)))
+            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=30, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine)))
             self.p10_rsi_plot.setYRange(0, 100, padding=0.02)
         self._p10_update_indicator_panel_labels()
         self._p10_render_indicator_panels()
@@ -746,14 +735,19 @@ class ChartsPageMixin:
             return
         self.p10_load_btn.setEnabled(True)
         self.p10_refresh_btn.setEnabled(True)
-        self._p10_set_status(f'Chart load failed: {message}', '#f44336')
+        self._p10_set_status(f'Chart load failed: {message}', 'negative')
 
     def _p10_update_quote_header(self, stats: Any) -> None:
         """Update the quote and change header."""
+        if not stats:
+            self.p10_price_label.setText('--')
+            self.p10_change_label.setText('--')
+            self.p10_change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {self.theme_color("text_muted")};')
+            return
         close_value = float(stats.get('close', 0.0))
         change_value = float(stats.get('change_value', 0.0))
         change_pct = float(stats.get('change_pct', 0.0))
-        change_color = CLR_UP if change_value >= 0 else CLR_DOWN
+        change_color = self.theme_color('accent_positive' if change_value >= 0 else 'accent_negative')
         sign = '+' if change_value >= 0 else ''
         self.p10_price_label.setText(f'${close_value:,.2f}')
         self.p10_change_label.setText(f'{sign}${change_value:,.2f} ({sign}{change_pct:.2f}%)')
@@ -823,10 +817,28 @@ class ChartsPageMixin:
                         latest_rsi = float(value)
                         break
             rsi_text = f"RSI(14) {latest_rsi:.2f}" if latest_rsi is not None else 'RSI(14) --'
-        self._p10_set_overlay_text('ma200', self.p10_main_plot, ma_text, '#f59e0b')
-        self._p10_set_overlay_text('volume', self.p10_volume_plot, volume_text, '#94a3b8')
-        self._p10_set_overlay_text('rsi', self.p10_rsi_plot, rsi_text, '#a78bfa')
+        self._p10_set_overlay_text('ma200', self.p10_main_plot, ma_text, self.theme_color('chart_ma'))
+        self._p10_set_overlay_text('volume', self.p10_volume_plot, volume_text, self.theme_color('chart_reference'))
+        self._p10_set_overlay_text('rsi', self.p10_rsi_plot, rsi_text, self.theme_color('chart_rsi'))
         self._p10_refresh_overlay_positions()
+
+    def _apply_charts_page_theme(self) -> None:
+        """Refresh charts-page theme-dependent widgets and plots."""
+        self.style_plot_widget(self.p10_main_plot)
+        self.style_plot_widget(self.p10_volume_plot, show_y_grid=False)
+        self.style_plot_widget(self.p10_rsi_plot)
+        self.p10_symbol_label.setStyleSheet(f'font-size: 22px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.p10_price_label.setStyleSheet(f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.p10_ohlc_label.setStyleSheet(f'font-size: 12px; color: {self.theme_color("text_secondary")};')
+        self._p10_set_status(self.p10_status_label.text(), self.p10_status_label.property('bt_status') or 'muted')
+        self._p10_update_quote_header(self.p10_chart_stats or {'close': 0.0, 'change_value': 0.0, 'change_pct': 0.0})
+        self._p10_update_auto_button_style()
+        self._p10_update_timeframe_button_styles()
+        self._p10_update_indicator_button_styles()
+        self._p10_rebuild_watchlists()
+        if self._p10_chart_rows:
+            interval = self._p10_timeframe_map.get(self.p10_timeframe_label, self._p10_timeframe_map['1 Day'])[1]
+            self._p10_render_main_chart(self.p10_chart_stats, interval, self.p10_rsi_series, self.p10_ma200_series)
 
     def _p10_show_row_details(self, row_index: Any) -> None:
         """Update the OHLC readout for a chart row."""

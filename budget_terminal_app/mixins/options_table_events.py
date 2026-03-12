@@ -82,7 +82,7 @@ class OptionsTableEventsMixin:
                 placeholder = QTableWidgetItem('fetching...')
                 placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 placeholder.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                placeholder.setForeground(QColor('#888888'))
+                placeholder.setForeground(self.theme_qcolor('text_muted'))
                 self.p4_opt_table.setItem(row, 2, placeholder)
                 if ticker:
                     row_id = str(pos.get('row_id', '') or '').strip()
@@ -127,14 +127,14 @@ class OptionsTableEventsMixin:
             except:
                 pass
         itm_text = '—'
-        itm_color = '#888888'
+        itm_color = self.theme_color('text_muted')
         if underlying_price > 0 and strike > 0:
             if is_call:
                 itm = underlying_price > strike
             else:
                 itm = underlying_price < strike
             itm_text = 'ITM' if itm else 'OTM'
-            itm_color = '#ffd700' if itm else '#4a90e2'
+            itm_color = self.theme_color('warning' if itm else 'accent')
         pl_dollar = (premium - current if is_seller else current - premium) * contracts * 100
         if is_seller:
             capital = strike * contracts * 100 if strike > 0 else 0
@@ -161,12 +161,12 @@ class OptionsTableEventsMixin:
             if color:
                 it.setForeground(QColor(color))
             return it
-        dte_color = '#f44336' if 0 < dte <= 7 else '#ffa726' if dte <= 30 else '#aaaaaa'
+        dte_color = self.theme_color('accent_negative' if 0 < dte <= 7 else 'warning' if dte <= 30 else 'text_muted')
         t.setItem(row, 3, _ro(f'{dte}d ({itm_text})' if expiry else '—', dte_color if not expiry else itm_color))
         if delta:
             prob_itm = abs(delta) * 100
-            t.setItem(row, 9, _ro(f'{delta:.3f} ({prob_itm:.0f}%)', '#aaa'))
-        pl_clr = '#4caf50' if pl_dollar >= 0 else '#f44336'
+            t.setItem(row, 9, _ro(f'{delta:.3f} ({prob_itm:.0f}%)', self.theme_color('text_secondary')))
+        pl_clr = self.theme_color('accent_positive' if pl_dollar >= 0 else 'accent_negative')
         t.setItem(row, 11, _ro(f'{pl_dollar:+.2f}', pl_clr))
         t.setItem(row, 12, _ro(f'{return_pct:+.1f}%', pl_clr))
         t.setItem(row, 13, _ro(f'{annual_pct:+.1f}%', pl_clr))

@@ -9,8 +9,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build_fixed/
 develop-eggs/
 dist/
+dist_fixed/
 downloads/
 eggs/
 .eggs/
@@ -31,6 +33,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!budget_terminal.spec
 
 # Installer logs
 pip-log.txt

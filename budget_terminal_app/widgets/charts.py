@@ -5,11 +5,20 @@ from ..persistence import fmt_num
 
 class CandlestickItem(pg.GraphicsObject):
 
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, up_color: Any='#4caf50', down_color: Any='#f44336') -> None:
         """Initialize the object."""
         pg.GraphicsObject.__init__(self)
         self.data = data
+        self.up_color = up_color
+        self.down_color = down_color
         self.generatePicture()
+
+    def set_colors(self, up_color: Any, down_color: Any) -> None:
+        """Update the candlestick palette and repaint."""
+        self.up_color = up_color
+        self.down_color = down_color
+        self.generatePicture()
+        self.update()
 
     def generatePicture(self) -> None:
         """Handle generatePicture."""
@@ -19,9 +28,9 @@ class CandlestickItem(pg.GraphicsObject):
         w = 0.6
         for t, open, close, min, max in self.data:
             if open > close:
-                p.setBrush(pg.mkBrush('r'))
+                p.setBrush(pg.mkBrush(self.down_color))
             else:
-                p.setBrush(pg.mkBrush('g'))
+                p.setBrush(pg.mkBrush(self.up_color))
             p.drawLine(pg.QtCore.QPointF(t, min), pg.QtCore.QPointF(t, max))
             p.drawRect(pg.QtCore.QRectF(t - w / 2, open, w, close - open))
         p.end()

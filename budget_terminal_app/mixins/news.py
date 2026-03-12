@@ -34,7 +34,7 @@ class NewsMixin:
         panels_row = QHBoxLayout()
 
         portfolio_box = QGroupBox('Portfolio News')
-        portfolio_box.setStyleSheet('QGroupBox { font-weight: bold; color: #aaa; }')
+        self.set_theme_role(portfolio_box, 'panel')
         portfolio_layout = QVBoxLayout(portfolio_box)
         portfolio_layout.setContentsMargins(4, 8, 4, 4)
         self.p3_portfolio_table = self._make_news_table(self._open_news_link_table, on_row_selected=self._on_news_row_selected)
@@ -42,7 +42,7 @@ class NewsMixin:
         panels_row.addWidget(portfolio_box, 1)
 
         macro_box = QGroupBox('Market && Macro News')
-        macro_box.setStyleSheet('QGroupBox { font-weight: bold; color: #aaa; }')
+        self.set_theme_role(macro_box, 'panel')
         macro_layout = QVBoxLayout(macro_box)
         macro_layout.setContentsMargins(4, 8, 4, 4)
         self.p3_macro_table = self._make_news_table(self._open_news_link_table, on_row_selected=self._on_news_row_selected)
@@ -50,21 +50,21 @@ class NewsMixin:
         panels_row.addWidget(macro_box, 1)
 
         summarizer_box = QGroupBox('News Briefing')
-        summarizer_box.setStyleSheet('QGroupBox { font-weight: bold; color: #aaa; }')
+        self.set_theme_role(summarizer_box, 'panel')
         summarizer_layout = QVBoxLayout(summarizer_box)
         summarizer_layout.setContentsMargins(6, 10, 6, 6)
         summarizer_layout.setSpacing(6)
         self.p3_summary_text = QTextEdit()
         self.p3_summary_text.setReadOnly(True)
-        self.p3_summary_text.setStyleSheet('QTextEdit { background: #0d0d1f; color: #ddd; border: 1px solid #333; border-radius: 4px; font-size: 12px; padding: 6px; }')
+        self.p3_summary_text.setStyleSheet('font-size: 12px; padding: 6px;')
         self.p3_summary_text.setPlaceholderText("Click a headline to analyze it, or press 'Generate Briefing' for a full summary.")
         summarizer_layout.addWidget(self.p3_summary_text, 1)
         self.p3_summary_status = QLabel('')
-        self.p3_summary_status.setStyleSheet('color: #888; font-size: 11px;')
+        self.set_theme_role(self.p3_summary_status, 'status_muted')
         self.p3_summary_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         summarizer_layout.addWidget(self.p3_summary_status)
         summarize_all_btn = QPushButton('Generate Briefing')
-        summarize_all_btn.setStyleSheet('QPushButton { background: #1a3a5c; color: #7ec8f7; border: 1px solid #2a5a8c; border-radius: 4px; padding: 5px; font-weight: bold; }QPushButton:hover { background: #1e4a7a; }QPushButton:disabled { color: #555; border-color: #333; }')
+        self.set_theme_variant(summarize_all_btn, 'accent')
         summarize_all_btn.clicked.connect(self._summarize_all_news)
         summarizer_layout.addWidget(summarize_all_btn)
         self._p3_summarizing = False
@@ -73,7 +73,7 @@ class NewsMixin:
 
         crawler_container = QWidget()
         crawler_container.setFixedHeight(28)
-        crawler_container.setStyleSheet('background-color: #1a1a2e;')
+        crawler_container.setStyleSheet(f'background-color: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px;')
         crawler_container.setMinimumWidth(0)
         crawler_outer = QHBoxLayout(crawler_container)
         crawler_outer.setContentsMargins(0, 0, 0, 0)
@@ -82,9 +82,9 @@ class NewsMixin:
         self.p3_crawler_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.p3_crawler_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.p3_crawler_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.p3_crawler_scroll.setStyleSheet('background-color: #1a1a2e;')
+        self.p3_crawler_scroll.setStyleSheet(f'background-color: {self.theme_color("panel_background")};')
         self.p3_crawler_label = QLabel('  Waiting for news...  ')
-        self.p3_crawler_label.setStyleSheet('color: #ffd700; background-color: #1a1a2e; font-family: monospace; font-weight: bold; font-size: 13px;')
+        self.p3_crawler_label.setStyleSheet(f'color: {self.theme_color("warning")}; background-color: {self.theme_color("panel_background")}; font-family: monospace; font-weight: bold; font-size: 13px;')
         self.p3_crawler_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.p3_crawler_label.adjustSize()
         self.p3_crawler_scroll.setWidget(self.p3_crawler_label)
@@ -93,6 +93,11 @@ class NewsMixin:
         self._crawler_offset = 0
         self.p3_crawler_timer = QTimer()
         self.p3_crawler_timer.timeout.connect(self._scroll_crawler)
+
+    def _apply_news_theme(self) -> None:
+        """Refresh theme-dependent news page widgets."""
+        if hasattr(self, 'p3_summary_status'):
+            self.set_status_text(self.p3_summary_status, self.p3_summary_status.text(), status=self.p3_summary_status.property('bt_status') or 'muted')
 
     def _scroll_crawler(self) -> None:
         """Handle scroll crawler."""

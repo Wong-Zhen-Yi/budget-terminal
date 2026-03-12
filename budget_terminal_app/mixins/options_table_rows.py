@@ -25,7 +25,7 @@ class OptionsTableRowsMixin:
         item = t.item(row, 2)
         if item and (not t.cellWidget(row, 2)):
             item.setText('fetching...')
-            item.setForeground(QColor('#888888'))
+            item.setForeground(self.theme_qcolor('text_muted'))
 
     def _add_options_row(self) -> None:
         """Add a blank options position row."""
@@ -57,7 +57,6 @@ class OptionsTableRowsMixin:
         strategy_combo = QComboBox()
         strategy_combo.addItems(list(getattr(self, '_OPT_STRATEGIES', DEFAULT_OPT_STRATEGIES)))
         strategy_combo.setCurrentText(pos.get('strategy', 'Calls'))
-        strategy_combo.setStyleSheet('QComboBox { background: #1a1a2e; color: white; border: 1px solid #3a3a5a; border-radius: 3px; padding: 2px 4px; }QComboBox::drop-down { border: none; }QComboBox QAbstractItemView { background: #1a1a2e; color: white; selection-background-color: #2a2a5a; }')
         strategy_combo.currentTextChanged.connect(partial(self._on_strategy_changed_item, ticker_item))
         t.setCellWidget(row, 1, strategy_combo)
         exp_saved = pos.get('expiry', '')
@@ -66,7 +65,7 @@ class OptionsTableRowsMixin:
         expiry_placeholder = QTableWidgetItem(placeholder_text)
         expiry_placeholder.setFlags(ro_flags)
         expiry_placeholder.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        expiry_placeholder.setForeground(QColor('#888888'))
+        expiry_placeholder.setForeground(self.theme_qcolor('text_muted'))
         t.setItem(row, 2, expiry_placeholder)
         t.setItem(row, 3, _item('—', editable=False))
         t.setItem(row, 4, _item(f"{pos.get('strike', 0.0):.2f}"))
@@ -82,12 +81,12 @@ class OptionsTableRowsMixin:
         status_combo = QComboBox()
         status_combo.addItems(list(getattr(self, '_OPT_STATUSES', DEFAULT_OPT_STATUSES)))
         status_combo.setCurrentText(pos.get('status', 'Open'))
-        status_combo.setStyleSheet('QComboBox { background: #1a1a2e; color: white; border: 1px solid #3a3a5a; border-radius: 3px; padding: 2px 4px; }QComboBox::drop-down { border: none; }QComboBox QAbstractItemView { background: #1a1a2e; color: white; selection-background-color: #2a2a5a; }')
         status_combo.currentTextChanged.connect(partial(self._on_status_changed_item, ticker_item))
         t.setCellWidget(row, 14, status_combo)
         rm_btn = QPushButton('×')
         rm_btn.setFixedSize(28, 28)
-        rm_btn.setStyleSheet('QPushButton { background: #3a1a1a; color: #f44336; border: 1px solid #5a2a2a; border-radius: 4px; font-weight: bold; font-size: 14px; }QPushButton:hover { background: #5a1a1a; }')
+        self.set_theme_variant(rm_btn, 'danger')
+        rm_btn.setStyleSheet(f'font-weight: bold; font-size: 14px; color: {self.theme_color("accent_negative")};')
         rm_btn.clicked.connect(partial(self._remove_options_row, row))
         t.setCellWidget(row, 15, rm_btn)
         t.blockSignals(False)
@@ -105,9 +104,9 @@ class OptionsTableRowsMixin:
             cur = p.get('current_price', 0)
             qty = p.get('contracts', 1)
             total_pl += (prem - cur if is_seller else cur - prem) * qty * 100
-        color = '#4caf50' if total_pl >= 0 else '#f44336'
+        color = self.theme_color('accent_positive' if total_pl >= 0 else 'accent_negative')
         self.p4_opt_pl_label.setText(f'Options P&L:  {total_pl:+.2f}')
-        self.p4_opt_pl_label.setStyleSheet(f'QLabel {{ background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px; padding: 6px 12px; font-size: 13px; font-weight: bold; color: {color}; }}')
+        self.p4_opt_pl_label.setStyleSheet(f'background: {self.theme_color("background_secondary")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; padding: 6px 12px; font-size: 13px; font-weight: bold; color: {color};')
 
     def _remove_options_row(self, row: Any, *_: Any) -> None:
         """Remove an options position row."""

@@ -18,3 +18,64 @@ This project is now organized as a small package around the `BudgetTerminalApp` 
 
 ## Development Notes
 The refactor is structural only: data files, launch command, and worker/page behavior remain unchanged. New modules were kept small so page logic can be edited in isolation, and the launcher remains compatible with `python budget_terminal.py`.
+
+## Windows .exe Build
+This is a `PyQt6` desktop GUI app, so the recommended packaging target is a windowed PyInstaller build using the top-level launcher `budget_terminal.py`.
+
+The default build is `one-folder`, not `one-file`.
+- `one-folder` is more reliable for Qt applications.
+- It usually starts faster and is easier to debug.
+- It tends to trigger fewer antivirus false positives than `one-file`.
+
+### Build prerequisites
+- Windows with Python 3.13+ available as `py` or `python`
+- Internet access the first time so `pip` can install build dependencies
+
+### Build command
+Run:
+
+```bat
+build_exe.bat
+```
+
+The script will:
+- create `.venv` if needed
+- install runtime requirements plus `pyinstaller`
+- remove old `build/` and `dist/` folders
+- build the packaged app from `budget_terminal.spec`
+
+### Build output
+After a successful build, the distributable app will be in:
+
+```text
+dist\BudgetTerminal\
+```
+
+The main executable will be:
+
+```text
+dist\BudgetTerminal\BudgetTerminal.exe
+```
+
+### Notes for packaged runs
+- The app is built as windowed/no-console.
+- Bundled assets such as `budget_terminal_app/assets/qr-code.png` are included in the executable folder.
+- User-writable files are stored under `%LOCALAPPDATA%\BudgetTerminal` instead of beside the executable. This includes:
+  - `portfolio.json`
+  - `portfolio_tracker.json`
+  - `options_tracker.json`
+  - `net_worth.json`
+  - `config.json`
+  - `fundamentals_config.json`
+  - `p9_config.json`
+  - `budget_cache.db`
+  - screenshots created from the app
+
+### Rebuilding after code changes
+After updating the source, rerun:
+
+```bat
+build_exe.bat
+```
+
+That regenerates the contents of `dist\BudgetTerminal\` with the latest code.

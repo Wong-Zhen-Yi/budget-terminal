@@ -1,18 +1,20 @@
 from __future__ import annotations
 from typing import Any
 from .dependencies import *
+from .paths import user_data_path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = 2
-APP_CONFIG_FILE = BASE_DIR / 'budget_terminal_app' / 'config.json'
+APP_CONFIG_FILE = user_data_path('config.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
+DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
 MAX_PORTFOLIOS = 3
 MULTI_PORTFOLIO_VERSION = 2
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
+SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'],)
 
 
 def _read_json(path: Any, default: Any) -> Any:
@@ -46,6 +48,12 @@ def _normalize_portfolio_id(value: Any) -> Any:
     """Normalize a requested portfolio id into a known fixed slot id."""
     text = str(value or '').strip()
     return text if text in PORTFOLIO_IDS else DEFAULT_MAIN_PORTFOLIO_ID
+
+
+def _normalize_theme_setting(value: Any) -> Any:
+    """Clamp persisted theme ids to the currently supported user-selectable set."""
+    text = str(value or '').strip()
+    return text if text in SUPPORTED_THEME_IDS else DEFAULT_THEME_SETTINGS['selected_theme']
 
 
 def _normalize_chart_slots(chart_slots: Any) -> Any:
@@ -365,7 +373,7 @@ def fmt_num(val: Any) -> Any:
     else:
         s = f'{abs_val:.2f}'
     return f'-{s}' if neg else s
-PORTFOLIO_FILE = BASE_DIR / 'portfolio.json'
+PORTFOLIO_FILE = user_data_path('portfolio.json')
 
 
 def load_all_portfolios_state() -> Any:
@@ -441,7 +449,7 @@ def save_tickers(portfolio: Any, chart_slots: Any=None, portfolio_id: Any=None) 
     state['portfolios'][active_id]['portfolio'] = list(portfolio) if isinstance(portfolio, list) else []
     state['portfolios'][active_id]['chart_slots'] = _sanitize_chart_slots(chart_slots if chart_slots is not None else state['portfolios'][active_id].get('chart_slots'))
     save_all_portfolios_state(state)
-TRACKER_FILE = BASE_DIR / 'portfolio_tracker.json'
+TRACKER_FILE = user_data_path('portfolio_tracker.json')
 
 def load_tracker_data(portfolio_id: Any=None) -> Any:
     """Load tracker data."""
@@ -453,7 +461,7 @@ def save_tracker_data(data: Any, portfolio_id: Any=None) -> None:
     active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['portfolio_tracker'] = data if isinstance(data, dict) else {}
     save_all_portfolios_state(state)
-OPTIONS_FILE = BASE_DIR / 'options_tracker.json'
+OPTIONS_FILE = user_data_path('options_tracker.json')
 
 def load_options_data(portfolio_id: Any=None) -> Any:
     """Load options data."""
@@ -465,7 +473,7 @@ def save_options_data(data: Any, portfolio_id: Any=None) -> None:
     active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['options_tracker'] = list(data) if isinstance(data, list) else []
     save_all_portfolios_state(state)
-NETWORTH_FILE = BASE_DIR / 'net_worth.json'
+NETWORTH_FILE = user_data_path('net_worth.json')
 
 def load_networth_data() -> Any:
     """Load networth data."""
@@ -591,6 +599,26 @@ def save_portfolio_preferences(settings: Any) -> Any:
     }
     save_app_config(current)
     return state
+
+
+def load_theme_settings() -> Any:
+    """Load persisted UI theme preferences."""
+    config = load_app_config()
+    saved = config.get('theme', {})
+    if not isinstance(saved, dict):
+        saved = {}
+    return {'selected_theme': _normalize_theme_setting(saved.get('selected_theme'))}
+
+
+def save_theme_settings(settings: Any) -> Any:
+    """Persist UI theme preferences in app config."""
+    current = load_app_config()
+    payload = load_theme_settings()
+    if isinstance(settings, dict):
+        payload['selected_theme'] = _normalize_theme_setting(settings.get('selected_theme', payload['selected_theme']))
+    current['theme'] = payload
+    save_app_config(current)
+    return payload
 
 
 def load_chart_page_settings() -> Any:

@@ -55,8 +55,9 @@ class SimpleChartsMixin:
             pen = pg.mkPen(color, width=1)
             return pg.BarGraphItem(x=x, height=heights, width=width, brush=brush, pen=pen)
 
-        def _add_labels(pw: Any, x_positions: Any, heights: Any, color: Any='#ffffff', grouped: Any=False) -> None:
+        def _add_labels(pw: Any, x_positions: Any, heights: Any, color: Any=None, grouped: Any=False) -> None:
             """Handle add labels."""
+            color = color or self.theme_color('text_primary')
             font = pg.QtGui.QFont('Arial', 8 if grouped else 10, pg.QtGui.QFont.Weight.Bold)
             for i, (xi, h) in enumerate(zip(x_positions, heights)):
                 if h == 0:
@@ -116,7 +117,7 @@ class SimpleChartsMixin:
                 swatch.setFixedSize(12, 12)
                 swatch.setStyleSheet(f'background: {color}; border-radius: 2px;')
                 text = QLabel(name)
-                text.setStyleSheet('color: white; font-size: 11px; background: transparent;')
+                text.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 11px; background: transparent;')
                 bar_layout.addWidget(swatch)
                 bar_layout.addWidget(text)
                 bar_layout.addSpacing(12)
@@ -146,8 +147,8 @@ class SimpleChartsMixin:
         vals, labels, _ = _get_series(fin_df, ['total revenue'])
         if vals:
             x = list(range(len(vals)))
-            pw.addItem(_solid_bars(x, vals, '#4488ff'))
-            _add_labels(pw, x, vals, '#88bbff')
+            pw.addItem(_solid_bars(x, vals, self.theme_series_color(0)))
+            _add_labels(pw, x, vals, self.theme_color('text_secondary'))
             _set_ticks(pw, labels)
             _set_x_range(pw, len(vals))
             _set_y_range(pw, vals)
@@ -157,8 +158,8 @@ class SimpleChartsMixin:
         vals, labels, _ = _get_series(fin_df, ['net income'])
         if vals:
             x = list(range(len(vals)))
-            pw.addItem(_solid_bars(x, vals, '#00e5cc'))
-            _add_labels(pw, x, vals, '#88ffee')
+            pw.addItem(_solid_bars(x, vals, self.theme_series_color(1)))
+            _add_labels(pw, x, vals, self.theme_color('text_secondary'))
             _set_ticks(pw, labels)
             _set_x_range(pw, len(vals))
             _set_y_range(pw, vals)
@@ -168,7 +169,7 @@ class SimpleChartsMixin:
         op_series = _get_series(cf_df, ['operating cash flow', 'cash from operations'])
         fcf_series = _get_series(cf_df, ['free cash flow'])
         if op_series[0] or fcf_series[0]:
-            _grouped_chart(pw, self.p2_simple_legend_bars[2], [op_series, fcf_series], [-0.22, +0.22], [('#ff44aa', '#ff88cc', 'Operating CF'), ('#ff8844', '#ffbb88', 'Free CF')])
+            _grouped_chart(pw, self.p2_simple_legend_bars[2], [op_series, fcf_series], [-0.22, +0.22], [(self.theme_series_color(2), self.theme_color('text_secondary'), 'Operating CF'), (self.theme_series_color(3), self.theme_color('text_secondary'), 'Free CF')])
         pw = self.p2_simple_charts[3]
         pw.clear()
         _clear_legend_bar(self.p2_simple_legend_bars[3])
@@ -181,8 +182,8 @@ class SimpleChartsMixin:
                 labels = [_col_label(c) for c in all_fin_cols]
         if vals:
             x = list(range(len(vals)))
-            pw.addItem(_solid_bars(x, vals, '#cc44ff'))
-            _add_labels(pw, x, vals, '#dd88ff')
+            pw.addItem(_solid_bars(x, vals, self.theme_series_color(4)))
+            _add_labels(pw, x, vals, self.theme_color('text_secondary'))
             _set_ticks(pw, labels)
             _set_x_range(pw, len(vals))
             _set_y_range(pw, vals)
@@ -192,11 +193,11 @@ class SimpleChartsMixin:
         cash_series = _get_series(bs_df, ['cash and cash equivalents', 'cash equivalents'])
         debt_series = _get_series(bs_df, ['total debt', 'long term debt'])
         if cash_series[0] or debt_series[0]:
-            _grouped_chart(pw, self.p2_simple_legend_bars[4], [cash_series, debt_series], [-0.25, +0.25], [('#00e5cc', '#88ffee', 'Cash'), ('#ff4444', '#ff9999', 'Debt')])
+            _grouped_chart(pw, self.p2_simple_legend_bars[4], [cash_series, debt_series], [-0.25, +0.25], [(self.theme_color('accent_positive'), self.theme_color('text_secondary'), 'Cash'), (self.theme_color('accent_negative'), self.theme_color('text_secondary'), 'Debt')])
         pw = self.p2_simple_charts[5]
         pw.clear()
         _clear_legend_bar(self.p2_simple_legend_bars[5])
         sga_series = _get_series(fin_df, ['selling general', 'general and administrative'])
         rd_series = _get_series(fin_df, ['research and development'])
         if sga_series[0] or rd_series[0]:
-            _grouped_chart(pw, self.p2_simple_legend_bars[5], [sga_series, rd_series], [-0.25, +0.25], [('#4488ff', '#88bbff', 'SG&A'), ('#00e5cc', '#88ffee', 'R&D')])
+            _grouped_chart(pw, self.p2_simple_legend_bars[5], [sga_series, rd_series], [-0.25, +0.25], [(self.theme_series_color(0), self.theme_color('text_secondary'), 'SG&A'), (self.theme_series_color(1), self.theme_color('text_secondary'), 'R&D')])

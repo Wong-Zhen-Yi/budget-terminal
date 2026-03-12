@@ -93,8 +93,8 @@ class PortfolioMetricsMixin:
         """Handle set tracker row."""
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         ed_flags = ro_flags | Qt.ItemFlag.ItemIsEditable
-        gain_color = QColor(CLR_UP) if dollar_gain >= 0 else QColor(CLR_DOWN)
-        change_color = QColor(CLR_UP) if change >= 0 else QColor(CLR_DOWN)
+        gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
+        change_color = self.theme_qcolor('accent_positive' if change >= 0 else 'accent_negative')
 
         def _item(text: Any, flags: Any=ro_flags, color: Any=None) -> Any:
             """Handle item."""
@@ -119,7 +119,7 @@ class PortfolioMetricsMixin:
         self.p4_table.setItem(row, P4_PORTFOLIO_COL_GROWTH, _item(f'{sign3}{growth:.1f}%', color=gain_color))
         del_btn = QPushButton('X')
         del_btn.setFixedSize(22, 22)
-        del_btn.setStyleSheet('background-color: #770000; color: white; border-radius: 11px; font-weight: bold;')
+        del_btn.setStyleSheet(f'background-color: {self.theme_color("accent_negative_bg")}; color: {self.theme_color("text_primary")}; border-radius: 11px; font-weight: bold; border: 1px solid {self.theme_color("accent_negative")};')
         if self.active_portfolio_id == self.main_portfolio_id:
             del_btn.clicked.connect(lambda checked=False, sym=ticker: self.remove_ticker(sym))
         else:
@@ -157,13 +157,13 @@ class PortfolioMetricsMixin:
         if not tickers:
             return
         values = [results[t] for t in tickers]
-        for xi, (val, color) in enumerate(zip(values, [CLR_UP if v >= 0 else CLR_DOWN for v in values])):
+        for xi, (val, color) in enumerate(zip(values, [self.theme_color('accent_positive' if v >= 0 else 'accent_negative') for v in values])):
             pw.addItem(pg.BarGraphItem(x=[xi], height=[val], width=0.6, brush=pg.mkBrush(color), pen=pg.mkPen(color)))
             sign = '+' if val >= 0 else ''
             label = pg.TextItem(text=f'{sign}{val:.1f}%', color=color, anchor=(0.5, 1.0 if val >= 0 else 0.0))
             label.setPos(xi, val)
             pw.addItem(label)
-        pw.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#555555', width=1)))
+        pw.addItem(pg.InfiniteLine(pos=0, angle=0, pen=self.theme_pen('chart_reference', width=1)))
         ax = pw.getAxis('bottom')
         ax.setTicks([[(i, t) for i, t in enumerate(tickers)]])
         ax.setStyle(tickFont=self.font())
@@ -183,20 +183,22 @@ class PortfolioMetricsMixin:
             pw.getPlotItem().hideAxis('left')
             return
         values = [weights[ticker] for ticker in tickers]
-        colors = getattr(PieChartWidget, 'COLORS', ['#4fc3f7'])
+        colors = list(self.theme_pie_palette())
         brushes = [pg.mkBrush(colors[i % len(colors)]) for i in range(len(tickers))]
         pens = [pg.mkPen(colors[i % len(colors)]) for i in range(len(tickers))]
+        max_value = max(values) if values else 1
+        label_offset = max(max_value * 0.04, 0.6)
         for xi, (ticker, val, brush, pen) in enumerate(zip(tickers, values, brushes, pens)):
             pw.addItem(pg.BarGraphItem(x=[xi], height=[val], width=0.6, brush=brush, pen=pen))
-            label = pg.TextItem(text=f'{val:.1f}%', color='white', anchor=(0.5, 0.0))
-            label.setPos(xi, val)
+            label = pg.TextItem(text=f'{val:.1f}%', color=self.theme_color('text_primary'), anchor=(0.5, 1.0))
+            label.setPos(xi, val + label_offset)
             pw.addItem(label)
         ax = pw.getAxis('bottom')
         ax.setTicks([[(i, t) for i, t in enumerate(tickers)]])
         ax.setStyle(tickFont=self.font())
         pw.showAxis('bottom')
         pw.showAxis('left')
-        pw.setYRange(0, max(values) * 1.25 if values else 1)
+        pw.setYRange(0, max_value + label_offset + max(max_value * 0.15, 0.5))
         pw.setXRange(-0.6, len(tickers) - 0.4)
 
     def _launch_worker(self, worker_obj: Any, finished_slot: Any, flag_attr: Any) -> Any:
@@ -262,16 +264,16 @@ class PortfolioMetricsMixin:
     def _mktcap_color(self, mc: Any) -> Any:
         """Handle mktcap color."""
         if mc is None:
-            return '#888888'
+            return self.theme_color('text_muted')
         if mc >= 200000000000:
-            return '#ffd700'
+            return self.theme_color('warning')
         if mc >= 10000000000:
-            return '#4fc3f7'
+            return self.theme_series_color(0)
         if mc >= 2000000000:
-            return '#81c784'
+            return self.theme_color('accent_positive')
         if mc >= 300000000:
-            return '#ffb74d'
-        return '#ef9a9a'
+            return self.theme_series_color(3)
+        return self.theme_color('accent_negative')
 
     def _update_mktcap_item(self, row: Any, ticker: Any, mc: Any) -> None:
         """Handle update mktcap item."""

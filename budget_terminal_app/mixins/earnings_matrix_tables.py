@@ -28,7 +28,7 @@ class EarningsMatrixTablesMixin:
         if has_quarterly:
             for row_i, ql in enumerate(q_labels):
                 lbl_item = QTableWidgetItem(ql)
-                lbl_item.setForeground(QColor('#aaa'))
+                lbl_item.setForeground(self.theme_qcolor('text_secondary'))
                 vt.setItem(row_i, 0, lbl_item)
                 for col_i, yr in enumerate(visible_years):
                     val = d['quarterly'].get(yr, {}).get(ql)
@@ -36,7 +36,7 @@ class EarningsMatrixTablesMixin:
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     if val is not None and val < 0:
-                        item.setForeground(QColor('#f44336'))
+                        item.setForeground(self.theme_qcolor('accent_negative'))
                     vt.setItem(row_i, col_i + 1, item)
             sep_row = len(q_labels)
             for c in range(n_cols):
@@ -44,7 +44,7 @@ class EarningsMatrixTablesMixin:
             vt.setRowHeight(sep_row, 4)
         ann_row = len(q_labels) + 1 if has_quarterly else 0
         lbl_ann = QTableWidgetItem('Annual')
-        lbl_ann.setForeground(QColor('#aaa'))
+        lbl_ann.setForeground(self.theme_qcolor('text_secondary'))
         font = lbl_ann.font()
         font.setBold(True)
         lbl_ann.setFont(font)
@@ -58,7 +58,7 @@ class EarningsMatrixTablesMixin:
             f.setBold(True)
             item.setFont(f)
             if val is not None and val < 0:
-                item.setForeground(QColor('#f44336'))
+                item.setForeground(self.theme_qcolor('accent_negative'))
             vt.setItem(ann_row, col_i + 1, item)
         vt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         vt.verticalHeader().setDefaultSectionSize(24)
@@ -95,16 +95,16 @@ class EarningsMatrixTablesMixin:
             """Handle growth item."""
             if growth is not None:
                 item = QTableWidgetItem(f'{growth:+.1f}%')
-                item.setForeground(QColor('#4caf50' if growth >= 0 else '#f44336'))
+                item.setForeground(self.theme_qcolor('accent_positive' if growth >= 0 else 'accent_negative'))
             else:
                 item = QTableWidgetItem('—')
-                item.setForeground(QColor('#555'))
+                item.setForeground(self.theme_qcolor('text_muted'))
             item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             return item
         if has_quarterly:
             for row_i, ql in enumerate(q_labels):
                 lbl_item = QTableWidgetItem(ql)
-                lbl_item.setForeground(QColor('#aaa'))
+                lbl_item.setForeground(self.theme_qcolor('text_secondary'))
                 gt.setItem(row_i, 0, lbl_item)
                 for col_i, yr in enumerate(visible_years):
                     cur_val = d['quarterly'].get(yr, {}).get(ql)
@@ -123,7 +123,7 @@ class EarningsMatrixTablesMixin:
             gt.setRowHeight(sep_row, 4)
         ann_row = len(q_labels) + 1 if has_quarterly else 0
         lbl_ann = QTableWidgetItem('Annual')
-        lbl_ann.setForeground(QColor('#aaa'))
+        lbl_ann.setForeground(self.theme_qcolor('text_secondary'))
         font = lbl_ann.font()
         font.setBold(True)
         lbl_ann.setFont(font)
@@ -177,16 +177,16 @@ class EarningsMatrixTablesMixin:
         self.em_ratios_table.setHorizontalHeaderLabels(['Ratio', f'Last 4Q', f'Next 4Q', f'FY {fy0}', f'FY {fy1}'])
         for row_i, (label, trailing, forward) in enumerate(rows_data):
             lbl_item = QTableWidgetItem(label)
-            lbl_item.setForeground(QColor('#aaa'))
+            lbl_item.setForeground(self.theme_qcolor('text_secondary'))
             lbl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.em_ratios_table.setItem(row_i, 0, lbl_item)
             for col_i, val in enumerate([trailing, forward, trailing, forward]):
                 if val is not None:
                     text = f'{val:.1f}x'
-                    color = '#4caf50'
+                    color = self.theme_color('accent_positive')
                 else:
                     text = '—'
-                    color = '#555'
+                    color = self.theme_color('text_muted')
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 item.setForeground(QColor(color))

@@ -59,7 +59,7 @@ class OptionsFetchMixin:
         if data['delta'] is not None:
             self.options_data[row]['delta'] = data['delta']
         self._save_active_options_data()
-        normal_color = QColor('white')
+        normal_color = self.theme_qcolor('text_primary')
         if t.item(row, 4):
             t.item(row, 4).setText(f"{data['strike']:.2f}")
             t.item(row, 4).setForeground(normal_color)
@@ -173,16 +173,16 @@ class OptionsFetchMixin:
         t.blockSignals(True)
         error = data.get('error')
         if error:
-            err_color = QColor('#ff5555')
+            err_color = self.theme_qcolor('accent_negative')
             if t.item(row, 7):
                 t.item(row, 7).setText(error)
                 t.item(row, 7).setForeground(err_color)
             if t.item(row, 8):
                 t.item(row, 8).setText('N/A')
-                t.item(row, 8).setForeground(QColor('#888888'))
+                t.item(row, 8).setForeground(self.theme_qcolor('text_muted'))
             if t.item(row, 9):
                 t.item(row, 9).setText('N/A')
-                t.item(row, 9).setForeground(QColor('#888888'))
+                t.item(row, 9).setForeground(self.theme_qcolor('text_muted'))
         else:
             self._apply_option_market_data(row, data)
         t.blockSignals(False)
@@ -227,7 +227,7 @@ class OptionsFetchMixin:
         item = QTableWidgetItem(text)
         item.setFlags(ro_flags)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        item.setForeground(QColor('#888888'))
+        item.setForeground(self.theme_qcolor('text_muted'))
         t.blockSignals(True)
         t.setItem(row, 2, item)
         t.blockSignals(False)
@@ -253,7 +253,8 @@ class OptionsFetchMixin:
                 combo.addItem(f'{exp}  ({dte}d)', exp)
             except ValueError:
                 combo.addItem(exp, exp)
-        combo.setStyleSheet('QComboBox { background: #1a1a2e; color: #ffffff; border: 1px solid #3a3a5a; border-radius: 3px; padding: 1px 3px; font-weight: bold; min-height: 22px; min-width: 130px; }QComboBox::drop-down { border: none; width: 18px; }QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #888; margin-right: 4px; }QComboBox QAbstractItemView { background: #1a1a2e; color: white; selection-background-color: #2a2a5a; border: 1px solid #3a3a5a; min-width: 170px; }')
+        combo.setMinimumHeight(22)
+        combo.setMinimumWidth(130)
         if saved in expiries:
             combo.setCurrentIndex(expiries.index(saved))
         elif row < len(self.options_data):

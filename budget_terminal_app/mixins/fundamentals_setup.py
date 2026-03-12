@@ -1,9 +1,10 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.paths import user_data_path
 
 class FundamentalsSetupMixin:
-    _P2_CONFIG_PATH = Path(__file__).resolve().parent / 'config.json'
+    _P2_CONFIG_PATH = user_data_path('fundamentals_config.json')
 
     def init_page2(self, layout: Any) -> None:
         """Build the Deep Dive page UI (called once during init_ui)."""
@@ -24,7 +25,7 @@ class FundamentalsSetupMixin:
         self.p2_analyze_btn = QPushButton('Analyze')
         self.p2_analyze_btn.clicked.connect(self.analyze_stock_p2)
         self.p2_status_lbl = QLabel('Enter a ticker above to begin the analysis.')
-        self.p2_status_lbl.setStyleSheet('color: #888;')
+        self.set_theme_role(self.p2_status_lbl, 'status_muted')
         search_row.addWidget(self.p2_ticker_input)
         search_row.addWidget(self.p2_analyze_btn)
         search_row.addStretch()
@@ -38,29 +39,31 @@ class FundamentalsSetupMixin:
         layout.addWidget(self.p2_content_widget, 1)
         self.p2_top_frame = QFrame()
         self.p2_top_frame.setFixedHeight(36)
-        self.p2_top_frame.setStyleSheet('QFrame { background: #1a1a2e; border-radius: 4px; }')
+        self.set_theme_role(self.p2_top_frame, 'panel')
         top_row = QHBoxLayout(self.p2_top_frame)
-        top_row.setContentsMargins(10, 0, 10, 0)
+        top_row.setContentsMargins(10, 0, 0, 10)
         top_row.setSpacing(12)
         self.p2_name_lbl = QLabel('—')
-        self.p2_name_lbl.setStyleSheet('font-size: 15px; font-weight: bold; color: white;')
+        self.p2_name_lbl.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {self.theme_color("text_primary")};')
         top_row.addWidget(self.p2_name_lbl)
         self.p2_info_lbl = QLabel('—')
-        self.p2_info_lbl.setStyleSheet('color: #888; font-size: 12px;')
+        self.p2_info_lbl.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         top_row.addWidget(self.p2_info_lbl)
         self.p2_website_btn = QPushButton('Website')
         self.p2_website_btn.setFixedHeight(22)
+        self.set_theme_variant(self.p2_website_btn, 'accent')
         self.p2_website_btn.setVisible(False)
         self.p2_website_btn.clicked.connect(self._open_p2_website)
         self.p2_ir_btn = QPushButton('IR')
         self.p2_ir_btn.setFixedHeight(22)
+        self.set_theme_variant(self.p2_ir_btn, 'accent')
         self.p2_ir_btn.setVisible(False)
         self.p2_ir_btn.clicked.connect(self._open_p2_ir)
         top_row.addWidget(self.p2_website_btn)
         top_row.addWidget(self.p2_ir_btn)
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet('color: #333;')
+        div.setStyleSheet(f'color: {self.theme_color("panel_border")};')
         top_row.addWidget(div)
         metric_defs = [('P/E', 'pe'), ('Fwd P/E', 'fpe'), ('P/S', 'ps'), ('PEG', 'peg'), ('FCF Mgn', 'fcf_margin'), ('EV/Rev', 'ev_rev'), ('EV/EBITDA', 'ev_ebitda'), ('Net Cash', 'net_cash'), ('Beta', 'beta'), ('Mkt Cap', 'mktcap')]
         self.p2_metric_vals = {}
@@ -68,9 +71,9 @@ class FundamentalsSetupMixin:
             pair = QHBoxLayout()
             pair.setSpacing(4)
             lbl = QLabel(f'{label}:')
-            lbl.setStyleSheet('color: #888; font-size: 12px;')
+            lbl.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
             val_lbl = QLabel('—')
-            val_lbl.setStyleSheet('font-size: 14px; font-weight: bold; color: white;')
+            val_lbl.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {self.theme_color("text_primary")};')
             pair.addWidget(lbl)
             pair.addWidget(val_lbl)
             top_row.addLayout(pair)
@@ -78,23 +81,30 @@ class FundamentalsSetupMixin:
         top_row.addStretch()
         self.p2_content_layout.addWidget(self.p2_top_frame)
         self.p2_period_widget = QWidget()
+        self.p2_period_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.p2_period_widget.setMinimumHeight(36)
         period_row = QHBoxLayout(self.p2_period_widget)
-        period_row.setContentsMargins(0, 0, 0, 0)
+        period_row.setContentsMargins(14, 6, 12, 6)
+        period_row.setSpacing(0)
         self.p2_annual_btn = QPushButton('Annual')
         self.p2_quarterly_btn = QPushButton('Quarterly')
         for btn in (self.p2_annual_btn, self.p2_quarterly_btn):
             btn.setCheckable(True)
             btn.setFixedHeight(24)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            btn.setMinimumWidth(74)
+            btn.setStyleSheet('padding-left: 3px; padding-right: 3px;')
         self.p2_annual_btn.setChecked(True)
         self.p2_annual_btn.clicked.connect(partial(self._set_p2_period, 'annual'))
         self.p2_quarterly_btn.clicked.connect(partial(self._set_p2_period, 'quarterly'))
         period_row.addWidget(self.p2_annual_btn)
+        period_row.addSpacing(8)
         period_row.addWidget(self.p2_quarterly_btn)
         period_row.addSpacing(20)
         period_row.addStretch()
         self.p2_content_layout.addWidget(self.p2_period_widget)
         self.p2_charts_box = QGroupBox('Financial Overview')
-        self.p2_charts_box.setStyleSheet('QGroupBox { font-weight: bold; color: #aaa; border: 1px solid #333; margin-top: 4px; padding-top: 8px; }')
+        self.set_theme_role(self.p2_charts_box, 'panel')
         self.p2_charts_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.p2_charts_grid = QGridLayout(self.p2_charts_box)
         self.p2_charts_grid.setContentsMargins(12, 18, 12, 12)
@@ -106,14 +116,14 @@ class FundamentalsSetupMixin:
         self.p2_chart_frames = []
         for idx, title in enumerate(simple_chart_titles):
             frame = QFrame()
-            frame.setStyleSheet('QFrame { background: #0d0d1f; border-radius: 8px; }')
+            self.set_theme_role(frame, 'panel')
             frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             frame_layout = QVBoxLayout(frame)
             frame_layout.setContentsMargins(10, 8, 10, 8)
             frame_layout.setSpacing(4)
             title_row = QHBoxLayout()
             title_lbl = QLabel(title)
-            title_lbl.setStyleSheet('font-size: 14px; font-weight: bold; color: white; background: transparent;')
+            title_lbl.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {self.theme_color("text_primary")}; background: transparent;')
             legend_bar = QWidget()
             legend_bar.setStyleSheet('background: transparent;')
             l_layout = QHBoxLayout(legend_bar)
@@ -123,13 +133,13 @@ class FundamentalsSetupMixin:
             title_row.addStretch()
             title_row.addWidget(legend_bar)
             subtitle_lbl = QLabel('In Millions')
-            subtitle_lbl.setStyleSheet('font-size: 9px; color: #666; background: transparent;')
+            subtitle_lbl.setStyleSheet(f'font-size: 9px; color: {self.theme_color("text_muted")}; background: transparent;')
             pw = pg.PlotWidget(axisItems={'left': FmtAxisItem(orientation='left')})
-            pw.setBackground('#0d0d1f')
             pw.getPlotItem().hideButtons()
             pw.getPlotItem().setMenuEnabled(False)
             pw.setMouseEnabled(x=False, y=False)
             pw.showGrid(x=False, y=True, alpha=0.15)
+            self.style_plot_widget(pw)
             frame_layout.addLayout(title_row)
             frame_layout.addWidget(subtitle_lbl)
             frame_layout.addWidget(pw)
@@ -207,8 +217,7 @@ class FundamentalsSetupMixin:
         except Exception:
             pass
         self.p2_analyze_btn.setEnabled(False)
-        self.p2_status_lbl.setText(f'Loading {ticker}...')
-        self.p2_status_lbl.setStyleSheet('color: #f0c040;')
+        self.set_status_text(self.p2_status_lbl, f'Loading {ticker}...', status='warning')
         self.p2_fund_worker = FundamentalsWorker(ticker)
         self.p2_fund_thread = QThread()
         self.p2_fund_worker.moveToThread(self.p2_fund_thread)
@@ -221,8 +230,7 @@ class FundamentalsSetupMixin:
 
     def _page2_error(self, msg: Any) -> None:
         """Handle page2 error."""
-        self.p2_status_lbl.setText(f'Error: {msg}')
-        self.p2_status_lbl.setStyleSheet('color: red;')
+        self.set_status_text(self.p2_status_lbl, f'Error: {msg}', status='negative')
         self.p2_analyze_btn.setEnabled(True)
 
     def _open_p2_website(self, *_: Any) -> None:
@@ -252,3 +260,11 @@ class FundamentalsSetupMixin:
         period = self._p2_period()
         self._render_simple_charts(self.p2_current_data, period)
         self._p2_relayout_charts()
+
+    def _apply_fundamentals_theme(self) -> None:
+        """Refresh fundamentals colors when the active theme changes."""
+        self.p2_name_lbl.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.p2_info_lbl.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
+        self.set_status_text(self.p2_status_lbl, self.p2_status_lbl.text(), status=self.p2_status_lbl.property('bt_status') or 'muted')
+        for pw in getattr(self, 'p2_simple_charts', []):
+            self.style_plot_widget(pw)

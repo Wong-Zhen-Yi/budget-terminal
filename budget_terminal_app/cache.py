@@ -1,12 +1,13 @@
 from __future__ import annotations
 from typing import Any
 from .dependencies import *
+from .paths import user_data_path
 
 class CacheManager:
 
-    def __init__(self, db_path: Any='budget_cache.db') -> None:
+    def __init__(self, db_path: Any=None) -> None:
         """Initialize the object."""
-        self.db_path = db_path
+        self.db_path = str(user_data_path('budget_cache.db')) if db_path is None else str(db_path)
         self._init_db()
 
     def _init_db(self) -> None:

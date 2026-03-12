@@ -46,17 +46,21 @@ class NetWorthMixin:
         """Build the Personal Finance page UI."""
         layout = QVBoxLayout(self.page6)
         layout.setContentsMargins(10, 2, 10, 10)
-        layout.setSpacing(4)
+        layout.setSpacing(8)
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         tables_splitter = QSplitter(Qt.Orientation.Vertical)
         cash_widget = QWidget()
         cash_layout = QVBoxLayout(cash_widget)
         cash_layout.setContentsMargins(0, 0, 0, 2)
+        cash_layout.setSpacing(6)
         cash_hdr = QHBoxLayout()
+        cash_hdr.setContentsMargins(0, 0, 0, 2)
+        cash_hdr.setSpacing(8)
         cash_lbl = QLabel('<b>CASH & ASSETS</b>')
-        cash_lbl.setStyleSheet('color: #4caf50; font-size: 11px;')
+        self.set_theme_role(cash_lbl, 'section_title')
         add_cash_btn = QPushButton('+ Add')
-        add_cash_btn.setFixedSize(45, 18)
+        add_cash_btn.setMinimumSize(58, 24)
+        self.set_theme_variant(add_cash_btn, 'positive')
         add_cash_btn.clicked.connect(lambda: self._p6_add_row('cash'))
         cash_hdr.addWidget(cash_lbl)
         cash_hdr.addStretch()
@@ -72,11 +76,15 @@ class NetWorthMixin:
         debt_widget = QWidget()
         debt_layout = QVBoxLayout(debt_widget)
         debt_layout.setContentsMargins(0, 2, 0, 0)
+        debt_layout.setSpacing(6)
         debt_hdr = QHBoxLayout()
+        debt_hdr.setContentsMargins(0, 0, 0, 2)
+        debt_hdr.setSpacing(8)
         debt_lbl = QLabel('<b>DEBT & LIABILITIES</b>')
-        debt_lbl.setStyleSheet('color: #f44336; font-size: 11px;')
+        self.set_theme_role(debt_lbl, 'section_title')
         add_debt_btn = QPushButton('+ Add')
-        add_debt_btn.setFixedSize(45, 18)
+        add_debt_btn.setMinimumSize(58, 24)
+        self.set_theme_variant(add_debt_btn, 'danger')
         add_debt_btn.clicked.connect(lambda: self._p6_add_row('debt'))
         debt_hdr.addWidget(debt_lbl)
         debt_hdr.addStretch()
@@ -95,29 +103,31 @@ class NetWorthMixin:
         visuals_layout.setContentsMargins(5, 0, 0, 0)
         visuals_layout.setSpacing(8)
         total_box = QGroupBox('Total Personal Finance')
-        total_box.setStyleSheet('QGroupBox { font-weight: bold; color: #ffd700; font-size: 12px; border: 1px solid #333; border-radius: 4px; padding-top: 14px; }QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }')
+        self.set_theme_role(total_box, 'panel')
         total_inner = QVBoxLayout(total_box)
         total_inner.setContentsMargins(6, 6, 6, 6)
         total_inner.setSpacing(4)
         self.p6_total_summary = QLabel('')
-        self.p6_total_summary.setStyleSheet('color: #ccc; font-size: 12px;')
+        self.p6_total_summary.setStyleSheet('font-size: 12px;')
         self.p6_total_summary.setWordWrap(True)
         total_inner.addWidget(self.p6_total_summary)
         self.p6_total_pie = PieChartWidget()
         self.p6_total_pie.setMinimumHeight(180)
+        self.p6_total_pie.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
         total_inner.addWidget(self.p6_total_pie, 1)
         visuals_layout.addWidget(total_box)
         liquid_box = QGroupBox('Liquid Personal Finance')
-        liquid_box.setStyleSheet('QGroupBox { font-weight: bold; color: #42d4f4; font-size: 12px; border: 1px solid #333; border-radius: 4px; padding-top: 14px; }QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }')
+        self.set_theme_role(liquid_box, 'panel')
         liquid_inner = QVBoxLayout(liquid_box)
         liquid_inner.setContentsMargins(6, 6, 6, 6)
         liquid_inner.setSpacing(4)
         self.p6_liquid_summary = QLabel('')
-        self.p6_liquid_summary.setStyleSheet('color: #ccc; font-size: 12px;')
+        self.p6_liquid_summary.setStyleSheet('font-size: 12px;')
         self.p6_liquid_summary.setWordWrap(True)
         liquid_inner.addWidget(self.p6_liquid_summary)
         self.p6_liquid_pie = PieChartWidget()
         self.p6_liquid_pie.setMinimumHeight(180)
+        self.p6_liquid_pie.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
         liquid_inner.addWidget(self.p6_liquid_pie, 1)
         visuals_layout.addWidget(liquid_box)
         main_splitter.addWidget(visuals_widget)
@@ -149,7 +159,7 @@ class NetWorthMixin:
         table.setItem(row, 1, amt_item)
         del_btn = QPushButton('×')
         del_btn.setFixedSize(20, 20)
-        del_btn.setStyleSheet('background-color: #5a1a1a; color: #f44336; border-radius: 4px;')
+        del_btn.setStyleSheet(f'background-color: {self.theme_color("accent_negative_bg")}; color: {self.theme_color("accent_negative")}; border-radius: 4px; border: 1px solid {self.theme_color("accent_negative")};')
         del_btn.clicked.connect(lambda: self._p6_remove_row(category, row))
         table.setCellWidget(row, 2, del_btn)
 
@@ -200,12 +210,14 @@ class NetWorthMixin:
         options_equity = sum((item['options'] for item in portfolio_breakdown))
         net_worth = manual_cash + stock_mv + options_equity - manual_debt
         liquid_net_worth = manual_cash - manual_debt
-        nw_color = '#4caf50' if net_worth >= 0 else '#f44336'
-        summary_lines = [f"Cash: <span style='color: #4caf50;'>${manual_cash:,.2f}</span>"]
+        positive_color = self.theme_color('accent_positive')
+        negative_color = self.theme_color('accent_negative')
+        nw_color = positive_color if net_worth >= 0 else negative_color
+        summary_lines = [f"Cash: <span style='color: {positive_color};'>${manual_cash:,.2f}</span>"]
         for item in portfolio_breakdown:
-            summary_lines.append(f"{item['name']} Stocks: <span style='color: #4caf50;'>${item['stocks']:,.2f}</span>")
-            summary_lines.append(f"{item['name']} Options: <span style='color: {('#4caf50' if item['options'] >= 0 else '#f44336')};'>${item['options']:,.2f}</span>")
-        summary_lines.append(f"Liabilities: <span style='color: #f44336;'>-${manual_debt:,.2f}</span>")
+            summary_lines.append(f"{item['name']} Stocks: <span style='color: {positive_color};'>${item['stocks']:,.2f}</span>")
+            summary_lines.append(f"{item['name']} Options: <span style='color: {(positive_color if item['options'] >= 0 else negative_color)};'>${item['options']:,.2f}</span>")
+        summary_lines.append(f"Liabilities: <span style='color: {negative_color};'>-${manual_debt:,.2f}</span>")
         summary_lines.append(f"<b style='font-size: 14px;'>Total: <span style='color: {nw_color};'>${net_worth:,.2f}</span></b>")
         total_summary = '<br/>'.join(summary_lines)
         self.p6_total_summary.setText(total_summary)
@@ -214,11 +226,20 @@ class NetWorthMixin:
             total_components[f"{item['name']} Stocks"] = item['stocks']
             total_components[f"{item['name']} Options"] = abs(item['options'])
         self._p6_set_pie_from_amounts(self.p6_total_pie, total_components)
-        lnw_color = '#4caf50' if liquid_net_worth >= 0 else '#f44336'
-        liquid_summary = f"Assets: <span style='color: #4caf50;'>${manual_cash:,.2f}</span><br/>Liabilities: <span style='color: #f44336;'>-${manual_debt:,.2f}</span><br/><b style='font-size: 14px;'>Liquid: <span style='color: {lnw_color};'>${liquid_net_worth:,.2f}</span></b>"
+        lnw_color = positive_color if liquid_net_worth >= 0 else negative_color
+        liquid_summary = f"Assets: <span style='color: {positive_color};'>${manual_cash:,.2f}</span><br/>Liabilities: <span style='color: {negative_color};'>-${manual_debt:,.2f}</span><br/><b style='font-size: 14px;'>Liquid: <span style='color: {lnw_color};'>${liquid_net_worth:,.2f}</span></b>"
         self.p6_liquid_summary.setText(liquid_summary)
         liquid_components = {
             'Cash': manual_cash,
             'Debt': manual_debt,
         }
         self._p6_set_pie_from_amounts(self.p6_liquid_pie, liquid_components)
+
+    def _apply_networth_theme(self) -> None:
+        """Refresh Personal Finance theme surfaces."""
+        if hasattr(self, 'p6_total_pie'):
+            self.p6_total_pie.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
+        if hasattr(self, 'p6_liquid_pie'):
+            self.p6_liquid_pie.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
+        if hasattr(self, 'p6_total_summary') and hasattr(self, 'p6_liquid_summary'):
+            self._p6_update_total()
