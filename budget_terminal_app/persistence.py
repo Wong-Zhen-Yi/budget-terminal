@@ -4,9 +4,10 @@ from .dependencies import *
 from .paths import user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
-USER_DATA_BACKUP_VERSION = 2
+USER_DATA_BACKUP_VERSION = 3
 APP_CONFIG_FILE = user_data_path('config.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
+DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2]}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
 MAX_PORTFOLIOS = 3
@@ -497,6 +498,8 @@ def build_user_data_backup() -> Any:
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
         'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
         'portfolios': portfolio_state['portfolios'],
+        'chart_page': load_chart_page_settings(),
+        'dashboard_chart': load_dashboard_chart_settings(),
         'net_worth': load_networth_data(),
     }
     return backup
@@ -526,6 +529,8 @@ def _validate_backup_payload(payload: Any) -> Any:
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
         'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
         'portfolios': portfolio_state['portfolios'],
+        'chart_page': _normalize_chart_page_settings(payload.get('chart_page', {})),
+        'dashboard_chart': _normalize_dashboard_chart_settings(payload.get('dashboard_chart', {})),
         'net_worth': {'cash': list(networth_payload.get('cash', [])), 'debt': list(networth_payload.get('debt', []))},
     }
 
@@ -543,6 +548,8 @@ def apply_user_data_backup(payload: Any) -> Any:
     normalized = _validate_backup_payload(payload)
     save_all_portfolios_state(normalized)
     save_networth_data(normalized['net_worth'])
+    save_chart_page_settings(normalized.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS))
+    save_dashboard_chart_settings(normalized.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS))
     return normalized
 
 
@@ -554,6 +561,8 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'portfolios': {
             portfolio_id: _default_portfolio_entry(portfolio_id, chart_slots if portfolio_id == DEFAULT_MAIN_PORTFOLIO_ID else None) for portfolio_id in PORTFOLIO_IDS
         },
+        'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
+        'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'net_worth': {'cash': [], 'debt': []},
     }
     return apply_user_data_backup(normalized)
@@ -570,6 +579,99 @@ def save_app_config(data: Any) -> None:
     if not isinstance(data, dict):
         data = {}
     _write_json(APP_CONFIG_FILE, data, indent=2)
+
+
+def _normalize_chart_page_settings(settings: Any) -> Any:
+    """Normalize persisted state for the dedicated Charts page."""
+    saved = settings if isinstance(settings, dict) else {}
+    symbol = str(saved.get('symbol', DEFAULT_CHART_PAGE_SETTINGS['symbol']) or DEFAULT_CHART_PAGE_SETTINGS['symbol']).upper()
+    timeframe_label = str(saved.get('timeframe_label', DEFAULT_CHART_PAGE_SETTINGS['timeframe_label']) or DEFAULT_CHART_PAGE_SETTINGS['timeframe_label'])
+    raw_watchlist = saved.get('watchlist', [])
+    if not isinstance(raw_watchlist, list):
+        raw_watchlist = []
+    watchlist = []
+    for symbol_value in raw_watchlist:
+        text = str(symbol_value or '').upper().strip()
+        if text and text not in watchlist:
+            watchlist.append(text)
+    raw_indicators = saved.get('indicators', DEFAULT_CHART_PAGE_SETTINGS['indicators'])
+    if not isinstance(raw_indicators, list):
+        raw_indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
+    indicators = []
+    for name in raw_indicators:
+        text = str(name or '').strip()
+        normalized = text.upper().replace(' ', '')
+        if normalized == 'VOLUME':
+            text = 'Volume'
+        elif normalized == 'RSI':
+            text = 'RSI'
+        elif normalized in ('200MA', 'MA200'):
+            text = '200 MA'
+        else:
+            text = ''
+        if text and text not in indicators:
+            indicators.append(text)
+    if not indicators:
+        indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
+    auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
+    auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
+    return {'symbol': symbol, 'timeframe_label': timeframe_label, 'watchlist': watchlist, 'indicators': indicators, 'auto': auto_enabled}
+
+
+def _normalize_dashboard_chart_settings(settings: Any) -> Any:
+    """Normalize persisted state for the dashboard chart workstation."""
+    saved = settings if isinstance(settings, dict) else {}
+    symbol = str(saved.get('symbol', DEFAULT_DASHBOARD_CHART_SETTINGS['symbol']) or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol']).upper().strip()
+    timeframe_label = str(saved.get('timeframe_label', DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label']) or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label']).strip()
+    raw_indicators = saved.get('indicators', DEFAULT_DASHBOARD_CHART_SETTINGS['indicators'])
+    if not isinstance(raw_indicators, list):
+        raw_indicators = list(DEFAULT_DASHBOARD_CHART_SETTINGS['indicators'])
+    indicators = []
+    for name in raw_indicators:
+        text = str(name or '').strip()
+        normalized = text.upper().replace(' ', '')
+        if normalized == 'VOLUME':
+            text = 'Volume'
+        elif normalized == 'RSI':
+            text = 'RSI'
+        elif normalized in ('200MA', 'MA200'):
+            text = '200 MA'
+        else:
+            text = ''
+        if text and text not in indicators:
+            indicators.append(text)
+    if '200 MA' not in indicators:
+        indicators.append('200 MA')
+    ordered = []
+    for indicator in ('Volume', 'RSI', '200 MA'):
+        if indicator in indicators and indicator not in ordered:
+            ordered.append(indicator)
+    auto_value = saved.get('auto', DEFAULT_DASHBOARD_CHART_SETTINGS['auto'])
+    auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_DASHBOARD_CHART_SETTINGS['auto']
+    raw_splitter_sizes = saved.get('splitter_sizes', DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
+    splitter_sizes = []
+    if isinstance(raw_splitter_sizes, list):
+        for value in raw_splitter_sizes[:2]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                splitter_sizes.append(size)
+    if len(splitter_sizes) != 2:
+        splitter_sizes = list(DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
+    return {
+        'symbol': symbol or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol'],
+        'timeframe_label': timeframe_label or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label'],
+        'indicators': ordered,
+        'auto': auto_enabled,
+        'splitter_sizes': splitter_sizes,
+    }
+
+
+def normalize_dashboard_chart_settings(settings: Any) -> Any:
+    """Public wrapper for dashboard chart state normalization."""
+    return _normalize_dashboard_chart_settings(settings)
 
 
 def load_portfolio_preferences() -> Any:
@@ -624,72 +726,29 @@ def save_theme_settings(settings: Any) -> Any:
 def load_chart_page_settings() -> Any:
     """Load persisted state for the dedicated Charts page."""
     config = load_app_config()
-    saved = config.get('chart_page', {})
-    if not isinstance(saved, dict):
-        saved = {}
-    symbol = str(saved.get('symbol', DEFAULT_CHART_PAGE_SETTINGS['symbol']) or DEFAULT_CHART_PAGE_SETTINGS['symbol']).upper()
-    timeframe_label = str(saved.get('timeframe_label', DEFAULT_CHART_PAGE_SETTINGS['timeframe_label']) or DEFAULT_CHART_PAGE_SETTINGS['timeframe_label'])
-    raw_watchlist = saved.get('watchlist', [])
-    if not isinstance(raw_watchlist, list):
-        raw_watchlist = []
-    watchlist = []
-    for symbol_value in raw_watchlist:
-        text = str(symbol_value or '').upper().strip()
-        if text and text not in watchlist:
-            watchlist.append(text)
-    raw_indicators = saved.get('indicators', DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-    if not isinstance(raw_indicators, list):
-        raw_indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-    indicators = []
-    for name in raw_indicators:
-        text = str(name or '').strip()
-        normalized = text.upper().replace(' ', '')
-        if normalized == 'VOLUME':
-            text = 'Volume'
-        elif normalized == 'RSI':
-            text = 'RSI'
-        elif normalized in ('200MA', 'MA200'):
-            text = '200 MA'
-        else:
-            text = ''
-        if text and text not in indicators:
-            indicators.append(text)
-    if not indicators:
-        indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-    auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
-    auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
-    return {'symbol': symbol, 'timeframe_label': timeframe_label, 'watchlist': watchlist, 'indicators': indicators, 'auto': auto_enabled}
+    return _normalize_chart_page_settings(config.get('chart_page', {}))
 
 
 def save_chart_page_settings(settings: Any) -> Any:
     """Persist state for the dedicated Charts page."""
     current = load_app_config()
-    state = DEFAULT_CHART_PAGE_SETTINGS.copy()
-    if isinstance(settings, dict):
-        state['symbol'] = str(settings.get('symbol', state['symbol']) or state['symbol']).upper()
-        state['timeframe_label'] = str(settings.get('timeframe_label', state['timeframe_label']) or state['timeframe_label'])
-        raw_watchlist = settings.get('watchlist', state['watchlist'])
-        if isinstance(raw_watchlist, list):
-            deduped = []
-            for symbol_value in raw_watchlist:
-                text = str(symbol_value or '').upper().strip()
-                if text and text not in deduped:
-                    deduped.append(text)
-            state['watchlist'] = deduped
-        raw_indicators = settings.get('indicators', state['indicators'])
-        if isinstance(raw_indicators, list):
-            normalized = []
-            for name in raw_indicators:
-                text = str(name or '').strip().title()
-                if text in ('Volume', 'Rsi'):
-                    text = 'RSI' if text == 'Rsi' else text
-                if text in ('Volume', 'RSI') and text not in normalized:
-                    normalized.append(text)
-            state['indicators'] = normalized or list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-        auto_value = settings.get('auto', state['auto'])
-        if isinstance(auto_value, bool | int):
-            state['auto'] = bool(auto_value)
+    state = _normalize_chart_page_settings(settings)
     current['chart_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_dashboard_chart_settings() -> Any:
+    """Load persisted state for the dashboard chart workstation."""
+    config = load_app_config()
+    return _normalize_dashboard_chart_settings(config.get('dashboard_chart', {}))
+
+
+def save_dashboard_chart_settings(settings: Any) -> Any:
+    """Persist state for the dashboard chart workstation."""
+    current = load_app_config()
+    state = _normalize_dashboard_chart_settings(settings)
+    current['dashboard_chart'] = state
     save_app_config(current)
     return state
 

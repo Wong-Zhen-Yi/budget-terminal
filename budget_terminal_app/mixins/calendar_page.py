@@ -3,7 +3,6 @@ from typing import Any
 from ..compat import *
 
 class CalendarPageMixin:
-
     def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 6) -> None:
         """Set all detail tables to the same height based on the tallest one."""
         valid = [t for t in tables if t is not None]
@@ -19,6 +18,36 @@ class CalendarPageMixin:
             target_height = header_height + visible_rows * row_height + frame + scrollbar_pad
             table.setMinimumHeight(target_height)
             table.setMaximumHeight(target_height)
+
+    def _p7_prepare_detail_table(self, table: Any) -> None:
+        """Configure detail tables to keep text compact inside fixed panel widths."""
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(44)
+
+    def _p7_apply_equal_table_widths(self, table: Any) -> None:
+        """Distribute visible width evenly so no single column dominates the panel."""
+        if table is None:
+            return
+        header = table.horizontalHeader()
+        for col in range(table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+        viewport_width = max(table.viewport().width(), table.width() - (table.frameWidth() * 2))
+        column_count = max(1, table.columnCount())
+        base_width = max(44, viewport_width // column_count)
+        for col in range(column_count):
+            table.setColumnWidth(col, base_width)
+
+    def _p7_apply_detail_table_widths(self) -> None:
+        """Keep Calendar detail tables evenly spaced as their containers resize."""
+        if hasattr(self, 'p7_company_events_table'):
+            self._p7_apply_equal_table_widths(self.p7_company_events_table)
+        if hasattr(self, 'p7_economic_events_table'):
+            self._p7_apply_equal_table_widths(self.p7_economic_events_table)
+        if hasattr(self, 'p7_options_exp_table'):
+            self._p7_apply_equal_table_widths(self.p7_options_exp_table)
 
     def _p7_get_main_portfolio_options(self) -> Any:
         """Return saved options positions for the current main portfolio."""
@@ -156,11 +185,7 @@ class CalendarPageMixin:
         company_layout.addWidget(company_lbl)
         self.p7_company_events_table = QTableWidget(0, 4)
         self.p7_company_events_table.setHorizontalHeaderLabels(['Date', 'Ticker', 'Event', 'Details'])
-        hh_company = self.p7_company_events_table.horizontalHeader()
-        hh_company.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hh_company.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh_company.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh_company.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._p7_prepare_detail_table(self.p7_company_events_table)
         self.p7_company_events_table.verticalHeader().setVisible(False)
         self.p7_company_events_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.p7_company_events_table.verticalHeader().setDefaultSectionSize(24)
@@ -183,11 +208,7 @@ class CalendarPageMixin:
         econ_layout.addWidget(econ_lbl)
         self.p7_economic_events_table = QTableWidget(0, 4)
         self.p7_economic_events_table.setHorizontalHeaderLabels(['Date', 'Ticker', 'Event', 'Details'])
-        hh_econ = self.p7_economic_events_table.horizontalHeader()
-        hh_econ.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hh_econ.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh_econ.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh_econ.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._p7_prepare_detail_table(self.p7_economic_events_table)
         self.p7_economic_events_table.verticalHeader().setVisible(False)
         self.p7_economic_events_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.p7_economic_events_table.verticalHeader().setDefaultSectionSize(24)
@@ -210,14 +231,7 @@ class CalendarPageMixin:
         options_tab_layout.addWidget(self.p7_options_exp_label)
         self.p7_options_exp_table = QTableWidget(0, 7)
         self.p7_options_exp_table.setHorizontalHeaderLabels(['Expiry', 'Ticker', 'Strategy', 'Strike', 'Qty', 'Status', 'Details'])
-        hh_opt = self.p7_options_exp_table.horizontalHeader()
-        hh_opt.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        hh_opt.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        self._p7_prepare_detail_table(self.p7_options_exp_table)
         self.p7_options_exp_table.verticalHeader().setVisible(False)
         self.p7_options_exp_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.p7_options_exp_table.verticalHeader().setDefaultSectionSize(24)
@@ -236,6 +250,7 @@ class CalendarPageMixin:
         self._p7_events = {}
         self._p7_fetching = False
         self._p7_render_month()
+        self._p7_apply_detail_table_widths()
 
     def _p7_change_month(self, delta: Any, *_: Any) -> None:
         """Handle p7 change month."""
@@ -344,3 +359,4 @@ class CalendarPageMixin:
             self.p7_economic_events_table,
             self.p7_options_exp_table,
         )
+        self._p7_apply_detail_table_widths()

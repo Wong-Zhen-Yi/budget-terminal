@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 from typing import Any
 from ..compat import *
 from budget_terminal_app.paths import user_data_path
@@ -42,6 +43,9 @@ class WindowLifecycleMixin:
         if hasattr(self, '_p8_relayout_cards') and hasattr(self, 'stacked_widget'):
             if self.stacked_widget.currentIndex() == 5:
                 self._p8_relayout_cards()
+        if hasattr(self, '_p7_apply_detail_table_widths') and hasattr(self, 'stacked_widget'):
+            if self.stacked_widget.currentIndex() == 3:
+                self._p7_apply_detail_table_widths()
 
     def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None) -> None:
         """Register a page in the nav system. Wires the button and stores lifecycle callbacks."""
@@ -133,14 +137,36 @@ class WindowLifecycleMixin:
         active_entry['portfolio_tracker'] = getattr(self, 'active_tracker_data', active_entry.get('portfolio_tracker', {}))
         active_entry['options_tracker'] = self.options_data
         self._persist_all_portfolios()
+        if hasattr(self, '_dashboard_save_state'):
+            self._dashboard_save_state()
         save_networth_data(self.networth_data)
+        handler = getattr(self, '_session_log_handler', None)
+        if handler is not None:
+            logger.removeHandler(handler)
+            self._session_log_handler = None
         event.accept()
 
     def take_screenshot(self) -> None:
         """Handle take screenshot."""
         screen = QApplication.primaryScreen()
+        if screen is None:
+            QMessageBox.warning(self, 'Screenshot Failed', 'No screen is available for capturing a screenshot.')
+            return
         screenshot = screen.grabWindow(self.winId())
         folder = user_data_path('screenshots')
         folder.mkdir(exist_ok=True)
-        path = folder / f"screenshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        screenshot.save(str(path), 'png')
+        default_path = folder / f"screenshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            'Save Screenshot',
+            str(default_path),
+            'PNG Images (*.png)',
+        )
+        if not selected_path:
+            return
+        path = Path(selected_path)
+        if path.suffix.lower() != '.png':
+            path = path.with_suffix('.png')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not screenshot.save(str(path), 'png'):
+            QMessageBox.warning(self, 'Screenshot Failed', f'Could not save screenshot to:\n{path}')

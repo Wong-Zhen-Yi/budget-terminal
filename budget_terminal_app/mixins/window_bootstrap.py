@@ -1,6 +1,28 @@
 from __future__ import annotations
 from typing import Any
+from .. import __version__
 from ..compat import *
+
+
+class _SessionLogHandler(logging.Handler):
+
+    def __init__(self, window: Any) -> None:
+        """Stream formatted log records into the running Qt window."""
+        super().__init__(level=logging.INFO)
+        self.window = window
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Format a log record and enqueue it onto the UI thread."""
+        try:
+            message = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        try:
+            self.window._invoke_main.emit(lambda msg=message: self.window._append_session_log_entry(msg))
+        except RuntimeError:
+            return
+
 
 class WindowBootstrapMixin:
 
@@ -58,6 +80,15 @@ class WindowBootstrapMixin:
         self.tickers = entry['portfolio']
         self.chart_slots = entry['chart_slots']
         self.tracker_data = entry['portfolio_tracker']
+        if not getattr(self, '_dashboard_chart_initialized', False):
+            fallback_symbol = str((self.chart_slots[0] if self.chart_slots else '') or '').upper().strip()
+            current_symbol = str(getattr(self, 'dashboard_chart_state', {}).get('symbol', '') or '').upper().strip()
+            if fallback_symbol and (not current_symbol or current_symbol == DEFAULT_DASHBOARD_CHART_SETTINGS['symbol']):
+                self.dashboard_chart_state = normalize_dashboard_chart_settings({
+                    **getattr(self, 'dashboard_chart_state', {}),
+                    'symbol': fallback_symbol,
+                })
+                self._dashboard_chart_initialized = True
 
     def _apply_active_portfolio_editor_state(self) -> None:
         """Sync page-4 editor fields from the selected active portfolio."""
@@ -92,6 +123,71 @@ class WindowBootstrapMixin:
         self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
         self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
         save_all_portfolios_state(self.all_portfolios_state)
+
+    def _init_session_log_capture(self) -> None:
+        """Attach a single in-memory session log collector to the app logger."""
+        self._session_log_buffer = []
+        self._session_log_max_entries = 1500
+        self._session_log_paused = False
+        self.settings_log_output = None
+        self._session_log_handler = _SessionLogHandler(self)
+        self._session_log_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+        logger.addHandler(self._session_log_handler)
+
+    def _append_session_log_entry(self, message: Any) -> None:
+        """Append a formatted log line to the session buffer and Settings panel."""
+        text = str(message or '').rstrip()
+        if not text:
+            return
+        self._session_log_buffer.append(text)
+        overflow = len(self._session_log_buffer) - self._session_log_max_entries
+        if overflow > 0:
+            del self._session_log_buffer[:overflow]
+        if self.settings_log_output is None:
+            return
+        if overflow > 0:
+            self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+        elif not self._session_log_paused:
+            self.settings_log_output.appendPlainText(text)
+        self._refresh_settings_log_status()
+        if not self._session_log_paused:
+            scrollbar = self.settings_log_output.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _bind_settings_log_output(self, widget: Any) -> None:
+        """Attach the live Settings log widget to the current session buffer."""
+        self.settings_log_output = widget
+        if self.settings_log_output is None:
+            return
+        self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+        self._refresh_settings_log_status()
+        if not self._session_log_paused:
+            scrollbar = self.settings_log_output.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _clear_session_logs(self) -> None:
+        """Clear the visible in-memory session log history."""
+        self._session_log_buffer.clear()
+        if self.settings_log_output is not None:
+            self.settings_log_output.clear()
+        self._refresh_settings_log_status()
+
+    def _set_session_log_paused(self, paused: Any) -> None:
+        """Pause or resume live app log appends in the Settings viewer."""
+        self._session_log_paused = bool(paused)
+        self._refresh_settings_log_status()
+        if not self._session_log_paused and self.settings_log_output is not None:
+            self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+            scrollbar = self.settings_log_output.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _refresh_settings_log_status(self) -> None:
+        """Refresh the Settings-page log status label."""
+        if not hasattr(self, 'settings_log_meta_label'):
+            return
+        count = len(getattr(self, '_session_log_buffer', []))
+        state = 'Paused' if getattr(self, '_session_log_paused', False) else 'Live'
+        self.settings_log_meta_label.setText(f'{state} session log | {count} entries')
 
     def _sync_after_portfolio_change(self, *, refresh_main: bool=False) -> None:
         """Refresh derived runtime fields and visible page-4 widgets."""
@@ -143,7 +239,8 @@ class WindowBootstrapMixin:
         """Initialize the object."""
         super().__init__()
         self._invoke_main.connect(self._on_invoke_main)
-        self.setWindowTitle('Budget Terminal')
+        self._init_session_log_capture()
+        self.setWindowTitle(f'Budget Terminal v{__version__}')
         self.resize(1280, 800)
         self.all_portfolios_state = load_all_portfolios_state()
         self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', PORTFOLIO_IDS[0])
@@ -151,7 +248,22 @@ class WindowBootstrapMixin:
         self._rebuild_portfolio_slots()
         self.tickers = []
         self.chart_slots = []
-        self.chart_timeframes = [('5y', '1wk'), ('5y', '1wk'), ('5y', '1wk')]
+        self.dashboard_chart_state = load_dashboard_chart_settings()
+        self._dashboard_chart_initialized = False
+        self.dashboard_symbol = str(self.dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
+        self.dashboard_timeframe_label = str(self.dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
+        self.dashboard_active_indicators = list(self.dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
+        self.dashboard_auto_follow = bool(self.dashboard_chart_state.get('auto', True))
+        self.dashboard_chart_df = None
+        self.dashboard_chart_stats = {}
+        self.dashboard_rsi_series = None
+        self.dashboard_chart_interval = '1d'
+        self.dashboard_manual_x_range = None
+        self.dashboard_pending_x_range = None
+        self.dashboard_overlay_items = {}
+        self.chart_configs = []
+        self._dashboard_request_seq = 0
+        self._dashboard_latest_request_id = 0
         self.last_data = None
         self.p2_current_data = None
         self.tracker_data = {}
@@ -170,9 +282,9 @@ class WindowBootstrapMixin:
         self.theme_settings = load_theme_settings()
         self.chart_page_state = load_chart_page_settings()
         self.init_theme_system(apply=False)
-        self.dashboard_chart_rows = [[], [], []]
-        self.dashboard_chart_ma200 = [None, None, None]
-        self.dashboard_chart_view_guards = [False, False, False]
+        self.dashboard_chart_rows = []
+        self.dashboard_chart_ma200 = None
+        self.dashboard_chart_view_guard = False
         self._apply_main_portfolio_runtime()
         self._apply_active_portfolio_editor_state()
         self.init_ui()

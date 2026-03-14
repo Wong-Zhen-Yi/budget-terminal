@@ -39,6 +39,7 @@ class SettingsMixin:
 
         theme_box = QGroupBox('Appearance')
         self.set_theme_role(theme_box, 'panel')
+        theme_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         theme_layout = QVBoxLayout(theme_box)
         theme_layout.setContentsMargins(14, 16, 14, 14)
         theme_layout.setSpacing(12)
@@ -68,6 +69,7 @@ class SettingsMixin:
 
         actions_box = QGroupBox('User Data')
         self.set_theme_role(actions_box, 'panel')
+        actions_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setContentsMargins(14, 16, 14, 14)
         actions_layout.setSpacing(12)
@@ -86,13 +88,19 @@ class SettingsMixin:
         self.set_theme_variant(clear_btn, 'danger')
         clear_btn.setMinimumHeight(32)
         clear_btn.clicked.connect(self._on_clear_user_data)
+        reset_cache_btn = QPushButton('Reset Cache')
+        self.set_theme_variant(reset_cache_btn, 'danger')
+        reset_cache_btn.setMinimumHeight(32)
+        reset_cache_btn.clicked.connect(self._on_reset_cache)
         actions_layout.addWidget(actions_intro)
         actions_layout.addWidget(export_btn)
         actions_layout.addWidget(import_btn)
         actions_layout.addWidget(clear_btn)
+        actions_layout.addWidget(reset_cache_btn)
 
         note_box = QGroupBox("Creator's Note")
         self.set_theme_role(note_box, 'panel')
+        note_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         note_layout = QVBoxLayout(note_box)
         note_layout.setContentsMargins(14, 16, 14, 14)
         note_layout.setSpacing(10)
@@ -118,15 +126,48 @@ class SettingsMixin:
         note_layout.addWidget(self.settings_creator_image_label, 0, Qt.AlignmentFlag.AlignCenter)
         note_layout.addStretch()
 
+        logs_box = QGroupBox('Application Logs')
+        self.set_theme_role(logs_box, 'panel')
+        logs_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        logs_layout = QVBoxLayout(logs_box)
+        logs_layout.setContentsMargins(14, 16, 14, 14)
+        logs_layout.setSpacing(10)
+        logs_intro = QLabel('Live Python logger output for this app session. This mirrors the runtime messages you would normally watch in the IDE console.')
+        logs_intro.setWordWrap(True)
+        self.set_theme_role(logs_intro, 'muted')
+        logs_toolbar = QHBoxLayout()
+        logs_toolbar.setContentsMargins(0, 0, 0, 0)
+        logs_toolbar.setSpacing(8)
+        self.settings_log_meta_label = QLabel('Live session log | 0 entries')
+        self.set_theme_role(self.settings_log_meta_label, 'muted')
+        self.settings_log_pause_btn = QPushButton('Pause Auto-Scroll')
+        self.settings_log_pause_btn.setCheckable(True)
+        self.settings_log_pause_btn.clicked.connect(self._on_toggle_settings_logs_pause)
+        self.settings_log_clear_btn = QPushButton('Clear')
+        self.set_theme_variant(self.settings_log_clear_btn, 'danger')
+        self.settings_log_clear_btn.clicked.connect(self._on_clear_settings_logs)
+        logs_toolbar.addWidget(self.settings_log_meta_label, 1)
+        logs_toolbar.addWidget(self.settings_log_pause_btn)
+        logs_toolbar.addWidget(self.settings_log_clear_btn)
+        self.settings_log_output = QPlainTextEdit()
+        self.settings_log_output.setReadOnly(True)
+        self.settings_log_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        logs_layout.addWidget(logs_intro)
+        logs_layout.addLayout(logs_toolbar)
+        logs_layout.addWidget(self.settings_log_output, 1)
+
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(14)
         grid.addWidget(theme_box, 0, 0)
         grid.addWidget(actions_box, 0, 1)
-        grid.addWidget(note_box, 1, 0, 1, 2)
-        grid.setColumnStretch(0, 3)
-        grid.setColumnStretch(1, 2)
+        grid.addWidget(note_box, 1, 0)
+        grid.addWidget(logs_box, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
 
         self.settings_status_label = QLabel('Ready')
         self.set_theme_role(self.settings_status_label, 'status_muted')
@@ -134,6 +175,8 @@ class SettingsMixin:
         layout.addLayout(grid)
         layout.addWidget(self.settings_status_label)
         layout.addStretch()
+        self._bind_settings_log_output(self.settings_log_output)
+        self._refresh_settings_log_controls()
         logger.info('Settings page initialization complete.')
 
     def _settings_creator_image_path(self) -> Any:
@@ -225,6 +268,27 @@ class SettingsMixin:
         if hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
+    def _refresh_settings_log_controls(self) -> None:
+        """Keep Settings log buttons aligned with the current capture state."""
+        if hasattr(self, 'settings_log_pause_btn'):
+            paused = bool(getattr(self, '_session_log_paused', False))
+            self.settings_log_pause_btn.blockSignals(True)
+            self.settings_log_pause_btn.setChecked(paused)
+            self.settings_log_pause_btn.setText('Resume Auto-Scroll' if paused else 'Pause Auto-Scroll')
+            self.settings_log_pause_btn.blockSignals(False)
+            self.set_theme_variant(self.settings_log_pause_btn, 'accent' if paused else None)
+        self._refresh_settings_log_status()
+
+    def _on_toggle_settings_logs_pause(self, checked: Any=False) -> None:
+        """Pause or resume live log updates in the Settings viewer."""
+        self._set_session_log_paused(bool(checked))
+        self._refresh_settings_log_controls()
+
+    def _on_clear_settings_logs(self) -> None:
+        """Clear the current session log buffer shown on the Settings page."""
+        self._clear_session_logs()
+        self._refresh_settings_log_controls()
+
     def _on_theme_selected(self, index: int) -> None:
         """Switch themes immediately from the Settings page."""
         if index < 0:
@@ -251,12 +315,13 @@ class SettingsMixin:
             self._refresh_settings_creator_image()
         if hasattr(self, 'settings_status_label'):
             self.set_status_text(self.settings_status_label, self.settings_status_label.text(), status=self.settings_status_label.property('bt_status') or 'muted')
+        self._refresh_settings_log_controls()
 
     def _sync_chart_slot_inputs(self) -> None:
-        """Keep chart input fields aligned with the current saved chart slots."""
-        for i, slot in enumerate(self.chart_slots):
-            if i < len(self.chart_inputs):
-                self.chart_inputs[i].setText(slot)
+        """Keep dashboard chart controls aligned with the saved workstation state."""
+        if hasattr(self, 'dashboard_symbol_input'):
+            symbol = str(getattr(self, 'dashboard_symbol', self.dashboard_chart_state.get('symbol', 'SPY')) or 'SPY').upper()
+            self.dashboard_symbol_input.setText(symbol)
 
     def _reload_options_table(self) -> None:
         """Rebuild the options positions table from in-memory state."""
@@ -332,9 +397,50 @@ class SettingsMixin:
                     'options_tracker': list(self.options_data) if portfolio_id == self.main_portfolio_id else [],
                 }
             self._persist_all_portfolios()
+        self.chart_page_state = save_chart_page_settings(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)) if isinstance(payload, dict) else save_chart_page_settings(DEFAULT_CHART_PAGE_SETTINGS)
+        chart_page_state = dict(self.chart_page_state)
+        self.p10_symbol = str(chart_page_state.get('symbol', 'SPY') or 'SPY').upper()
+        self.p10_timeframe_label = str(chart_page_state.get('timeframe_label', '1 Day') or '1 Day')
+        self.p10_custom_watchlist = list(chart_page_state.get('watchlist', []))
+        self.p10_active_indicators = list(chart_page_state.get('indicators', ['Volume', '200 MA']))
+        self.p10_auto_follow = bool(chart_page_state.get('auto', True))
+        self.dashboard_chart_state = save_dashboard_chart_settings(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)) if isinstance(payload, dict) else save_dashboard_chart_settings(DEFAULT_DASHBOARD_CHART_SETTINGS)
+        dashboard_chart_state = dict(self.dashboard_chart_state)
+        self.dashboard_symbol = str(dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
+        self.dashboard_timeframe_label = str(dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
+        self.dashboard_active_indicators = list(dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
+        self.dashboard_auto_follow = bool(dashboard_chart_state.get('auto', True))
         self.networth_data = dict(payload.get('net_worth', {'cash': [], 'debt': []})) if isinstance(payload, dict) else {'cash': [], 'debt': []}
         self.last_data = None
         self._sync_after_portfolio_change(refresh_main=False)
+        if hasattr(self, 'p10_symbol_input'):
+            self.p10_symbol_input.setText(self.p10_symbol)
+        if hasattr(self, 'p10_symbol_label'):
+            self.p10_symbol_label.setText(self.p10_symbol)
+        if hasattr(self, '_p10_update_timeframe_button_styles'):
+            self._p10_update_timeframe_button_styles()
+        if hasattr(self, '_p10_update_auto_button_style'):
+            self._p10_update_auto_button_style()
+        if hasattr(self, '_p10_update_indicator_button_styles'):
+            self._p10_update_indicator_button_styles()
+        if hasattr(self, '_p10_rebuild_watchlists'):
+            self._p10_rebuild_watchlists()
+        if hasattr(self, '_p10_render_indicator_panels'):
+            self._p10_render_indicator_panels()
+        if hasattr(self, 'dashboard_symbol_input'):
+            self.dashboard_symbol_input.setText(self.dashboard_symbol)
+        if hasattr(self, 'dashboard_symbol_label'):
+            self.dashboard_symbol_label.setText(self.dashboard_symbol)
+        if hasattr(self, '_dashboard_update_timeframe_button_styles'):
+            self._dashboard_update_timeframe_button_styles()
+        if hasattr(self, '_dashboard_update_auto_button_style'):
+            self._dashboard_update_auto_button_style()
+        if hasattr(self, '_dashboard_update_indicator_button_styles'):
+            self._dashboard_update_indicator_button_styles()
+        if hasattr(self, '_dashboard_render_indicator_panels'):
+            self._dashboard_render_indicator_panels()
+        if hasattr(self, '_dashboard_apply_splitter_sizes'):
+            self._dashboard_apply_splitter_sizes()
         self._sync_chart_slot_inputs()
         self.port_table.setRowCount(0)
         self.target_table.setRowCount(0)
@@ -406,3 +512,34 @@ class SettingsMixin:
             return
         self._set_settings_status('All user data cleared.', 'positive')
         QMessageBox.information(self, 'Clear Complete', 'All saved user data has been cleared.')
+
+    def _on_reset_cache(self) -> None:
+        """Clear the persisted market-data cache after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            'Reset Cache',
+            'This will remove cached stock, chart, and options market data only. Saved portfolio, tracker, and settings files will be kept. Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._set_settings_status('Cache reset cancelled.')
+            return
+        cache_path = user_data_path('budget_cache.db')
+        try:
+            existed = cache_path.exists()
+            if existed:
+                cache_path.unlink()
+            self._mktcap_cache = {}
+            self._return_metrics_cache = {}
+            self._return_metrics_fetching = {}
+        except Exception as exc:
+            self._set_settings_status(f'Cache reset failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Reset Cache Failed', f'Unable to reset cache.\n\n{exc}')
+            return
+        if existed:
+            self._set_settings_status('Market cache cleared.', 'positive')
+            QMessageBox.information(self, 'Reset Cache Complete', 'Cached market data has been cleared.')
+            return
+        self._set_settings_status('Cache already clear.', 'positive')
+        QMessageBox.information(self, 'Reset Cache Complete', 'No cache file was present. Cached market data is already clear.')

@@ -22,7 +22,8 @@ if exist "dist" rmdir /s /q "dist"
 pyinstaller --noconfirm budget_terminal.spec
 if errorlevel 1 exit /b 1
 
+for /f "delims=" %%i in ('python -c "from budget_terminal_app import __version__; print(__version__)"') do set "APP_VERSION=%%i"
+
 echo.
 echo Build complete.
-echo Executable folder: dist\BudgetTerminal
-echo Main executable: dist\BudgetTerminal\BudgetTerminal.exe
+echo Main executable: dist\BudgetTerminal-v%APP_VERSION%.exe
