@@ -2,6 +2,13 @@ from __future__ import annotations
 from typing import Any
 from ..dependencies import *
 
+
+def _worker_count(tickers: Any, upper_bound: int = 8) -> int:
+    """Keep worker pools proportional to the actual request size."""
+    size = len(tickers) if isinstance(tickers, (list, tuple)) else 0
+    return max(1, min(size, upper_bound))
+
+
 class MonthReturnWorker(QObject):
     finished = pyqtSignal(dict)
 
@@ -35,7 +42,7 @@ class MonthReturnWorker(QObject):
                 except Exception as ex:
                     logger.warning(f'Return fetch error {t}: {ex}')
                 return (t, None)
-            with ThreadPoolExecutor(max_workers=30) as executor:
+            with ThreadPoolExecutor(max_workers=_worker_count(self.tickers)) as executor:
                 res_list = list(executor.map(fetch_return, self.tickers))
             for t, ret in res_list:
                 if ret is not None:
@@ -66,7 +73,7 @@ class MarketCapWorker(QObject):
                 except Exception as ex:
                     logger.warning(f'MarketCap fetch error {t}: {ex}')
                     return (t, None)
-            with ThreadPoolExecutor(max_workers=30) as executor:
+            with ThreadPoolExecutor(max_workers=_worker_count(self.tickers)) as executor:
                 res_list = list(executor.map(fetch_mktcap, self.tickers))
             for t, mc in res_list:
                 results[t] = mc

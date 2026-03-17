@@ -24,7 +24,7 @@ class SettingsMixin:
         title_col.setSpacing(6)
         title = QLabel('Settings')
         self.set_theme_role(title, 'page_title')
-        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. Export creates one backup JSON file, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
+        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. User data is auto-saved to Documents\\Budget Terminal User Data\\user_data.json. Export creates one backup JSON file, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
         description.setWordWrap(True)
         self.set_theme_role(description, 'muted')
         title_col.addWidget(title)
@@ -73,13 +73,20 @@ class SettingsMixin:
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setContentsMargins(14, 16, 14, 14)
         actions_layout.setSpacing(12)
-        actions_intro = QLabel('Backup and restore your saved application state. Clear removes user data but keeps dashboard chart slots intact.')
+        actions_intro = QLabel('Backup and restore your saved application state. Runtime changes save automatically to Documents\\Budget Terminal User Data\\user_data.json. Clear removes user data but keeps dashboard chart slots intact.')
         actions_intro.setWordWrap(True)
         self.set_theme_role(actions_intro, 'muted')
+        saved_path_note = QLabel('Saved data location: Documents\\Budget Terminal User Data\\user_data.json')
+        saved_path_note.setWordWrap(True)
+        self.set_theme_role(saved_path_note, 'muted')
         export_btn = QPushButton('Export User Data')
         self.set_theme_variant(export_btn, 'accent')
         export_btn.setMinimumHeight(32)
         export_btn.clicked.connect(self._on_export_user_data)
+        export_ai_btn = QPushButton('Export AI-Readable Data')
+        self.set_theme_variant(export_ai_btn, 'accent')
+        export_ai_btn.setMinimumHeight(32)
+        export_ai_btn.clicked.connect(self._on_export_ai_user_data)
         import_btn = QPushButton('Import User Data')
         self.set_theme_variant(import_btn, 'accent')
         import_btn.setMinimumHeight(32)
@@ -93,7 +100,9 @@ class SettingsMixin:
         reset_cache_btn.setMinimumHeight(32)
         reset_cache_btn.clicked.connect(self._on_reset_cache)
         actions_layout.addWidget(actions_intro)
+        actions_layout.addWidget(saved_path_note)
         actions_layout.addWidget(export_btn)
+        actions_layout.addWidget(export_ai_btn)
         actions_layout.addWidget(import_btn)
         actions_layout.addWidget(clear_btn)
         actions_layout.addWidget(reset_cache_btn)
@@ -371,6 +380,8 @@ class SettingsMixin:
 
     def _apply_runtime_user_data(self, payload: Any) -> None:
         """Apply imported or cleared data to the live UI state."""
+        self._return_metrics_cache = {}
+        self._return_metrics_fetching = {}
         if isinstance(payload, dict) and isinstance(payload.get('portfolios'), dict):
             self.all_portfolios_state = save_all_portfolios_state(payload)
             self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', PORTFOLIO_IDS[0])
@@ -471,6 +482,27 @@ class SettingsMixin:
         self._set_settings_status(f'User data exported to {path}', 'positive')
         QMessageBox.information(self, 'Export Complete', f'User data exported successfully.\n\n{path}')
 
+    def _on_export_ai_user_data(self) -> None:
+        """Export current user data as AI-friendly Markdown."""
+        default_name = f"budget_terminal_ai_export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            'Export AI-Readable User Data',
+            str(Path.home() / default_name),
+            'Markdown Files (*.md);;Text Files (*.txt)',
+        )
+        if not path:
+            self._set_settings_status('AI export cancelled.')
+            return
+        try:
+            export_ai_user_data(path)
+        except Exception as exc:
+            self._set_settings_status(f'AI export failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'AI Export Failed', f'Unable to export AI-readable user data.\n\n{exc}')
+            return
+        self._set_settings_status(f'AI-readable user data exported to {path}', 'positive')
+        QMessageBox.information(self, 'AI Export Complete', f'AI-readable user data exported successfully.\n\n{path}')
+
     def _on_import_user_data(self) -> None:
         """Import user data from a previously exported backup file."""
         path, _ = QFileDialog.getOpenFileName(self, 'Import User Data', str(Path.home()), 'JSON Files (*.json)')
@@ -525,21 +557,26 @@ class SettingsMixin:
         if reply != QMessageBox.StandardButton.Yes:
             self._set_settings_status('Cache reset cancelled.')
             return
-        cache_path = user_data_path('budget_cache.db')
+        cache = CacheManager()
+        cache_path = Path(cache.db_path)
         try:
-            existed = cache_path.exists()
-            if existed:
-                cache_path.unlink()
+            existed = cache.clear_all()
             self._mktcap_cache = {}
             self._return_metrics_cache = {}
             self._return_metrics_fetching = {}
+            self.last_data = None
+            if hasattr(self, '_dashboard_clear_chart'):
+                self._dashboard_clear_chart(getattr(self, 'dashboard_symbol', 'Chart'))
         except Exception as exc:
+            logger.error('Reset cache failed for %s: %s', cache_path, exc)
             self._set_settings_status(f'Cache reset failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Reset Cache Failed', f'Unable to reset cache.\n\n{exc}')
             return
         if existed:
-            self._set_settings_status('Market cache cleared.', 'positive')
-            QMessageBox.information(self, 'Reset Cache Complete', 'Cached market data has been cleared.')
+            logger.info('Market cache cleared at %s.', cache_path)
+            self._set_settings_status('Cached market data cleared.', 'positive')
+            QMessageBox.information(self, 'Reset Cache Complete', 'Cached market data has been cleared and will be rebuilt on the next refresh.')
             return
+        logger.info('Reset cache requested, but no cache artifacts were present at %s.', cache_path)
         self._set_settings_status('Cache already clear.', 'positive')
         QMessageBox.information(self, 'Reset Cache Complete', 'No cache file was present. Cached market data is already clear.')

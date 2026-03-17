@@ -31,23 +31,52 @@ class SimpleChartsMixin:
             if df is None or df.empty:
                 return ([], [], [])
             idx_lower = {str(k).lower(): k for k in df.index}
+
+            def _extract(orig):
+                all_cols = _ordered_cols(df)
+                vals, labels, valid_cols = ([], [], [])
+                for c in all_cols:
+                    try:
+                        v = float(df.at[orig, c])
+                        if not pd.isna(v):
+                            vals.append(v)
+                            labels.append(_col_label(c))
+                            valid_cols.append(c)
+                    except Exception:
+                        pass
+                return (vals, labels, valid_cols) if vals else None
+
             for key in keys:
+                # Try exact match first
+                if key in idx_lower:
+                    result = _extract(idx_lower[key])
+                    if result:
+                        return result
+                # Fall back to substring match
                 for low, orig in idx_lower.items():
                     if key in low:
-                        all_cols = _ordered_cols(df)
-                        vals, labels, valid_cols = ([], [], [])
-                        for c in all_cols:
-                            try:
-                                v = float(df.at[orig, c])
-                                if not pd.isna(v):
-                                    vals.append(v)
-                                    labels.append(_col_label(c))
-                                    valid_cols.append(c)
-                            except Exception:
-                                pass
-                        if vals:
-                            return (vals, labels, valid_cols)
+                        result = _extract(orig)
+                        if result:
+                            return result
             return ([], [], [])
+
+        def _sum_series(df, *key_lists):
+            """Sum multiple _get_series results, aligning by column."""
+            combined = {}
+            col_labels = {}
+            for keys in key_lists:
+                vals, labels, cols = _get_series(df, keys)
+                for v, lbl, c in zip(vals, labels, cols):
+                    combined[c] = combined.get(c, 0.0) + v
+                    col_labels[c] = lbl
+            if not combined:
+                return ([], [], [])
+            sorted_cols = sorted(combined.keys())
+            return (
+                [combined[c] for c in sorted_cols],
+                [col_labels[c] for c in sorted_cols],
+                sorted_cols,
+            )
 
         def _solid_bars(x: Any, heights: Any, color: Any, width: Any=0.7) -> Any:
             """Handle solid bars."""
@@ -176,10 +205,9 @@ class SimpleChartsMixin:
         vals, labels, _ = _get_series(bs_df, ['ordinary shares number', 'shares outstanding', 'common stock shares outstanding'])
         if not vals:
             shares_scalar = info.get('sharesOutstanding')
-            if shares_scalar is not None and fin_df is not None and (not fin_df.empty):
-                all_fin_cols = _ordered_cols(fin_df)
-                vals = [float(shares_scalar)] * len(all_fin_cols)
-                labels = [_col_label(c) for c in all_fin_cols]
+            if shares_scalar is not None:
+                vals = [float(shares_scalar)]
+                labels = ['Current']
         if vals:
             x = list(range(len(vals)))
             pw.addItem(_solid_bars(x, vals, self.theme_series_color(4)))
@@ -190,8 +218,12 @@ class SimpleChartsMixin:
         pw = self.p2_simple_charts[4]
         pw.clear()
         _clear_legend_bar(self.p2_simple_legend_bars[4])
-        cash_series = _get_series(bs_df, ['cash and cash equivalents', 'cash equivalents'])
-        debt_series = _get_series(bs_df, ['total debt', 'long term debt'])
+        cash_series = _sum_series(
+            bs_df,
+            ['cash cash equivalents and short term investments', 'cash and cash equivalents', 'cash equivalents'],
+            ['available for sale securities', 'marketable securities'],
+        )
+        debt_series = _get_series(bs_df, ['long term debt'])
         if cash_series[0] or debt_series[0]:
             _grouped_chart(pw, self.p2_simple_legend_bars[4], [cash_series, debt_series], [-0.25, +0.25], [(self.theme_color('accent_positive'), self.theme_color('text_secondary'), 'Cash'), (self.theme_color('accent_negative'), self.theme_color('text_secondary'), 'Debt')])
         pw = self.p2_simple_charts[5]

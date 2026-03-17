@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 APP_DIR_NAME = 'BudgetTerminal'
+DOCUMENTS_USER_DATA_DIR_NAME = 'Budget Terminal User Data'
 
 
 def is_frozen() -> bool:
@@ -40,5 +41,20 @@ def user_data_dir() -> Path:
 def user_data_path(*parts: Any) -> Path:
     """Resolve a writable per-user application data path."""
     path = user_data_dir().joinpath(*map(str, parts))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def documents_user_data_dir() -> Path:
+    """Return the writable Documents folder used for user-entered app data."""
+    home_dir = Path(os.environ.get('USERPROFILE') or Path.home())
+    path = home_dir / 'Documents' / DOCUMENTS_USER_DATA_DIR_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def documents_user_data_path(*parts: Any) -> Path:
+    """Resolve a writable user-data path under the Documents folder."""
+    path = documents_user_data_dir().joinpath(*map(str, parts))
     path.parent.mkdir(parents=True, exist_ok=True)
     return path

@@ -1,11 +1,11 @@
 from __future__ import annotations
 from typing import Any
 from .dependencies import *
-from .paths import user_data_path
+from .paths import documents_user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = 3
-APP_CONFIG_FILE = user_data_path('config.json')
+USER_DATA_FILE = documents_user_data_path('user_data.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2]}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
@@ -57,18 +57,31 @@ def _normalize_theme_setting(value: Any) -> Any:
     return text if text in SUPPORTED_THEME_IDS else DEFAULT_THEME_SETTINGS['selected_theme']
 
 
-def _normalize_chart_slots(chart_slots: Any) -> Any:
+def _normalize_unique_symbol_list(values: Any) -> Any:
+    """Normalize ticker-like values into an uppercase unique list."""
+    normalized = []
+    if not isinstance(values, list):
+        return normalized
+    for value in values:
+        text = str(value or '').upper().strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _normalize_chart_slots_impl(chart_slots: Any, *, allow_empty: bool) -> Any:
     """Normalize chart slots into the persisted three-slot shape."""
-    slots = []
-    if isinstance(chart_slots, list):
-        for value in chart_slots:
-            text = str(value or '').upper().strip()
-            slots.append(text)
-    if not slots:
+    slots = _normalize_unique_symbol_list(chart_slots)
+    if not slots and not allow_empty:
         slots = list(DEFAULT_CHART_SLOTS)
     while len(slots) < len(DEFAULT_CHART_SLOTS):
         slots.append(DEFAULT_CHART_SLOTS[len(slots)])
     return slots[:len(DEFAULT_CHART_SLOTS)]
+
+
+def _normalize_chart_slots(chart_slots: Any) -> Any:
+    """Normalize chart slots into the persisted three-slot shape."""
+    return _normalize_chart_slots_impl(chart_slots, allow_empty=False)
 
 
 def _normalize_portfolio_names(raw_names: Any) -> Any:
@@ -96,23 +109,11 @@ def _normalize_multi_ticker_payload(data: Any, chart_slots: Any=None) -> Any:
             raw_tickers = data.get('portfolios', {}).get(portfolio_id, [])
             if isinstance(raw_tickers, dict):
                 raw_tickers = raw_tickers.get('tickers', [])
-            if not isinstance(raw_tickers, list):
-                raw_tickers = []
-            normalized = []
-            for value in raw_tickers:
-                text = str(value or '').upper().strip()
-                if text and text not in normalized:
-                    normalized.append(text)
-            payload['portfolios'][portfolio_id] = normalized
+            payload['portfolios'][portfolio_id] = _normalize_unique_symbol_list(raw_tickers)
         return payload
     legacy = _portfolio_payload_with_chart_slots(data, chart_slots)
     payload['chart_slots'] = _normalize_chart_slots(legacy.get('chart_slots'))
-    normalized = []
-    for value in legacy.get('portfolio', []):
-        text = str(value or '').upper().strip()
-        if text and text not in normalized:
-            normalized.append(text)
-    payload['portfolios'][DEFAULT_MAIN_PORTFOLIO_ID] = normalized
+    payload['portfolios'][DEFAULT_MAIN_PORTFOLIO_ID] = _normalize_unique_symbol_list(legacy.get('portfolio', []))
     return payload
 
 
@@ -157,14 +158,14 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
         raw_entry = raw_portfolios.get(portfolio_id, {})
         if not isinstance(raw_entry, dict):
             raw_entry = {}
-        tickers = []
-        for value in raw_entry.get('tickers', raw_entry.get('portfolio', [])):
-            text = str(value or '').upper().strip()
-            if text and text not in tickers:
-                tickers.append(text)
         tracker_data = dict(raw_entry.get('tracker_data', {})) if isinstance(raw_entry.get('tracker_data', {}), dict) else {}
         options_data = list(raw_entry.get('options_data', [])) if isinstance(raw_entry.get('options_data', []), list) else []
-        portfolios[portfolio_id] = {'name': names[portfolio_id], 'tickers': tickers, 'tracker_data': tracker_data, 'options_data': options_data}
+        portfolios[portfolio_id] = {
+            'name': names[portfolio_id],
+            'tickers': _normalize_unique_symbol_list(raw_entry.get('tickers', raw_entry.get('portfolio', []))),
+            'tracker_data': tracker_data,
+            'options_data': options_data,
+        }
     return {
         'chart_slots': base['chart_slots'],
         'main_portfolio_id': main_portfolio_id,
@@ -175,16 +176,7 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
 
 def _sanitize_chart_slots(chart_slots: Any=None) -> Any:
     """Normalize chart-slot input into the persisted 3-slot shape."""
-    raw_slots = chart_slots if isinstance(chart_slots, list) else list(DEFAULT_CHART_SLOTS)
-    slots = []
-    for value in raw_slots:
-        text = str(value or '').upper().strip()
-        if text:
-            slots.append(text)
-    fallback = list(DEFAULT_CHART_SLOTS)
-    while len(slots) < len(fallback):
-        slots.append(fallback[len(slots)])
-    return slots[:len(fallback)]
+    return _normalize_chart_slots_impl(chart_slots, allow_empty=True)
 
 
 def _default_portfolio_entry(portfolio_id: Any, chart_slots: Any=None) -> Any:
@@ -351,6 +343,34 @@ def _serialize_options_storage(state: Any) -> Any:
         },
     }
 
+
+def _normalize_networth_payload(data: Any) -> Any:
+    """Normalize persisted net-worth lists into the supported shape."""
+    payload = data if isinstance(data, dict) else {}
+    cash = payload.get('cash', [])
+    debt = payload.get('debt', [])
+    return {
+        'cash': list(cash) if isinstance(cash, list) else [],
+        'debt': list(debt) if isinstance(debt, list) else [],
+    }
+
+
+def _normalize_theme_payload(settings: Any) -> Any:
+    """Normalize persisted theme settings for the single-file document."""
+    saved = settings if isinstance(settings, dict) else {}
+    return {'selected_theme': _normalize_theme_setting(saved.get('selected_theme'))}
+
+
+def _normalize_options_chain_payload(settings: Any) -> Any:
+    """Normalize persisted options-chain defaults for the single-file document."""
+    saved = settings if isinstance(settings, dict) else {}
+    rate = saved.get('default_risk_free_rate', DEFAULT_OPTIONS_CHAIN_SETTINGS['default_risk_free_rate'])
+    try:
+        rate_value = float(rate)
+    except (TypeError, ValueError):
+        rate_value = DEFAULT_OPTIONS_CHAIN_SETTINGS['default_risk_free_rate']
+    return {'default_risk_free_rate': min(max(rate_value, 0.0), 1.0)}
+
 def fmt_num(val: Any) -> Any:
     """Format large numbers with B/M/K suffix."""
     if val is None:
@@ -374,33 +394,72 @@ def fmt_num(val: Any) -> Any:
     else:
         s = f'{abs_val:.2f}'
     return f'-{s}' if neg else s
-PORTFOLIO_FILE = user_data_path('portfolio.json')
+
+
+def _default_user_data_document() -> Any:
+    """Build the default single-file user-data document."""
+    portfolio_state = _normalize_multi_portfolio_state({})
+    return {
+        'version': USER_DATA_BACKUP_VERSION,
+        'main_portfolio_id': portfolio_state['main_portfolio_id'],
+        'active_portfolio_id': portfolio_state['active_portfolio_id'],
+        'portfolios': portfolio_state['portfolios'],
+        'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
+        'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
+        'net_worth': {'cash': [], 'debt': []},
+        'theme': DEFAULT_THEME_SETTINGS.copy(),
+        'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+    }
+
+
+def _normalize_user_data_document(payload: Any) -> Any:
+    """Normalize persisted single-file user data into the canonical shape."""
+    default = _default_user_data_document()
+    saved = payload if isinstance(payload, dict) else {}
+    portfolio_state = _normalize_multi_portfolio_state(saved)
+    return {
+        'version': USER_DATA_BACKUP_VERSION,
+        'main_portfolio_id': portfolio_state['main_portfolio_id'],
+        'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
+        'portfolios': portfolio_state['portfolios'],
+        'chart_page': _normalize_chart_page_settings(saved.get('chart_page', default['chart_page'])),
+        'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
+        'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
+        'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
+        'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
+    }
+
+
+def _load_user_data_document() -> Any:
+    """Load the current single-file user-data document from Documents."""
+    return _normalize_user_data_document(_read_json(USER_DATA_FILE, None))
+
+
+def _save_user_data_document(data: Any) -> Any:
+    """Persist the normalized single-file user-data document to Documents."""
+    normalized = _normalize_user_data_document(data)
+    _write_json(USER_DATA_FILE, normalized, indent=2)
+    return normalized
 
 
 def load_all_portfolios_state() -> Any:
     """Load the normalized state for all supported portfolios."""
-    portfolio_storage = _normalize_portfolio_storage(_read_json(PORTFOLIO_FILE, None))
-    tracker_storage = _normalize_tracker_storage(_read_json(TRACKER_FILE, None))
-    options_storage = _normalize_options_storage(_read_json(OPTIONS_FILE, None))
-    preferences = load_portfolio_preferences()
+    document = _load_user_data_document()
     state = {
         'version': MULTI_PORTFOLIO_VERSION,
-        'main_portfolio_id': _normalize_main_portfolio_id(preferences.get('main_portfolio_id') or portfolio_storage.get('main_portfolio_id')),
-        'active_portfolio_id': _normalize_main_portfolio_id(preferences.get('active_portfolio_id') or portfolio_storage.get('active_portfolio_id') or preferences.get('main_portfolio_id') or portfolio_storage.get('main_portfolio_id')),
+        'main_portfolio_id': _normalize_main_portfolio_id(document.get('main_portfolio_id')),
+        'active_portfolio_id': _normalize_main_portfolio_id(document.get('active_portfolio_id', document.get('main_portfolio_id'))),
         'portfolios': {},
     }
     for portfolio_id in PORTFOLIO_IDS:
-        portfolio_entry = portfolio_storage['portfolios'].get(portfolio_id, _default_portfolio_entry(portfolio_id))
-        tracker_entry = tracker_storage['portfolios'].get(portfolio_id, {})
-        options_entry = options_storage['portfolios'].get(portfolio_id, [])
-        metadata = preferences.get('portfolios', {}).get(portfolio_id, {})
+        portfolio_entry = document.get('portfolios', {}).get(portfolio_id, _default_portfolio_entry(portfolio_id))
         state['portfolios'][portfolio_id] = {
             'id': portfolio_id,
-            'name': _normalize_portfolio_name(portfolio_id, metadata.get('name')),
+            'name': _normalize_portfolio_name(portfolio_id, portfolio_entry.get('name')),
             'portfolio': list(portfolio_entry.get('portfolio', [])),
             'chart_slots': _sanitize_chart_slots(portfolio_entry.get('chart_slots')),
-            'portfolio_tracker': tracker_entry if isinstance(tracker_entry, dict) else {},
-            'options_tracker': list(options_entry) if isinstance(options_entry, list) else [],
+            'portfolio_tracker': dict(portfolio_entry.get('portfolio_tracker', {})) if isinstance(portfolio_entry.get('portfolio_tracker', {}), dict) else {},
+            'options_tracker': list(portfolio_entry.get('options_tracker', [])) if isinstance(portfolio_entry.get('options_tracker', []), list) else [],
         }
     return state
 
@@ -408,14 +467,11 @@ def load_all_portfolios_state() -> Any:
 def save_all_portfolios_state(state: Any) -> Any:
     """Persist the normalized state for all supported portfolios."""
     normalized = _normalize_multi_portfolio_state(state)
-    _write_json(PORTFOLIO_FILE, _serialize_portfolio_storage(normalized), indent=2)
-    _write_json(TRACKER_FILE, _serialize_tracker_storage(normalized), indent=2)
-    _write_json(OPTIONS_FILE, _serialize_options_storage(normalized), indent=2)
-    save_portfolio_preferences({
-        'main_portfolio_id': normalized['main_portfolio_id'],
-        'active_portfolio_id': normalized.get('active_portfolio_id', normalized['main_portfolio_id']),
-        'portfolios': {portfolio_id: {'name': entry['name']} for portfolio_id, entry in normalized['portfolios'].items()},
-    })
+    document = _load_user_data_document()
+    document['main_portfolio_id'] = normalized['main_portfolio_id']
+    document['active_portfolio_id'] = normalized.get('active_portfolio_id', normalized['main_portfolio_id'])
+    document['portfolios'] = normalized['portfolios']
+    _save_user_data_document(document)
     return normalized
 
 
@@ -450,7 +506,6 @@ def save_tickers(portfolio: Any, chart_slots: Any=None, portfolio_id: Any=None) 
     state['portfolios'][active_id]['portfolio'] = list(portfolio) if isinstance(portfolio, list) else []
     state['portfolios'][active_id]['chart_slots'] = _sanitize_chart_slots(chart_slots if chart_slots is not None else state['portfolios'][active_id].get('chart_slots'))
     save_all_portfolios_state(state)
-TRACKER_FILE = user_data_path('portfolio_tracker.json')
 
 def load_tracker_data(portfolio_id: Any=None) -> Any:
     """Load tracker data."""
@@ -462,7 +517,6 @@ def save_tracker_data(data: Any, portfolio_id: Any=None) -> None:
     active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['portfolio_tracker'] = data if isinstance(data, dict) else {}
     save_all_portfolios_state(state)
-OPTIONS_FILE = user_data_path('options_tracker.json')
 
 def load_options_data(portfolio_id: Any=None) -> Any:
     """Load options data."""
@@ -474,34 +528,23 @@ def save_options_data(data: Any, portfolio_id: Any=None) -> None:
     active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['options_tracker'] = list(data) if isinstance(data, list) else []
     save_all_portfolios_state(state)
-NETWORTH_FILE = user_data_path('net_worth.json')
 
 def load_networth_data() -> Any:
     """Load networth data."""
-    if NETWORTH_FILE.exists():
-        data = _read_json(NETWORTH_FILE, None)
-        if isinstance(data, dict):
-            return data
-    return {'cash': [], 'debt': []}
+    return _normalize_networth_payload(_load_user_data_document().get('net_worth'))
 
 def save_networth_data(data: Any) -> None:
     """Save networth data."""
-    _write_json(NETWORTH_FILE, data, indent=2)
+    document = _load_user_data_document()
+    document['net_worth'] = _normalize_networth_payload(data)
+    _save_user_data_document(document)
 
 
 def build_user_data_backup() -> Any:
     """Build a single-file backup payload for all persisted user data."""
-    portfolio_state = load_all_portfolios_state()
-    backup = {
-        'version': USER_DATA_BACKUP_VERSION,
-        'exported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'main_portfolio_id': portfolio_state['main_portfolio_id'],
-        'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
-        'portfolios': portfolio_state['portfolios'],
-        'chart_page': load_chart_page_settings(),
-        'dashboard_chart': load_dashboard_chart_settings(),
-        'net_worth': load_networth_data(),
-    }
+    backup = _load_user_data_document()
+    backup['version'] = USER_DATA_BACKUP_VERSION
+    backup['exported_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return backup
 
 
@@ -510,29 +553,101 @@ def export_user_data_backup(path: Any) -> None:
     _write_json(path, build_user_data_backup(), indent=2)
 
 
+def _json_block(data: Any) -> Any:
+    """Render a JSON code block for human and AI-readable exports."""
+    return f"```json\n{json.dumps(data, indent=2)}\n```"
+
+
+def build_ai_user_data_export() -> str:
+    """Build a Markdown export optimized for human and AI analysis."""
+    payload = build_user_data_backup()
+    lines = [
+        '# Budget Terminal User Data',
+        '',
+        f"- Exported at: {payload.get('exported_at', '')}",
+        f"- Main portfolio: {payload.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)}",
+        f"- Active portfolio: {payload.get('active_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)}",
+        '',
+        '## Portfolio Summary',
+        '',
+    ]
+    portfolios = payload.get('portfolios', {})
+    for portfolio_id in PORTFOLIO_IDS:
+        entry = portfolios.get(portfolio_id, {})
+        name = str(entry.get('name', DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)) or DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id))
+        tickers = list(entry.get('portfolio', []))
+        tracker = dict(entry.get('portfolio_tracker', {})) if isinstance(entry.get('portfolio_tracker', {}), dict) else {}
+        options_data = list(entry.get('options_tracker', [])) if isinstance(entry.get('options_tracker', []), list) else []
+        lines.extend([
+            f"### {name} ({portfolio_id})",
+            '',
+            f"- Ticker count: {len(tickers)}",
+            f"- Tracker rows: {len(tracker)}",
+            f"- Options positions: {len(options_data)}",
+            f"- Chart slots: {', '.join(list(entry.get('chart_slots', [])))}",
+            '',
+            '**Tickers**',
+            '',
+            _json_block(tickers),
+            '',
+            '**Tracker Data**',
+            '',
+            _json_block(tracker),
+            '',
+            '**Options Data**',
+            '',
+            _json_block(options_data),
+            '',
+        ])
+    lines.extend([
+        '## Net Worth',
+        '',
+        _json_block(payload.get('net_worth', {'cash': [], 'debt': []})),
+        '',
+        '## Charts Page Settings',
+        '',
+        _json_block(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
+        '',
+        '## Dashboard Chart Settings',
+        '',
+        _json_block(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
+        '',
+        '## Theme Settings',
+        '',
+        _json_block(payload.get('theme', DEFAULT_THEME_SETTINGS)),
+        '',
+        '## Options Chain Settings',
+        '',
+        _json_block(payload.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        '',
+        '## Full Normalized Payload',
+        '',
+        _json_block(payload),
+        '',
+    ])
+    return '\n'.join(lines)
+
+
+def export_ai_user_data(path: Any) -> None:
+    """Write an AI-friendly Markdown export of the current user data."""
+    Path(path).write_text(build_ai_user_data_export(), encoding='utf-8')
+
+
 def _validate_backup_payload(payload: Any) -> Any:
     """Validate imported backup data and return a normalized payload."""
     if not isinstance(payload, dict):
         raise ValueError('Backup file must contain a JSON object.')
-    networth_payload = payload.get('net_worth')
-    if not isinstance(networth_payload, dict):
-        raise ValueError('Backup net worth data must be a JSON object.')
-    if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('debt', []), list):
-        raise ValueError('Backup net worth data must include cash and debt lists.')
     has_multi_portfolios = isinstance(payload.get('portfolios'), dict)
     has_legacy_payload = any((key in payload for key in ('portfolio', 'portfolio_tracker', 'options_tracker')))
     if not has_multi_portfolios and not has_legacy_payload:
         raise ValueError('Backup file is missing portfolio data.')
-    portfolio_state = _normalize_multi_portfolio_state(payload)
-    return {
-        'version': MULTI_PORTFOLIO_VERSION,
-        'main_portfolio_id': portfolio_state['main_portfolio_id'],
-        'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
-        'portfolios': portfolio_state['portfolios'],
-        'chart_page': _normalize_chart_page_settings(payload.get('chart_page', {})),
-        'dashboard_chart': _normalize_dashboard_chart_settings(payload.get('dashboard_chart', {})),
-        'net_worth': {'cash': list(networth_payload.get('cash', [])), 'debt': list(networth_payload.get('debt', []))},
-    }
+    if 'net_worth' in payload:
+        networth_payload = payload.get('net_worth')
+        if not isinstance(networth_payload, dict):
+            raise ValueError('Backup net worth data must be a JSON object.')
+        if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('debt', []), list):
+            raise ValueError('Backup net worth data must include cash and debt lists.')
+    return _normalize_user_data_document(payload)
 
 
 def load_user_data_backup(path: Any) -> Any:
@@ -546,11 +661,7 @@ def load_user_data_backup(path: Any) -> Any:
 def apply_user_data_backup(payload: Any) -> Any:
     """Persist validated backup data and return the normalized state."""
     normalized = _validate_backup_payload(payload)
-    save_all_portfolios_state(normalized)
-    save_networth_data(normalized['net_worth'])
-    save_chart_page_settings(normalized.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS))
-    save_dashboard_chart_settings(normalized.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS))
-    return normalized
+    return _save_user_data_document(normalized)
 
 
 def reset_user_data(chart_slots: Any=None) -> Any:
@@ -564,21 +675,76 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'net_worth': {'cash': [], 'debt': []},
+        'theme': DEFAULT_THEME_SETTINGS.copy(),
+        'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
     }
     return apply_user_data_backup(normalized)
 
 
 def load_app_config() -> Any:
     """Load app-level config data."""
-    data = _read_json(APP_CONFIG_FILE, None)
-    return data if isinstance(data, dict) else {}
+    document = _load_user_data_document()
+    return {
+        'portfolio_state': {
+            'main_portfolio_id': document['main_portfolio_id'],
+            'active_portfolio_id': document.get('active_portfolio_id', document['main_portfolio_id']),
+            'portfolios': {portfolio_id: {'name': entry.get('name')} for portfolio_id, entry in document.get('portfolios', {}).items()},
+        },
+        'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
+        'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
+        'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
+        'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+    }
 
 
 def save_app_config(data: Any) -> None:
     """Persist app-level config data."""
-    if not isinstance(data, dict):
-        data = {}
-    _write_json(APP_CONFIG_FILE, data, indent=2)
+    current = _load_user_data_document()
+    saved = data if isinstance(data, dict) else {}
+    portfolio_state = saved.get('portfolio_state', {})
+    if isinstance(portfolio_state, dict):
+        current['main_portfolio_id'] = _normalize_main_portfolio_id(portfolio_state.get('main_portfolio_id', current['main_portfolio_id']))
+        current['active_portfolio_id'] = _normalize_main_portfolio_id(portfolio_state.get('active_portfolio_id', current.get('active_portfolio_id', current['main_portfolio_id'])))
+        names = _normalize_portfolio_catalog(portfolio_state.get('portfolios'))
+        portfolio_map = current.get('portfolios', {})
+        for portfolio_id in PORTFOLIO_IDS:
+            entry = portfolio_map.setdefault(portfolio_id, _default_portfolio_entry(portfolio_id))
+            entry['name'] = names.get(portfolio_id, {}).get('name', entry.get('name'))
+    if 'theme' in saved:
+        current['theme'] = _normalize_theme_payload(saved.get('theme'))
+    if 'chart_page' in saved:
+        current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
+    if 'dashboard_chart' in saved:
+        current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
+    if 'options_chain' in saved:
+        current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
+    _save_user_data_document(current)
+
+
+def _normalize_indicator_list(raw_indicators: Any, default_indicators: Any, *, ensure_ma200: bool=False) -> Any:
+    """Normalize indicator selections into the supported canonical labels."""
+    indicators_source = raw_indicators if isinstance(raw_indicators, list) else list(default_indicators)
+    indicators = []
+    for name in indicators_source:
+        text = str(name or '').strip()
+        normalized = text.upper().replace(' ', '')
+        if normalized == 'VOLUME':
+            text = 'Volume'
+        elif normalized == 'RSI':
+            text = 'RSI'
+        elif normalized in ('200MA', 'MA200'):
+            text = '200 MA'
+        else:
+            text = ''
+        if text and text not in indicators:
+            indicators.append(text)
+    if ensure_ma200 and '200 MA' not in indicators:
+        indicators.append('200 MA')
+    ordered = []
+    for indicator in ('Volume', 'RSI', '200 MA'):
+        if indicator in indicators and indicator not in ordered:
+            ordered.append(indicator)
+    return ordered or list(default_indicators)
 
 
 def _normalize_chart_page_settings(settings: Any) -> Any:
@@ -589,30 +755,8 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
     raw_watchlist = saved.get('watchlist', [])
     if not isinstance(raw_watchlist, list):
         raw_watchlist = []
-    watchlist = []
-    for symbol_value in raw_watchlist:
-        text = str(symbol_value or '').upper().strip()
-        if text and text not in watchlist:
-            watchlist.append(text)
-    raw_indicators = saved.get('indicators', DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-    if not isinstance(raw_indicators, list):
-        raw_indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
-    indicators = []
-    for name in raw_indicators:
-        text = str(name or '').strip()
-        normalized = text.upper().replace(' ', '')
-        if normalized == 'VOLUME':
-            text = 'Volume'
-        elif normalized == 'RSI':
-            text = 'RSI'
-        elif normalized in ('200MA', 'MA200'):
-            text = '200 MA'
-        else:
-            text = ''
-        if text and text not in indicators:
-            indicators.append(text)
-    if not indicators:
-        indicators = list(DEFAULT_CHART_PAGE_SETTINGS['indicators'])
+    watchlist = _normalize_unique_symbol_list(raw_watchlist)
+    indicators = _normalize_indicator_list(saved.get('indicators'), DEFAULT_CHART_PAGE_SETTINGS['indicators'])
     auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
     return {'symbol': symbol, 'timeframe_label': timeframe_label, 'watchlist': watchlist, 'indicators': indicators, 'auto': auto_enabled}
@@ -623,29 +767,11 @@ def _normalize_dashboard_chart_settings(settings: Any) -> Any:
     saved = settings if isinstance(settings, dict) else {}
     symbol = str(saved.get('symbol', DEFAULT_DASHBOARD_CHART_SETTINGS['symbol']) or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol']).upper().strip()
     timeframe_label = str(saved.get('timeframe_label', DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label']) or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label']).strip()
-    raw_indicators = saved.get('indicators', DEFAULT_DASHBOARD_CHART_SETTINGS['indicators'])
-    if not isinstance(raw_indicators, list):
-        raw_indicators = list(DEFAULT_DASHBOARD_CHART_SETTINGS['indicators'])
-    indicators = []
-    for name in raw_indicators:
-        text = str(name or '').strip()
-        normalized = text.upper().replace(' ', '')
-        if normalized == 'VOLUME':
-            text = 'Volume'
-        elif normalized == 'RSI':
-            text = 'RSI'
-        elif normalized in ('200MA', 'MA200'):
-            text = '200 MA'
-        else:
-            text = ''
-        if text and text not in indicators:
-            indicators.append(text)
-    if '200 MA' not in indicators:
-        indicators.append('200 MA')
-    ordered = []
-    for indicator in ('Volume', 'RSI', '200 MA'):
-        if indicator in indicators and indicator not in ordered:
-            ordered.append(indicator)
+    indicators = _normalize_indicator_list(
+        saved.get('indicators'),
+        DEFAULT_DASHBOARD_CHART_SETTINGS['indicators'],
+        ensure_ma200=True,
+    )
     auto_value = saved.get('auto', DEFAULT_DASHBOARD_CHART_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_DASHBOARD_CHART_SETTINGS['auto']
     raw_splitter_sizes = saved.get('splitter_sizes', DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
@@ -663,7 +789,7 @@ def _normalize_dashboard_chart_settings(settings: Any) -> Any:
     return {
         'symbol': symbol or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol'],
         'timeframe_label': timeframe_label or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label'],
-        'indicators': ordered,
+        'indicators': indicators,
         'auto': auto_enabled,
         'splitter_sizes': splitter_sizes,
     }

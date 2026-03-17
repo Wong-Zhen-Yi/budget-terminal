@@ -20,6 +20,13 @@ P10_MIN_REUSABLE_SPAN = 10.0
 
 class ChartsPageMixin:
 
+    def _p10_normalize_datetime_index(self, values: Any) -> Any:
+        """Normalize chart timestamps for safe asof merges across pandas resolutions."""
+        index = pd.DatetimeIndex(pd.to_datetime(values))
+        if getattr(index, 'tz', None) is not None:
+            index = index.tz_localize(None)
+        return pd.DatetimeIndex(index.astype('datetime64[ns]'))
+
     def _p10_on_show(self) -> None:
         """Refresh sidebar state when the Charts page is shown."""
         self._p10_rebuild_watchlists()
@@ -627,12 +634,8 @@ class ChartsPageMixin:
         daily_ma = pd.Series(daily_df['Close']).astype(float).rolling(200, min_periods=200).mean().dropna()
         if daily_ma.empty:
             return pd.Series(index=source_df.index, dtype=float)
-        source_index = pd.DatetimeIndex(pd.to_datetime(source_df.index))
-        daily_index = pd.DatetimeIndex(pd.to_datetime(daily_ma.index))
-        if getattr(source_index, 'tz', None) is not None:
-            source_index = source_index.tz_localize(None)
-        if getattr(daily_index, 'tz', None) is not None:
-            daily_index = daily_index.tz_localize(None)
+        source_index = self._p10_normalize_datetime_index(source_df.index)
+        daily_index = self._p10_normalize_datetime_index(daily_ma.index)
         source_frame = pd.DataFrame(index=source_index).sort_index()
         daily_frame = pd.DataFrame({'ma200': list(daily_ma.values)}, index=daily_index).sort_index()
         aligned = pd.merge_asof(source_frame, daily_frame, left_index=True, right_index=True, direction='backward')['ma200']

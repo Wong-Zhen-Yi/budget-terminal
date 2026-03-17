@@ -291,6 +291,8 @@ class WindowBootstrapMixin:
         self.theme_manager.apply_theme(self.current_theme_id, persist=False)
         self._sync_after_portfolio_change(refresh_main=False)
         self.refresh_data()
+        if hasattr(self, '_p8_request_refresh'):
+            QTimer.singleShot(250, lambda: self._p8_request_refresh(status_text='Loading sector data...'))
         if self.p2_ticker_input.text().strip():
             QTimer.singleShot(200, self.analyze_stock_p2)
 
