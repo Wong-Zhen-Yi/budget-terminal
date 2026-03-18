@@ -66,6 +66,7 @@ class WindowLifecycleMixin:
         self._time_12h = not self._time_12h
         self.time_fmt_btn.setText('12h' if self._time_12h else '24h')
         self.time_fmt_btn.setChecked(self._time_12h)
+        save_time_format(self._time_12h)
         self.update_time()
 
     def update_time(self, *_: Any) -> None:

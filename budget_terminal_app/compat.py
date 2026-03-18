@@ -4,6 +4,7 @@ from .cache import CacheManager
 from .dependencies import *
 from .persistence import *
 from .widgets.charts import CandlestickItem, DateAxisItem, FmtAxisItem
+from .widgets.bar_chart import BarChartWidget
 from .widgets.pie_chart import PieChartWidget
 from .workers.calendar import CalendarWorker, _get_economic_events
 from .workers.data import DataWorker

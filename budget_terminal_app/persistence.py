@@ -348,9 +348,11 @@ def _normalize_networth_payload(data: Any) -> Any:
     """Normalize persisted net-worth lists into the supported shape."""
     payload = data if isinstance(data, dict) else {}
     cash = payload.get('cash', [])
+    pension_insurance = payload.get('pension_insurance', [])
     debt = payload.get('debt', [])
     return {
         'cash': list(cash) if isinstance(cash, list) else [],
+        'pension_insurance': list(pension_insurance) if isinstance(pension_insurance, list) else [],
         'debt': list(debt) if isinstance(debt, list) else [],
     }
 
@@ -406,9 +408,10 @@ def _default_user_data_document() -> Any:
         'portfolios': portfolio_state['portfolios'],
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
-        'net_worth': {'cash': [], 'debt': []},
+        'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'time_12h': False,
     }
 
 
@@ -427,6 +430,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
+        'time_12h': bool(saved.get('time_12h', False)),
     }
 
 
@@ -645,8 +649,8 @@ def _validate_backup_payload(payload: Any) -> Any:
         networth_payload = payload.get('net_worth')
         if not isinstance(networth_payload, dict):
             raise ValueError('Backup net worth data must be a JSON object.')
-        if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('debt', []), list):
-            raise ValueError('Backup net worth data must include cash and debt lists.')
+        if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('pension_insurance', []), list) or not isinstance(networth_payload.get('debt', []), list):
+            raise ValueError('Backup net worth data must include cash, pension_insurance, and debt lists.')
     return _normalize_user_data_document(payload)
 
 
@@ -674,9 +678,10 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         },
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
-        'net_worth': {'cash': [], 'debt': []},
+        'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'time_12h': False,
     }
     return apply_user_data_backup(normalized)
 
@@ -694,6 +699,7 @@ def load_app_config() -> Any:
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        'time_12h': bool(document.get('time_12h', False)),
     }
 
 
@@ -718,6 +724,8 @@ def save_app_config(data: Any) -> None:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
+    if 'time_12h' in saved:
+        current['time_12h'] = bool(saved['time_12h'])
     _save_user_data_document(current)
 
 
@@ -907,3 +915,14 @@ def save_options_chain_settings(settings: Any) -> Any:
     current['options_chain'] = state
     save_app_config(current)
     return state
+
+
+def load_time_format() -> bool:
+    """Load persisted 12h/24h time format preference."""
+    config = load_app_config()
+    return bool(config.get('time_12h', False))
+
+
+def save_time_format(use_12h: bool) -> None:
+    """Persist 12h/24h time format preference."""
+    save_app_config({'time_12h': bool(use_12h)})

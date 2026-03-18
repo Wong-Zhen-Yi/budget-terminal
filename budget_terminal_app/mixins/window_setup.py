@@ -66,11 +66,12 @@ class WindowSetupMixin:
         for name, _ in self._tz_choices:
             self.tz_combo.addItem(name)
         self.tz_combo.currentIndexChanged.connect(self.update_time)
-        self.time_fmt_btn = QPushButton('24h')
+        self._time_12h = load_time_format()
+        self.time_fmt_btn = QPushButton('12h' if self._time_12h else '24h')
         self.time_fmt_btn.setCheckable(True)
+        self.time_fmt_btn.setChecked(self._time_12h)
         self.time_fmt_btn.setFixedWidth(46)
         self.time_fmt_btn.setFixedHeight(26)
-        self._time_12h = False
         self.time_fmt_btn.clicked.connect(self._toggle_time_format)
         self.top_bar.addWidget(self.tz_combo)
         self.top_bar.addWidget(self.time_label)
@@ -120,7 +121,9 @@ class WindowSetupMixin:
         self.port_table.verticalHeader().setVisible(False)
         self.port_table.verticalHeader().setDefaultSectionSize(24)
         self.port_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.port_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.port_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.port_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.port_table.cellClicked.connect(self._dashboard_on_portfolio_click)
         self.port_table.setAlternatingRowColors(True)
         if hasattr(self, '_dashboard_fit_portfolio_table_height'):
             self._dashboard_fit_portfolio_table_height()

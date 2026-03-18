@@ -40,4 +40,5 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
+    icon='budget_terminal_app/assets/app_icon.ico',
 )

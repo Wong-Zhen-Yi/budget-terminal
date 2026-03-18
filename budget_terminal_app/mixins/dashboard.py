@@ -140,6 +140,18 @@ class DashboardMixin:
         self._dashboard_save_state()
         self.refresh_data()
 
+    def _dashboard_on_portfolio_click(self, row: int, _col: int) -> None:
+        """Switch the dashboard chart to the clicked portfolio ticker."""
+        item = self.port_table.item(row, 0)
+        if not item:
+            return
+        symbol = item.text().strip().upper()
+        if symbol and symbol != self.dashboard_symbol:
+            self.dashboard_symbol = symbol
+            self.dashboard_symbol_input.setText(symbol)
+            self._dashboard_save_state()
+            self.refresh_data()
+
     def _dashboard_load_from_input(self) -> None:
         """Load the dashboard ticker from the input field."""
         symbol = self.dashboard_symbol_input.text().upper().strip()
@@ -557,7 +569,13 @@ class DashboardMixin:
             return shares * info['price'] if shares else 0
 
         total_value = sum((market_value(ticker, info) for ticker, info in portfolio.items()))
-        sorted_items = sorted(portfolio.items(), key=lambda item: market_value(item[0], item[1]), reverse=True)
+        def dollar_gain_key(ticker, info):
+            t = tracker.get(ticker, {})
+            shares = t.get('shares', 0)
+            avg_price = t.get('avg_price', 0)
+            return (info['price'] - avg_price) * shares if shares else 0
+
+        sorted_items = sorted(portfolio.items(), key=lambda item: dollar_gain_key(item[0], item[1]), reverse=True)
         self.port_table.setRowCount(len(sorted_items))
         for i, (ticker, info) in enumerate(sorted_items):
             price = info['price']
