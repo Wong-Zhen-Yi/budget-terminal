@@ -10,6 +10,107 @@ P1_MIN_REUSABLE_SPAN = 10.0
 
 
 class DashboardMixin:
+    def _dashboard_refresh_portfolio_selector(self) -> None:
+        """Mirror the saved portfolio catalog into the dashboard selector."""
+        if not hasattr(self, 'dashboard_portfolio_combo'):
+            return
+        if hasattr(self, '_p4_get_portfolio_slots'):
+            slots = self._p4_get_portfolio_slots()
+        else:
+            slots = [{'id': index, 'name': f'Portfolio {index + 1}'} for index in range(3)]
+        showing_all = getattr(self, '_dashboard_showing_all', False)
+        if not showing_all:
+            if hasattr(self, '_p4_get_main_portfolio_index'):
+                current_index = self._p4_get_main_portfolio_index()
+            else:
+                current_index = 0
+        self.dashboard_portfolio_combo.blockSignals(True)
+        self.dashboard_portfolio_combo.clear()
+        self.dashboard_portfolio_combo.addItem('All Portfolios', -1)
+        for index, slot in enumerate(slots):
+            label = str(slot.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}')
+            self.dashboard_portfolio_combo.addItem(label, index)
+        if showing_all:
+            self.dashboard_portfolio_combo.setCurrentIndex(0)
+            self._dashboard_apply_all_portfolios()
+        else:
+            self.dashboard_portfolio_combo.setCurrentIndex(min(max(int(current_index), 0), max(self.dashboard_portfolio_combo.count() - 2, 0)) + 1)
+        self.dashboard_portfolio_combo.blockSignals(False)
+        self._dashboard_update_add_ticker_visibility()
+
+    def _dashboard_on_portfolio_changed(self, index: int) -> None:
+        """Switch the dashboard to a different saved portfolio slot."""
+        if index < 0:
+            return
+        combo_data = self.dashboard_portfolio_combo.itemData(index)
+        if combo_data == -1:
+            self._dashboard_showing_all = True
+            self._dashboard_apply_all_portfolios()
+            self._dashboard_update_add_ticker_visibility()
+            if hasattr(self, 'refresh_data'):
+                self.refresh_data()
+            return
+        self._dashboard_showing_all = False
+        portfolio_index = int(combo_data)
+        portfolio_index = min(max(portfolio_index, 0), 2)
+        if hasattr(self, '_p4_get_main_portfolio_index') and portfolio_index == self._p4_get_main_portfolio_index():
+            self._dashboard_refresh_portfolio_selector()
+            return
+        for name in ('set_main_portfolio_index', '_set_main_portfolio_index', '_select_main_portfolio', 'use_portfolio_as_main'):
+            fn = getattr(self, name, None)
+            if callable(fn):
+                fn(portfolio_index)
+                break
+        else:
+            if hasattr(self, '_portfolio_id_from_index'):
+                self.main_portfolio_id = self._portfolio_id_from_index(portfolio_index)
+            self._dashboard_refresh_portfolio_selector()
+            if hasattr(self, 'refresh_data'):
+                self.refresh_data()
+
+    def _dashboard_apply_all_portfolios(self) -> None:
+        """Merge all portfolio tickers and tracker data for the combined 'All' view."""
+        all_state = getattr(self, 'all_portfolios_state', {})
+        portfolios = all_state.get('portfolios', {}) if isinstance(all_state, dict) else {}
+        merged_tickers = []
+        merged_tracker = {}
+        for portfolio_id in PORTFOLIO_IDS:
+            entry = portfolios.get(portfolio_id, {})
+            if not isinstance(entry, dict):
+                continue
+            tracker = entry.get('portfolio_tracker', {}) if isinstance(entry.get('portfolio_tracker'), dict) else {}
+            for ticker in entry.get('portfolio', []):
+                t = str(ticker or '').upper().strip()
+                if not t:
+                    continue
+                t_data = tracker.get(t, {})
+                shares = t_data.get('shares', 0) if isinstance(t_data, dict) else 0
+                avg_price = t_data.get('avg_price', 0) if isinstance(t_data, dict) else 0
+                if t in merged_tracker:
+                    existing = merged_tracker[t]
+                    old_shares = existing.get('shares', 0)
+                    old_avg = existing.get('avg_price', 0)
+                    total_shares = old_shares + shares
+                    if total_shares > 0:
+                        merged_tracker[t] = {
+                            'shares': total_shares,
+                            'avg_price': (old_shares * old_avg + shares * avg_price) / total_shares,
+                        }
+                else:
+                    merged_tracker[t] = {'shares': shares, 'avg_price': avg_price}
+                if t not in merged_tickers:
+                    merged_tickers.append(t)
+        self.tickers = merged_tickers
+        self.tracker_data = merged_tracker
+
+    def _dashboard_update_add_ticker_visibility(self) -> None:
+        """Show or hide the add-ticker controls based on the active portfolio view."""
+        showing_all = getattr(self, '_dashboard_showing_all', False)
+        if hasattr(self, 'ticker_input'):
+            self.ticker_input.setVisible(not showing_all)
+        for child in getattr(self, '_dashboard_add_btn_refs', []):
+            child.setVisible(not showing_all)
+
     def _dashboard_fit_portfolio_table_height(self, max_rows: int=8) -> None:
         """Keep the portfolio table compact while preserving its current column layout."""
         if not hasattr(self, 'port_table'):
@@ -467,6 +568,8 @@ class DashboardMixin:
 
     def add_ticker(self) -> None:
         """Add ticker."""
+        if getattr(self, '_dashboard_showing_all', False):
+            return
         t = self.ticker_input.text().upper().strip()
         if t:
             if t in self.tickers:
@@ -483,6 +586,8 @@ class DashboardMixin:
 
     def remove_ticker(self, t: Any) -> None:
         """Remove ticker."""
+        if getattr(self, '_dashboard_showing_all', False):
+            return
         if t in self.tickers:
             self.tickers.remove(t)
             if t in self.tracker_data:
@@ -557,7 +662,10 @@ class DashboardMixin:
         if not self.last_data:
             return
         portfolio = {ticker: info for ticker, info in self.last_data.get('portfolio', {}).items() if ticker in self.tickers}
-        if hasattr(self, '_p4_portfolio_name'):
+        showing_all = getattr(self, '_dashboard_showing_all', False)
+        if showing_all:
+            header_name = 'All Portfolios'
+        elif hasattr(self, '_p4_portfolio_name'):
             header_name = self._p4_portfolio_name(self.main_portfolio_index)
         else:
             header_name = 'My Portfolio'
@@ -610,6 +718,8 @@ class DashboardMixin:
             del_btn.setFixedHeight(20)
             self.set_theme_variant(del_btn, 'danger')
             del_btn.clicked.connect(lambda checked, sym=ticker: self.remove_ticker(sym))
+            if showing_all:
+                del_btn.setVisible(False)
             self.port_table.setCellWidget(i, 5, del_btn)
         self._dashboard_fit_portfolio_table_height()
 

@@ -63,10 +63,17 @@ class NewsMixin:
         self.set_theme_role(self.p3_summary_status, 'status_muted')
         self.p3_summary_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         summarizer_layout.addWidget(self.p3_summary_status)
+        briefing_btns = QHBoxLayout()
+        briefing_btns.setSpacing(6)
         summarize_all_btn = QPushButton('Generate Briefing')
         self.set_theme_variant(summarize_all_btn, 'accent')
         summarize_all_btn.clicked.connect(self._summarize_all_news)
-        summarizer_layout.addWidget(summarize_all_btn)
+        export_news_btn = QPushButton('Export News')
+        self.set_theme_variant(export_news_btn, 'positive')
+        export_news_btn.clicked.connect(self._p3_export_news)
+        briefing_btns.addWidget(summarize_all_btn)
+        briefing_btns.addWidget(export_news_btn)
+        summarizer_layout.addLayout(briefing_btns)
         self._p3_summarizing = False
         panels_row.addWidget(summarizer_box, 1)
         layout.addLayout(panels_row, 1)
@@ -146,6 +153,68 @@ class NewsMixin:
             self.p3_summary_text.setPlainText('No news loaded yet.')
             return
         self._run_summarizer(articles)
+
+    def _p3_export_news(self) -> None:
+        """Export all loaded news to clipboard as plain text for LLM consumption."""
+        portfolio_articles = self._p3_loaded_news.get('portfolio', [])
+        macro_articles = self._p3_loaded_news.get('macro', [])
+        if not portfolio_articles and not macro_articles:
+            self.p3_summary_status.setText('No news to export.')
+            return
+        lines = []
+        lines.append('=== NEWS EXPORT ===')
+        lines.append('')
+        if portfolio_articles:
+            lines.append('--- PORTFOLIO NEWS ---')
+            lines.append('')
+            for a in self._sort_articles_by_newest(portfolio_articles):
+                ticker = a.get('ticker', '')
+                title = a.get('title', 'N/A')
+                source = a.get('source', '')
+                time_str = a.get('time', '')
+                url = a.get('url', '')
+                lines.append(f'[{ticker}] {title}')
+                meta = []
+                if source:
+                    meta.append(f'Source: {source}')
+                if time_str:
+                    meta.append(f'Time: {time_str}')
+                if url:
+                    meta.append(f'URL: {url}')
+                if meta:
+                    lines.append('  ' + ' | '.join(meta))
+                lines.append('')
+        if macro_articles:
+            lines.append('--- MARKET & MACRO NEWS ---')
+            lines.append('')
+            for a in self._sort_articles_by_newest(macro_articles):
+                ticker = a.get('ticker', '')
+                title = a.get('title', 'N/A')
+                source = a.get('source', '')
+                time_str = a.get('time', '')
+                url = a.get('url', '')
+                lines.append(f'[{ticker}] {title}')
+                meta = []
+                if source:
+                    meta.append(f'Source: {source}')
+                if time_str:
+                    meta.append(f'Time: {time_str}')
+                if url:
+                    meta.append(f'URL: {url}')
+                if meta:
+                    lines.append('  ' + ' | '.join(meta))
+                lines.append('')
+        text = '\n'.join(lines)
+        total = len(portfolio_articles) + len(macro_articles)
+        path = documents_user_data_path('news_export.txt')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        except OSError as e:
+            self.p3_summary_status.setText(f'Export failed: {e}')
+            return
+        QApplication.clipboard().setText(text)
+        self.p3_summary_status.setText(f'Exported {total} articles to clipboard & {path}')
 
     def _run_summarizer(self, articles: Any) -> None:
         """Handle run summarizer."""

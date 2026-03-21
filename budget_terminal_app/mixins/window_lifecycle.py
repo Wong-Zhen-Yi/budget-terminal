@@ -28,9 +28,10 @@ class WindowLifecycleMixin:
         self._register_page(4, self.btn_page3, on_show=lambda: self.p3_crawler_timer.start(40) if hasattr(self, 'p3_crawler_timer') else None, on_hide=lambda: self.p3_crawler_timer.stop() if hasattr(self, 'p3_crawler_timer') else None)
         self._register_page(5, self.btn_page8)
         self._register_page(6, self.btn_page10, on_show=self._p10_on_show)
-        self._register_page(7, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
-        self._register_page(8, self.btn_page5)
-        self._register_page(9, self.btn_page9)
+        self._register_page(7, self.btn_page11, on_show=self._mc_on_show)
+        self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
+        self._register_page(9, self.btn_page5)
+        self._register_page(10, self.btn_page9)
 
     def resizeEvent(self, event: Any) -> None:
         """Handle resizeEvent."""
@@ -38,7 +39,7 @@ class WindowLifecycleMixin:
         if self.last_data:
             self.repopulate_portfolio()
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 7:
+            if self.stacked_widget.currentIndex() == 8:
                 self._p2_relayout_charts()
         if hasattr(self, '_p8_relayout_cards') and hasattr(self, 'stacked_widget'):
             if self.stacked_widget.currentIndex() == 5:

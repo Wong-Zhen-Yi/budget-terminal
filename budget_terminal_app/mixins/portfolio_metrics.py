@@ -36,6 +36,91 @@ class PortfolioMetricsMixin:
             self._get_portfolio_entry(self.active_portfolio_id).setdefault('portfolio_tracker', {}),
         )
 
+    def _p4_export_for_llm(self) -> None:
+        """Export the active portfolio's stock and options data to clipboard for LLM analysis."""
+        portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
+        tickers = self._p4_active_tickers()
+        tracker_data = self._p4_active_tracker_data()
+        options_data = getattr(self, 'active_options_data', getattr(self, 'options_data', []))
+        active_index = self._p4_get_active_portfolio_index()
+        portfolio_name = self._p4_portfolio_name(active_index)
+        lines = []
+        lines.append(f'=== PORTFOLIO EXPORT: {portfolio_name} ===')
+        lines.append('')
+        lines.append('--- STOCK POSITIONS ---')
+        lines.append('')
+        if not tickers:
+            lines.append('(no stock positions)')
+            lines.append('')
+        else:
+            metrics_map, total_mv = self._p4_build_tracker_metrics_map(portfolio)
+            sorted_tickers = sorted(tickers, key=lambda t: metrics_map.get(t, {}).get('market_value', 0), reverse=True)
+            for ticker in sorted_tickers:
+                m = metrics_map.get(ticker, {})
+                shares = m.get('shares', 0)
+                avg_price = m.get('avg_price', 0)
+                price = m.get('price', 0)
+                change = m.get('change', 0)
+                cost = m.get('cost', 0)
+                mv = m.get('market_value', 0)
+                weight = m.get('weight', 0)
+                gain = m.get('dollar_gain', 0)
+                growth = m.get('growth', 0)
+                mc = self._mktcap_cache.get(ticker)
+                mc_str = self._format_market_cap(mc) if mc is not None else 'N/A'
+                sign = '+' if change >= 0 else ''
+                gain_sign = '+' if gain >= 0 else ''
+                growth_sign = '+' if growth >= 0 else ''
+                lines.append(f'{ticker}')
+                lines.append(f'  Shares: {shares:g} | Avg Price: ${avg_price:.2f} | Cost Basis: ${cost:,.2f}')
+                lines.append(f'  Current Price: ${price:.2f} | Day Change: {sign}{change:.2f}%')
+                lines.append(f'  Market Value: ${mv:,.2f} | Weight: {weight:.1f}%')
+                lines.append(f'  P&L: {gain_sign}${gain:,.2f} | Growth: {growth_sign}{growth:.1f}%')
+                lines.append(f'  Market Cap: {mc_str}')
+                lines.append('')
+            lines.append(f'Total Portfolio Value: ${total_mv:,.2f}')
+            lines.append('')
+        lines.append('--- OPTIONS POSITIONS ---')
+        lines.append('')
+        if not options_data:
+            lines.append('(no options positions)')
+            lines.append('')
+        else:
+            for pos in options_data:
+                ticker = pos.get('ticker', '?')
+                strategy = pos.get('strategy', 'Calls')
+                expiry = pos.get('expiry', 'N/A')
+                strike = pos.get('strike', 0)
+                contracts = pos.get('contracts', 1)
+                premium = pos.get('premium', 0)
+                current = pos.get('current_price', 0)
+                iv = pos.get('iv', 0)
+                delta = pos.get('delta', 0)
+                theta = pos.get('theta', 0)
+                is_seller = strategy in ('Covered Call', 'Cash Secured Put')
+                if is_seller:
+                    pl = (premium - current) * contracts * 100
+                else:
+                    pl = (current - premium) * contracts * 100
+                pl_sign = '+' if pl >= 0 else ''
+                lines.append(f'{ticker} | {strategy} | Strike: ${strike:.2f} | Expiry: {expiry}')
+                lines.append(f'  Contracts: {contracts} | Premium: ${premium:.2f} | Current: ${current:.2f}')
+                lines.append(f'  IV: {iv:.1f}% | Delta: {delta:.3f} | Theta: {theta:.3f}')
+                lines.append(f'  P&L: {pl_sign}${pl:,.2f}')
+                lines.append('')
+        text = '\n'.join(lines)
+        total_items = len(tickers) + len(options_data)
+        safe_name = portfolio_name.replace(' ', '_').lower()
+        path = documents_user_data_path(f'{safe_name}_export.txt')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        except OSError as e:
+            self.set_status_text(self.status_bar, f'Export failed: {e}', status='negative')
+            return
+        QApplication.clipboard().setText(text)
+        self.set_status_text(self.status_bar, f'Exported {portfolio_name} ({total_items} positions) to clipboard & {path}', status='positive')
+
     def _get_return_timeframe_config(self, timeframe_key: Any) -> Any:
         """Return fetch/render config for the requested timeframe."""
         current_year = datetime.date.today().year

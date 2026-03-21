@@ -698,6 +698,7 @@ def load_app_config() -> Any:
         'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
+        'multi_charts': dict(document.get('multi_charts', {})),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
         'time_12h': bool(document.get('time_12h', False)),
     }
@@ -722,6 +723,13 @@ def save_app_config(data: Any) -> None:
         current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
     if 'dashboard_chart' in saved:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
+    if 'multi_charts' in saved:
+        raw_multi = saved.get('multi_charts', {})
+        raw_multi = raw_multi if isinstance(raw_multi, dict) else {}
+        current['multi_charts'] = {
+            'custom_symbols': _normalize_unique_symbol_list(raw_multi.get('custom_symbols', [])),
+            'order': _normalize_unique_symbol_list(raw_multi.get('order', [])),
+        }
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
     if 'time_12h' in saved:
@@ -885,6 +893,29 @@ def save_dashboard_chart_settings(settings: Any) -> Any:
     current['dashboard_chart'] = state
     save_app_config(current)
     return state
+
+
+def load_multi_charts_settings() -> Any:
+    """Load persisted state for the Multi Charts page."""
+    config = load_app_config()
+    saved = config.get('multi_charts', {})
+    if not isinstance(saved, dict):
+        saved = {}
+    return {
+        'custom_symbols': _normalize_unique_symbol_list(saved.get('custom_symbols', [])),
+        'order': _normalize_unique_symbol_list(saved.get('order', [])),
+    }
+
+
+def save_multi_charts_settings(settings: Any) -> None:
+    """Persist state for the Multi Charts page."""
+    current = load_app_config()
+    payload = settings if isinstance(settings, dict) else {}
+    current['multi_charts'] = {
+        'custom_symbols': _normalize_unique_symbol_list(payload.get('custom_symbols', [])),
+        'order': _normalize_unique_symbol_list(payload.get('order', [])),
+    }
+    save_app_config(current)
 
 
 def load_options_chain_settings() -> Any:

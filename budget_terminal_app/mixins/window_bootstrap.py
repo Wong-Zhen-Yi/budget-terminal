@@ -200,6 +200,8 @@ class WindowBootstrapMixin:
             self._reload_options_table()
         if hasattr(self, '_p4_refresh_portfolio_selector'):
             self._p4_refresh_portfolio_selector()
+        if hasattr(self, '_dashboard_refresh_portfolio_selector'):
+            self._dashboard_refresh_portfolio_selector()
         if hasattr(self, '_p10_rebuild_watchlists'):
             self._p10_rebuild_watchlists()
         if hasattr(self, '_p6_update_total'):

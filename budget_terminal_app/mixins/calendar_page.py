@@ -298,6 +298,23 @@ class CalendarPageMixin:
                 d = info['exdiv']
                 if d.year == year and d.month == month:
                     date_events.setdefault(d.day, []).append((ticker, 'ExDiv', '#4fc3f7'))
+        _STRATEGY_SHORT = {'Calls': 'C', 'Puts': 'P', 'Covered Call': 'CC', 'Cash Secured Put': 'CSP'}
+        for pos in self._p7_get_main_portfolio_options():
+            status = str(pos.get('status', 'Open') or 'Open')
+            if status.lower() != 'open':
+                continue
+            expiry_text = str(pos.get('expiry', '') or '').strip()
+            if not expiry_text:
+                continue
+            try:
+                expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
+            except ValueError:
+                continue
+            if expiry_date.year == year and expiry_date.month == month:
+                ticker_opt = str(pos.get('ticker', '') or '').upper().strip()
+                strategy = str(pos.get('strategy', 'Calls') or 'Calls')
+                short = _STRATEGY_SHORT.get(strategy, strategy[:2])
+                date_events.setdefault(expiry_date.day, []).append((ticker_opt, short, '#e91e63'))
         cal = calendar.Calendar(firstweekday=0)
         month_days = list(cal.itermonthdays(year, month))
         for row in range(6):
