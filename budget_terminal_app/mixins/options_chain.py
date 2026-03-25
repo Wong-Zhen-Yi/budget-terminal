@@ -221,6 +221,28 @@ class OptionsChainMixin:
             if col not in enriched.columns:
                 enriched[col] = 0.0
             enriched[col] = pd.to_numeric(enriched[col], errors='coerce')
+        # Fill missing IVs from option prices (e.g. when market is closed and yfinance returns 0)
+        iv_col = enriched['impliedVolatility']
+        needs_iv = iv_col.isna() | (iv_col <= 0)
+        if needs_iv.any() and spot_price > 0:
+            for idx in enriched.index[needs_iv]:
+                row = enriched.loc[idx]
+                bid = float(row.get('bid', 0) or 0)
+                ask = float(row.get('ask', 0) or 0)
+                last = float(row.get('lastPrice', 0) or 0)
+                price = ((bid + ask) / 2) if (bid > 0 and ask > 0) else last
+                computed_iv = self._p5_implied_vol(
+                    spot_price,
+                    float(row.get('strike', 0) or 0),
+                    expiry,
+                    risk_free_rate,
+                    dividend_yield,
+                    price,
+                    str(row.get('type', '')).strip().lower(),
+                )
+                if computed_iv > 0:
+                    enriched.at[idx, 'impliedVolatility'] = computed_iv
+            enriched['iv_percent'] = pd.to_numeric(enriched['impliedVolatility'], errors='coerce').fillna(0.0) * 100.0
         greeks = enriched.apply(
             lambda row: pd.Series(
                 self._p5_calc_greeks(
@@ -249,6 +271,43 @@ class OptionsChainMixin:
         if spot_price:
             self.p5_price_lbl.setText(f'${spot_price:.2f}')
         self._p5_populate_tables(df, expiry)
+
+    def _p5_implied_vol(self, spot: float, strike: float, expiry: str, risk_free_rate: float, dividend_yield: float, market_price: float, option_type: str) -> float:
+        """Newton-Raphson solver to back out implied volatility from an option price."""
+        if market_price <= 0 or spot <= 0 or strike <= 0 or option_type not in ('call', 'put'):
+            return 0.0
+        try:
+            exp_date = datetime.datetime.strptime(expiry, '%Y-%m-%d').date()
+        except ValueError:
+            return 0.0
+        dte_days = max((exp_date - datetime.date.today()).days, 0)
+        t = max(dte_days / 365.0, 1.0 / 365.0)
+        rate = min(max(float(risk_free_rate), 0.0), 1.0)
+        dividend = min(max(float(dividend_yield), 0.0), 1.0)
+        normal = NormalDist()
+        exp_neg_qt = math.exp(-dividend * t)
+        exp_neg_rt = math.exp(-rate * t)
+        sqrt_t = math.sqrt(t)
+        sigma = 0.3
+        for _ in range(30):
+            denom = sigma * sqrt_t
+            if denom <= 0:
+                return 0.0
+            d1 = (math.log(spot / strike) + (rate - dividend + 0.5 * sigma * sigma) * t) / denom
+            d2 = d1 - denom
+            pdf_d1 = normal.pdf(d1)
+            if option_type == 'call':
+                bs_price = spot * exp_neg_qt * normal.cdf(d1) - strike * exp_neg_rt * normal.cdf(d2)
+            else:
+                bs_price = strike * exp_neg_rt * normal.cdf(-d2) - spot * exp_neg_qt * normal.cdf(-d1)
+            vega = spot * exp_neg_qt * pdf_d1 * sqrt_t
+            if vega < 1e-12:
+                break
+            sigma -= (bs_price - market_price) / vega
+            sigma = max(0.001, min(sigma, 10.0))
+            if abs(bs_price - market_price) < 0.001:
+                return sigma
+        return 0.0
 
     def _p5_calc_greeks(self, spot: float, strike: float, expiry: str, iv: float, option_type: str, risk_free_rate: float, dividend_yield: float) -> dict[str, Any]:
         """Compute Black-Scholes Greeks for one option row."""

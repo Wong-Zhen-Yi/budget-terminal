@@ -28,3 +28,4 @@ logging.getLogger('yfinance').setLevel(logging.WARNING)
 logging.getLogger('peewee').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 YF_LOCK = threading.Lock()
+from .workers.pre_market import PreMarketWorker

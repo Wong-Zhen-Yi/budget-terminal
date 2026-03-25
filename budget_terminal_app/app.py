@@ -2,6 +2,8 @@ from __future__ import annotations
 from .compat import *
 from .mixins.calendar_page import CalendarPageMixin
 from .mixins.dashboard import DashboardMixin
+from .mixins.etf_analyser import EtfAnalyserMixin
+from .mixins.pre_market import PreMarketMixin
 from .mixins.earnings_matrix_extract import EarningsMatrixExtractMixin
 from .mixins.earnings_matrix_tables import EarningsMatrixTablesMixin
 from .mixins.fundamentals_render import FundamentalsRenderMixin
@@ -24,5 +26,5 @@ from .mixins.window_bootstrap import WindowBootstrapMixin
 from .mixins.window_lifecycle import WindowLifecycleMixin
 from .mixins.window_setup import WindowSetupMixin
 
-class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, MultiChartsMixin, QMainWindow):
+class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, MultiChartsMixin, QMainWindow):
     _invoke_main = pyqtSignal(object)

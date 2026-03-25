@@ -1,11 +1,12 @@
 from __future__ import annotations
 from typing import Any
 from .dependencies import *
-from .paths import documents_user_data_path
+from .paths import legacy_documents_user_data_path, user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = 3
-USER_DATA_FILE = documents_user_data_path('user_data.json')
+USER_DATA_FILE = user_data_path('user_data.json')
+LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2]}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
@@ -434,13 +435,39 @@ def _normalize_user_data_document(payload: Any) -> Any:
     }
 
 
+def _load_legacy_user_data_document() -> Any:
+    """Load the old Documents-based user-data file when present."""
+    return _normalize_user_data_document(_read_json(LEGACY_USER_DATA_FILE, None))
+
+
+def _migrate_legacy_user_data_file() -> Any:
+    """Move the legacy Documents-based save file into LocalAppData once."""
+    if Path(USER_DATA_FILE).exists():
+        return None
+    legacy_path = Path(LEGACY_USER_DATA_FILE)
+    if not legacy_path.exists():
+        return None
+    normalized = _load_legacy_user_data_document()
+    _write_json(USER_DATA_FILE, normalized, indent=2)
+    try:
+        legacy_path.unlink()
+    except OSError:
+        logger.warning('User data migrated to %s but the legacy file could not be removed: %s', USER_DATA_FILE, legacy_path)
+    else:
+        logger.info('Migrated user data from %s to %s.', legacy_path, USER_DATA_FILE)
+    return normalized
+
+
 def _load_user_data_document() -> Any:
-    """Load the current single-file user-data document from Documents."""
+    """Load the current single-file user-data document from LocalAppData."""
+    migrated = _migrate_legacy_user_data_file()
+    if migrated is not None:
+        return migrated
     return _normalize_user_data_document(_read_json(USER_DATA_FILE, None))
 
 
 def _save_user_data_document(data: Any) -> Any:
-    """Persist the normalized single-file user-data document to Documents."""
+    """Persist the normalized single-file user-data document to LocalAppData."""
     normalized = _normalize_user_data_document(data)
     _write_json(USER_DATA_FILE, normalized, indent=2)
     return normalized

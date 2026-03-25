@@ -1,6 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+project_root = os.path.abspath('.')
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from budget_terminal_app import __version__
 
 app_name = f'BudgetTerminal-v{__version__}'
@@ -12,7 +20,7 @@ hiddenimports = collect_submodules('yfinance')
 
 a = Analysis(
     ['budget_terminal.py'],
-    pathex=[],
+    pathex=[project_root],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

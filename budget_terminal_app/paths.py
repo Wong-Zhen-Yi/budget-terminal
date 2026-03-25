@@ -58,3 +58,9 @@ def documents_user_data_path(*parts: Any) -> Path:
     path = documents_user_data_dir().joinpath(*map(str, parts))
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def legacy_documents_user_data_path(*parts: Any) -> Path:
+    """Resolve the legacy Documents-based user-data path used by older builds."""
+    home_dir = Path(os.environ.get('USERPROFILE') or Path.home())
+    return home_dir.joinpath('Documents', DOCUMENTS_USER_DATA_DIR_NAME, *map(str, parts))

@@ -7,6 +7,28 @@ from ..compat import *
 P1_AUTO_ANCHOR = 0.85
 P1_DEFAULT_STARTUP_SPAN = 80.0
 P1_MIN_REUSABLE_SPAN = 10.0
+P1_OPTIONS_EXPORT_BUCKETS = (
+    ('0_week', '0 Week'),
+    ('2_weeks', '2 Weeks'),
+    ('4_weeks', '4 Weeks'),
+)
+P1_OPTIONS_EXPORT_INSTRUCTIONS = """Use the options volume data below to produce a concise market read for this symbol.
+
+Instructions for the external LLM:
+1. Compare all three expiry buckets together instead of analyzing each table in isolation.
+2. Identify call versus put skew, strike clustering, repeated strikes across expirations, and where the largest volume concentration sits.
+3. Infer directional bias carefully. Treat this as incomplete flow evidence, not proof of positioning.
+4. Highlight where the option activity may point to support, resistance, pinning, breakout speculation, hedging, or downside protection.
+5. Explicitly call out missing context that limits confidence, including open interest, implied volatility, moneyness versus spot, premium size, and trade timing.
+
+Format the response with these exact sections:
+- What Stands Out
+- Bullish Signals
+- Bearish Signals
+- Key Levels / Strikes
+- Important Caveats
+- Overall Read
+"""
 
 
 class DashboardMixin:
@@ -767,6 +789,122 @@ class DashboardMixin:
                 vol_item = QTableWidgetItem(vol_str)
                 vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(row, 5, vol_item)
+
+    def _dashboard_normalize_option_buckets(self, symbol: Any, data: Any) -> tuple[dict[str, list[Any]], dict[str, str]]:
+        """Return dashboard option bucket data in a consistent three-bucket shape."""
+        raw_options = data.get('chart_options', {}).get(symbol, {}) if isinstance(data, dict) else {}
+        if isinstance(raw_options, list):
+            raw_options = {'0_week': raw_options, '2_weeks': [], '4_weeks': []}
+        elif isinstance(raw_options, dict) and '1_week' in raw_options and '0_week' not in raw_options:
+            raw_options = {
+                '0_week': raw_options.get('1_week', []),
+                '2_weeks': raw_options.get('2_weeks', []),
+                '4_weeks': raw_options.get('4_weeks', []),
+            }
+        elif not isinstance(raw_options, dict):
+            raw_options = {}
+        expirations = data.get('chart_option_expirations', {}).get(symbol, {}) if isinstance(data, dict) and isinstance(data.get('chart_option_expirations', {}), dict) else {}
+        if isinstance(expirations, dict) and '1_week' in expirations and '0_week' not in expirations:
+            expirations = {
+                '0_week': expirations.get('1_week', ''),
+                '2_weeks': expirations.get('2_weeks', ''),
+                '4_weeks': expirations.get('4_weeks', ''),
+            }
+        elif not isinstance(expirations, dict):
+            expirations = {}
+        normalized_options = {}
+        normalized_expirations = {}
+        for bucket_key, _bucket_label in P1_OPTIONS_EXPORT_BUCKETS:
+            bucket_records = raw_options.get(bucket_key, []) if isinstance(raw_options, dict) else []
+            normalized_options[bucket_key] = list(bucket_records) if isinstance(bucket_records, list) else []
+            normalized_expirations[bucket_key] = str(expirations.get(bucket_key, '') or '')
+        return normalized_options, normalized_expirations
+
+    def _dashboard_format_option_export_value(self, value: Any, *, decimals: int=2, integer: bool=False) -> str:
+        """Render a dashboard options value for Markdown export tables."""
+        if value is None or pd.isna(value):
+            return ''
+        try:
+            if integer:
+                return f'{int(float(value)):,}'
+            return f'{float(value):,.{decimals}f}'
+        except (TypeError, ValueError, OverflowError):
+            return str(value)
+
+    def _dashboard_build_top_options_export(self, symbol: str, bucket_data: dict[str, list[Any]], expirations: dict[str, str]) -> str:
+        """Build the Markdown payload for external LLM analysis of dashboard top options."""
+        exported_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        lines = [
+            f'# Top Options Volume Export - {symbol}',
+            '',
+            f'- Symbol: {symbol}',
+            f'- Dashboard timeframe: {self.dashboard_timeframe_label}',
+            f'- Exported at: {exported_at}',
+            '',
+            '## LLM Instructions',
+            '',
+            P1_OPTIONS_EXPORT_INSTRUCTIONS.strip(),
+            '',
+            '## Data',
+            '',
+        ]
+        for bucket_key, bucket_label in P1_OPTIONS_EXPORT_BUCKETS:
+            records = bucket_data.get(bucket_key, [])
+            expiration = expirations.get(bucket_key, '')
+            lines.append(f'### {bucket_label}')
+            lines.append('')
+            lines.append(f'- Selected expiration: {expiration or "Unavailable"}')
+            lines.append(f'- Rows exported: {len(records)}')
+            lines.append('')
+            if not records:
+                lines.append('No top options volume records were available for this bucket.')
+                lines.append('')
+                continue
+            lines.extend([
+                '| Ticker | Type | Strike | Expiration | Last Price | Volume |',
+                '| --- | --- | ---: | --- | ---: | ---: |',
+            ])
+            for opt in records:
+                lines.append(
+                    '| {ticker} | {type_} | {strike} | {expiration} | {last_price} | {volume} |'.format(
+                        ticker=str(opt.get('ticker', symbol) or symbol),
+                        type_=str(opt.get('type', '') or ''),
+                        strike=self._dashboard_format_option_export_value(opt.get('strike'), decimals=1),
+                        expiration=str(opt.get('expiration', '') or expiration),
+                        last_price=self._dashboard_format_option_export_value(opt.get('lastPrice')),
+                        volume=self._dashboard_format_option_export_value(opt.get('volume', 0), integer=True),
+                    )
+                )
+            lines.append('')
+        return '\n'.join(lines).rstrip() + '\n'
+
+    def _dashboard_export_top_options(self) -> None:
+        """Copy the currently loaded dashboard top-options buckets for external LLM analysis."""
+        symbol = str(getattr(self, 'dashboard_symbol', '') or '').upper().strip()
+        if not symbol:
+            self._dashboard_set_status('Export failed: no dashboard symbol selected.', 'negative')
+            QMessageBox.warning(self, 'Export Failed', 'No dashboard symbol is currently selected.')
+            return
+        data = getattr(self, 'last_data', None)
+        bucket_data, expirations = self._dashboard_normalize_option_buckets(symbol, data)
+        total_rows = sum((len(records) for records in bucket_data.values()))
+        if total_rows <= 0:
+            self._dashboard_set_status(f'No top options volume data available for {symbol}.', 'warning')
+            QMessageBox.warning(
+                self,
+                'No Options Data',
+                f'No top options volume data is currently loaded for {symbol}. Refresh the dashboard and try again.',
+            )
+            return
+        try:
+            QApplication.clipboard().setText(
+                self._dashboard_build_top_options_export(symbol, bucket_data, expirations)
+            )
+        except Exception as exc:
+            self._dashboard_set_status(f'Export failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Export Failed', f'Unable to copy top options volume to the clipboard.\n\n{exc}')
+            return
+        self._dashboard_set_status(f'Top options volume copied to clipboard for {symbol}', 'positive')
 
     def update_ui(self, data: Any) -> Any:
         """Update the dashboard and shared pages with new data."""

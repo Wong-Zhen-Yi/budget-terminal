@@ -1,4 +1,5 @@
 from __future__ import annotations
+import calendar as _calendar_mod
 from typing import Any
 from ..compat import *
 
@@ -151,6 +152,9 @@ class CalendarPageMixin:
         header.addWidget(self.p7_tz_combo)
         header.addSpacing(8)
         header.addWidget(refresh_cal_btn)
+        export_btn = QPushButton('Export for LLM')
+        export_btn.clicked.connect(self._p7_export_for_llm)
+        header.addWidget(export_btn)
         layout.addLayout(header)
         self.p7_grid = QGridLayout()
         self.p7_grid.setSpacing(2)
@@ -377,3 +381,128 @@ class CalendarPageMixin:
             self.p7_options_exp_table,
         )
         self._p7_apply_detail_table_widths()
+
+    def _p7_export_for_llm(self) -> None:
+        """Copy the current month's calendar data with LLM instructions to the clipboard."""
+        year, month = self._p7_year, self._p7_month
+        month_name = _calendar_mod.month_name[month]
+        today = self._p7_get_reference_today()
+
+        # --- Collect economic events ---
+        econ_events = []
+        for d, name, imp in _get_economic_events(year, month):
+            econ_events.append((d, name, imp))
+        econ_events.sort(key=lambda x: x[0])
+
+        # --- Collect company events (earnings, ex-div) ---
+        company_events = []
+        for ticker, info in self._p7_events.items():
+            if info.get('earnings'):
+                d = info['earnings']
+                if d.year == year and d.month == month:
+                    company_events.append((d, ticker, 'Earnings'))
+            if info.get('exdiv'):
+                d = info['exdiv']
+                if d.year == year and d.month == month:
+                    company_events.append((d, ticker, 'Ex-Dividend'))
+        company_events.sort(key=lambda x: (x[0], x[1]))
+
+        # --- Collect options expirations ---
+        options_events = []
+        for pos in self._p7_get_main_portfolio_options():
+            status = str(pos.get('status', 'Open') or 'Open')
+            if status.lower() != 'open':
+                continue
+            expiry_text = str(pos.get('expiry', '') or '').strip()
+            if not expiry_text:
+                continue
+            try:
+                expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
+            except ValueError:
+                continue
+            if expiry_date.year == year and expiry_date.month == month:
+                ticker = str(pos.get('ticker', '') or '').upper().strip()
+                strategy = str(pos.get('strategy', 'Calls') or 'Calls')
+                strike = float(pos.get('strike', 0.0) or 0.0)
+                contracts = int(float(pos.get('contracts', 1) or 1))
+                options_events.append((expiry_date, ticker, strategy, strike, contracts))
+        options_events.sort(key=lambda x: (x[0], x[1]))
+
+        # --- Build the export text ---
+        lines = []
+        lines.append('=' * 70)
+        lines.append('BUDGET TERMINAL - CALENDAR EXPORT')
+        lines.append(f'Month: {month_name} {year}')
+        lines.append(f'Exported: {today.strftime("%Y-%m-%d")}')
+        lines.append('=' * 70)
+        lines.append('')
+        lines.append('-' * 70)
+        lines.append('LLM INSTRUCTIONS')
+        lines.append('-' * 70)
+        lines.append('')
+        lines.append('You are being given financial calendar data from Budget Terminal.')
+        lines.append('Your task is to create calendar events from this data.')
+        lines.append('')
+        lines.append('For each event below, create a calendar entry with:')
+        lines.append('  - Title: Use the format shown in each section')
+        lines.append('  - Date: As specified (YYYY-MM-DD)')
+        lines.append('  - All-day event: Yes (unless noted otherwise)')
+        lines.append('  - Calendar: Use the user\'s default calendar or a "Finance" calendar if available')
+        lines.append('')
+        lines.append('TITLE FORMATS:')
+        lines.append('  Economic events  -> "[ECON] <Event Name>"')
+        lines.append('  Earnings         -> "[EARNINGS] <TICKER>"')
+        lines.append('  Ex-Dividend      -> "[EX-DIV] <TICKER>"')
+        lines.append('  Options Expiry   -> "[OPTIONS] <TICKER> <STRIKE> <STRATEGY> x<QTY> expires"')
+        lines.append('')
+        lines.append('IMPORTANT:')
+        lines.append('  - Do NOT create duplicate events if they already exist on the calendar.')
+        lines.append('  - Skip any events with dates that have already passed.')
+        lines.append(f'  - Today\'s date is {today.strftime("%Y-%m-%d")}.')
+        lines.append('')
+
+        # Economic events section
+        lines.append('-' * 70)
+        lines.append('ECONOMIC EVENTS')
+        lines.append('-' * 70)
+        if econ_events:
+            for d, name, imp in econ_events:
+                lines.append(f'  {d.strftime("%Y-%m-%d")}  {name}  (Importance: {imp})')
+        else:
+            lines.append('  (none)')
+        lines.append('')
+
+        # Company events section
+        lines.append('-' * 70)
+        lines.append('COMPANY EVENTS (Earnings & Ex-Dividend)')
+        lines.append('-' * 70)
+        if company_events:
+            for d, ticker, event_type in company_events:
+                lines.append(f'  {d.strftime("%Y-%m-%d")}  {ticker}  {event_type}')
+        else:
+            lines.append('  (none)')
+        lines.append('')
+
+        # Options expirations section
+        lines.append('-' * 70)
+        lines.append('OPTIONS EXPIRATIONS')
+        lines.append('-' * 70)
+        if options_events:
+            for expiry, ticker, strategy, strike, contracts in options_events:
+                lines.append(f'  {expiry.strftime("%Y-%m-%d")}  {ticker}  {strike:.2f} {strategy} x{contracts}')
+        else:
+            lines.append('  (none)')
+        lines.append('')
+        lines.append('=' * 70)
+        lines.append('END OF EXPORT')
+        lines.append('=' * 70)
+
+        content = '\n'.join(lines)
+        try:
+            QApplication.clipboard().setText(content)
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, f'Calendar export copied to clipboard for {month_name} {year}', status='positive')
+        except Exception as e:
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, f'Calendar export failed: {e}', status='negative')
+            QMessageBox.warning(self, 'Export Failed', f'Could not copy calendar export to the clipboard:\n{e}')

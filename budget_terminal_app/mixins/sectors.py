@@ -81,13 +81,7 @@ class SectorsMixin:
         self.p8_status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.p8_status_lbl)
 
-        # -- Main content: heat cards (left/top) + detail panel (right/bottom) --
-        self.p8_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.p8_splitter.setHandleWidth(4)
-        self.p8_splitter.setStyleSheet(
-            f'QSplitter::handle {{ background: {self.theme_color("panel_border")}; }}'
-        )
-
+        # -- Main content: heat cards (top) + detail panel (bottom) --
         # Heat card grid in scroll area
         self.p8_card_scroll = QScrollArea()
         self.p8_card_scroll.setWidgetResizable(True)
@@ -108,9 +102,9 @@ class SectorsMixin:
             self._p8_create_heat_card(sector)
         self._p8_relayout_cards()
 
-        self.p8_splitter.addWidget(self.p8_card_scroll)
+        layout.addWidget(self.p8_card_scroll, 1)
 
-        # Detail panel (right side)
+        # Detail panel (bottom, fixed height for 10 rows)
         self.p8_detail_panel = QFrame()
         self.p8_detail_panel.setStyleSheet(
             f'QFrame {{ background: {self.theme_color("panel_background")}; '
@@ -141,14 +135,13 @@ class SectorsMixin:
         self.p8_detail_table.setAlternatingRowColors(True)
         self.p8_detail_table.setStyleSheet('QTableWidget { font-size: 13px; } QHeaderView::section { font-size: 13px; }')
         self.p8_detail_table.doubleClicked.connect(self._p8_on_detail_double_click)
+        self.p8_detail_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         detail_layout.addWidget(self.p8_detail_table)
 
-        self.p8_splitter.addWidget(self.p8_detail_panel)
-        self.p8_splitter.setSizes([550, 450])
-        self.p8_splitter.setStretchFactor(0, 3)
-        self.p8_splitter.setStretchFactor(1, 2)
+        # Fixed height: title(~30) + 10 rows × 32px + header(~30) + margins(~22) + spacing
+        self.p8_detail_panel.setFixedHeight(10 * self._P8_DETAIL_TABLE_ROW_HEIGHT + 90)
 
-        layout.addWidget(self.p8_splitter, 1)
+        layout.addWidget(self.p8_detail_panel)
 
         self.btn_page8.clicked.connect(self._p8_on_show)
         self._pages[7]['on_show'] = self._p8_on_show

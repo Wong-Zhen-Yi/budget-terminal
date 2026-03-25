@@ -68,12 +68,18 @@ class MarketCapWorker(QObject):
             def fetch_mktcap(t: Any) -> Any:
                 """Fetch mktcap."""
                 try:
-                    info = yf.Ticker(t).info
+                    ticker = yf.Ticker(t)
+                    with YF_LOCK:
+                        mc = ticker.fast_info.get('marketCap')
+                    if mc:
+                        return (t, mc)
+                    with YF_LOCK:
+                        info = ticker.info
                     return (t, info.get('marketCap'))
                 except Exception as ex:
                     logger.warning(f'MarketCap fetch error {t}: {ex}')
                     return (t, None)
-            with ThreadPoolExecutor(max_workers=_worker_count(self.tickers)) as executor:
+            with ThreadPoolExecutor(max_workers=_worker_count(self.tickers, upper_bound=3)) as executor:
                 res_list = list(executor.map(fetch_mktcap, self.tickers))
             for t, mc in res_list:
                 results[t] = mc

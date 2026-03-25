@@ -206,15 +206,8 @@ class NewsMixin:
                 lines.append('')
         text = '\n'.join(lines)
         total = len(portfolio_articles) + len(macro_articles)
-        path = documents_user_data_path('news_export.txt')
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(text)
-        except OSError as e:
-            self.p3_summary_status.setText(f'Export failed: {e}')
-            return
         QApplication.clipboard().setText(text)
-        self.p3_summary_status.setText(f'Exported {total} articles to clipboard & {path}')
+        self.p3_summary_status.setText(f'Exported {total} articles to clipboard')
 
     def _run_summarizer(self, articles: Any) -> None:
         """Handle run summarizer."""

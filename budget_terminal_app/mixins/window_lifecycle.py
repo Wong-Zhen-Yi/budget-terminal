@@ -1,8 +1,6 @@
 from __future__ import annotations
-from pathlib import Path
 from typing import Any
 from ..compat import *
-from budget_terminal_app.paths import user_data_path
 
 class WindowLifecycleMixin:
     def _get_tzinfo(self, idx: Any) -> Any:
@@ -31,7 +29,9 @@ class WindowLifecycleMixin:
         self._register_page(7, self.btn_page11, on_show=self._mc_on_show)
         self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
         self._register_page(9, self.btn_page5)
-        self._register_page(10, self.btn_page9)
+        self._register_page(10, self.btn_page13)
+        self._register_page(11, self.btn_page14, on_show=self._p14_refresh)
+        self._register_page(12, self.btn_page9)
 
     def resizeEvent(self, event: Any) -> None:
         """Handle resizeEvent."""
@@ -39,7 +39,7 @@ class WindowLifecycleMixin:
         if self.last_data:
             self.repopulate_portfolio()
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 8:
+            if self.stacked_widget.currentIndex() == 9:
                 self._p2_relayout_charts()
         if hasattr(self, '_p8_relayout_cards') and hasattr(self, 'stacked_widget'):
             if self.stacked_widget.currentIndex() == 5:
@@ -155,20 +155,12 @@ class WindowLifecycleMixin:
             QMessageBox.warning(self, 'Screenshot Failed', 'No screen is available for capturing a screenshot.')
             return
         screenshot = screen.grabWindow(self.winId())
-        folder = user_data_path('screenshots')
-        folder.mkdir(exist_ok=True)
-        default_path = folder / f"screenshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        selected_path, _ = QFileDialog.getSaveFileName(
-            self,
-            'Save Screenshot',
-            str(default_path),
-            'PNG Images (*.png)',
-        )
-        if not selected_path:
+        if screenshot.isNull():
+            QMessageBox.warning(self, 'Screenshot Failed', 'The screenshot capture returned an empty image.')
             return
-        path = Path(selected_path)
-        if path.suffix.lower() != '.png':
-            path = path.with_suffix('.png')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not screenshot.save(str(path), 'png'):
-            QMessageBox.warning(self, 'Screenshot Failed', f'Could not save screenshot to:\n{path}')
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            QMessageBox.warning(self, 'Screenshot Failed', 'Clipboard access is unavailable.')
+            return
+        clipboard.setPixmap(screenshot)
+        self.set_status_text(self.status_bar, 'Screenshot copied to clipboard', status='positive')

@@ -110,16 +110,8 @@ class PortfolioMetricsMixin:
                 lines.append('')
         text = '\n'.join(lines)
         total_items = len(tickers) + len(options_data)
-        safe_name = portfolio_name.replace(' ', '_').lower()
-        path = documents_user_data_path(f'{safe_name}_export.txt')
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(text)
-        except OSError as e:
-            self.set_status_text(self.status_bar, f'Export failed: {e}', status='negative')
-            return
         QApplication.clipboard().setText(text)
-        self.set_status_text(self.status_bar, f'Exported {portfolio_name} ({total_items} positions) to clipboard & {path}', status='positive')
+        self.set_status_text(self.status_bar, f'Exported {portfolio_name} ({total_items} positions) to clipboard', status='positive')
 
     def _get_return_timeframe_config(self, timeframe_key: Any) -> Any:
         """Return fetch/render config for the requested timeframe."""

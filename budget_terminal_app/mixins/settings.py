@@ -24,7 +24,7 @@ class SettingsMixin:
         title_col.setSpacing(6)
         title = QLabel('Settings')
         self.set_theme_role(title, 'page_title')
-        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. User data is auto-saved to Documents\\Budget Terminal User Data\\user_data.json. Export creates one backup JSON file, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
+        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. Copy AI-Readable Data sends the current app state to the clipboard, Export User Data creates a JSON backup, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
         description.setWordWrap(True)
         self.set_theme_role(description, 'muted')
         title_col.addWidget(title)
@@ -73,17 +73,14 @@ class SettingsMixin:
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setContentsMargins(14, 16, 14, 14)
         actions_layout.setSpacing(12)
-        actions_intro = QLabel('Backup and restore your saved application state. Runtime changes save automatically to Documents\\Budget Terminal User Data\\user_data.json. Clear removes user data but keeps dashboard chart slots intact.')
+        actions_intro = QLabel('Backup and restore your save application state. Copy AI-Readable Data sends the current app state to the clipboard. Export User Data creates a JSON backup file. Clear removes user data but keeps dashboard chart slots intact.')
         actions_intro.setWordWrap(True)
         self.set_theme_role(actions_intro, 'muted')
-        saved_path_note = QLabel('Saved data location: Documents\\Budget Terminal User Data\\user_data.json')
-        saved_path_note.setWordWrap(True)
-        self.set_theme_role(saved_path_note, 'muted')
         export_btn = QPushButton('Export User Data')
         self.set_theme_variant(export_btn, 'accent')
         export_btn.setMinimumHeight(32)
         export_btn.clicked.connect(self._on_export_user_data)
-        export_ai_btn = QPushButton('Export AI-Readable Data')
+        export_ai_btn = QPushButton('Copy AI-Readable Data')
         self.set_theme_variant(export_ai_btn, 'accent')
         export_ai_btn.setMinimumHeight(32)
         export_ai_btn.clicked.connect(self._on_export_ai_user_data)
@@ -100,7 +97,6 @@ class SettingsMixin:
         reset_cache_btn.setMinimumHeight(32)
         reset_cache_btn.clicked.connect(self._on_reset_cache)
         actions_layout.addWidget(actions_intro)
-        actions_layout.addWidget(saved_path_note)
         actions_layout.addWidget(export_btn)
         actions_layout.addWidget(export_ai_btn)
         actions_layout.addWidget(import_btn)
@@ -483,25 +479,14 @@ class SettingsMixin:
         QMessageBox.information(self, 'Export Complete', f'User data exported successfully.\n\n{path}')
 
     def _on_export_ai_user_data(self) -> None:
-        """Export current user data as AI-friendly Markdown."""
-        default_name = f"budget_terminal_ai_export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            'Export AI-Readable User Data',
-            str(Path.home() / default_name),
-            'Markdown Files (*.md);;Text Files (*.txt)',
-        )
-        if not path:
-            self._set_settings_status('AI export cancelled.')
-            return
+        """Copy current user data as AI-friendly Markdown to the clipboard."""
         try:
-            export_ai_user_data(path)
+            QApplication.clipboard().setText(build_ai_user_data_export())
         except Exception as exc:
-            self._set_settings_status(f'AI export failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'AI Export Failed', f'Unable to export AI-readable user data.\n\n{exc}')
+            self._set_settings_status(f'AI copy failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'AI Copy Failed', f'Unable to copy AI-readable user data.\n\n{exc}')
             return
-        self._set_settings_status(f'AI-readable user data exported to {path}', 'positive')
-        QMessageBox.information(self, 'AI Export Complete', f'AI-readable user data exported successfully.\n\n{path}')
+        self._set_settings_status('AI-readable user data copied to clipboard', 'positive')
 
     def _on_import_user_data(self) -> None:
         """Import user data from a previously exported backup file."""

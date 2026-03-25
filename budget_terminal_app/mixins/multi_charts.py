@@ -82,6 +82,7 @@ class MultiChartsMixin:
         self._mc_resize_timer = QTimer(self)
         self._mc_resize_timer.setSingleShot(True)
         self._mc_resize_timer.timeout.connect(self._mc_handle_resize)
+        self._mc_active_tab = 'portfolio'
 
         layout = QVBoxLayout(self.page11)
         layout.setContentsMargins(10, 10, 10, 6)
@@ -91,6 +92,20 @@ class MultiChartsMixin:
         title = QLabel('<b>Multi Charts</b>')
         self.set_theme_role(title, 'page_title')
         toolbar.addWidget(title)
+        toolbar.addSpacing(16)
+
+        self._mc_tab_group = QButtonGroup(self)
+        self._mc_tab_group.setExclusive(True)
+        self._mc_tab_buttons: dict[str, QPushButton] = {}
+        for tab_label, tab_key in (('Portfolio', 'portfolio'), ('Watchlist', 'watchlist')):
+            btn = QPushButton(tab_label)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(26)
+            btn.clicked.connect(lambda checked, k=tab_key: self._mc_switch_tab(k))
+            self._mc_tab_group.addButton(btn)
+            self._mc_tab_buttons[tab_key] = btn
+            toolbar.addWidget(btn)
+        self._mc_tab_buttons['portfolio'].setChecked(True)
         toolbar.addSpacing(16)
 
         self._mc_timeframe_group = QButtonGroup(self)
@@ -125,18 +140,18 @@ class MultiChartsMixin:
         self._mc_add_input.setPlaceholderText('Add ticker (e.g. AAPL)')
         self._mc_add_input.setFixedWidth(160)
         self._mc_add_input.returnPressed.connect(self._mc_add_symbol)
-        add_btn = QPushButton('Add')
-        self.set_theme_variant(add_btn, 'accent')
-        add_btn.setFixedHeight(28)
-        add_btn.clicked.connect(self._mc_add_symbol)
+        self._mc_add_btn = QPushButton('Add')
+        self.set_theme_variant(self._mc_add_btn, 'accent')
+        self._mc_add_btn.setFixedHeight(28)
+        self._mc_add_btn.clicked.connect(self._mc_add_symbol)
         toolbar.addWidget(self._mc_add_input)
-        toolbar.addWidget(add_btn)
+        toolbar.addWidget(self._mc_add_btn)
 
         toolbar.addSpacing(12)
-        reorder_btn = QPushButton('Reorder')
-        reorder_btn.setFixedHeight(28)
-        reorder_btn.clicked.connect(self._mc_open_reorder_dialog)
-        toolbar.addWidget(reorder_btn)
+        self._mc_reorder_btn = QPushButton('Reorder')
+        self._mc_reorder_btn.setFixedHeight(28)
+        self._mc_reorder_btn.clicked.connect(self._mc_open_reorder_dialog)
+        toolbar.addWidget(self._mc_reorder_btn)
 
         refresh_btn = QPushButton('Refresh All')
         self.set_theme_variant(refresh_btn, 'accent')
@@ -164,7 +179,7 @@ class MultiChartsMixin:
 
     def _mc_on_show(self) -> None:
         """Called when Multi Charts page is shown."""
-        symbols = self._mc_get_all_symbols()
+        symbols = self._mc_get_active_symbols()
         self._mc_sync_grid(symbols)
         if not self._mc_charts:
             return
@@ -172,6 +187,38 @@ class MultiChartsMixin:
             entry = self._mc_charts.get(sym)
             if entry and entry.get('df') is None:
                 self._mc_fetch_single(sym)
+
+    def _mc_switch_tab(self, tab_key: str) -> None:
+        """Switch between Portfolio and Watchlist tabs."""
+        if tab_key == self._mc_active_tab:
+            return
+        self._mc_active_tab = tab_key
+        for key, btn in self._mc_tab_buttons.items():
+            btn.setChecked(key == tab_key)
+        show_add = tab_key == 'portfolio'
+        self._mc_add_input.setVisible(show_add)
+        self._mc_add_btn.setVisible(show_add)
+        self._mc_reorder_btn.setVisible(show_add)
+        symbols = self._mc_get_active_symbols()
+        self._mc_rebuild_grid(symbols)
+
+    def _mc_get_active_symbols(self) -> list[str]:
+        """Return symbols for the active tab."""
+        if self._mc_active_tab == 'watchlist':
+            return self._mc_get_watchlist_symbols()
+        return self._mc_get_all_symbols()
+
+    def _mc_get_watchlist_symbols(self) -> list[str]:
+        """Return watchlist symbols from the Charts page."""
+        watchlist = getattr(self, 'p10_custom_watchlist', [])
+        seen = set()
+        result = []
+        for sym in watchlist:
+            s = sym.upper().strip()
+            if s and s not in seen:
+                seen.add(s)
+                result.append(s)
+        return result
 
     def _mc_get_all_symbols(self) -> list[str]:
         """Return portfolio tickers + custom symbols, deduplicated, respecting saved order."""
@@ -218,7 +265,10 @@ class MultiChartsMixin:
         self._mc_save_state()
 
     def _mc_remove_symbol(self, symbol: str) -> None:
-        """Remove a custom symbol (portfolio symbols can't be removed here)."""
+        """Remove a custom symbol (portfolio/watchlist symbols can't be removed here)."""
+        if self._mc_active_tab == 'watchlist':
+            self._mc_status.setText(f'{symbol} is in your watchlist \u2014 remove it in Charts.')
+            return
         portfolio = set(s.upper() for s in getattr(self, 'tickers', []))
         if symbol.upper() in portfolio:
             self._mc_status.setText(f'{symbol} is in your portfolio \u2014 remove it there.')
@@ -332,7 +382,7 @@ class MultiChartsMixin:
         """Fetch fresh data for all visible charts."""
         symbols = list(self._mc_charts.keys())
         if not symbols:
-            symbols = self._mc_get_all_symbols()
+            symbols = self._mc_get_active_symbols()
             if symbols:
                 self._mc_sync_grid(symbols)
         for sym in symbols:

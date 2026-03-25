@@ -6,7 +6,7 @@ from ..cache import CacheManager
 from ..constants import *
 from ..dependencies import *
 
-DEFAULT_BATCH_SYMBOLS = ['SPY', 'QQQ', '^VIX', 'GLD', 'CL=F']
+DEFAULT_BATCH_SYMBOLS = ['SPY', 'DX-Y.NYB', '^VIX', 'GLD', 'CL=F']
 MACRO_TICKERS = ['SPY', 'QQQ', 'GLD', 'CL=F', '^VIX', '^TNX', 'DX-Y.NYB']
 OPTION_BUCKET_TEMPLATE = {'0_week': [], '2_weeks': [], '4_weeks': []}
 OPTION_BUCKET_OFFSETS = (('0_week', 0), ('2_weeks', 14), ('4_weeks', 28))
@@ -133,7 +133,7 @@ class DataWorker(QObject):
 
     def _collect_market_quotes(self, batch_data: Any, all_symbols: list[str]) -> dict[str, dict[str, float]]:
         market_data = {}
-        idx_map = {'SPY': 'SPY', 'QQQ': 'QQQ', '^VIX': 'VIX', 'GLD': 'GLD', 'CL=F': 'WTI'}
+        idx_map = {'SPY': 'SPY', 'DX-Y.NYB': 'DXY', '^VIX': 'VIX', 'GLD': 'GLD', 'CL=F': 'WTI'}
         for symbol, display_name in idx_map.items():
             try:
                 payload = self._build_market_payload(self._load_close_series(symbol, batch_data, all_symbols))

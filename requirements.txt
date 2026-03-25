@@ -4,3 +4,4 @@ PyQt6
 pyqtgraph
 requests
 tzdata
+beautifulsoup4
