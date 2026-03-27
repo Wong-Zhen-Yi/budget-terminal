@@ -133,7 +133,7 @@ class DashboardMixin:
         for child in getattr(self, '_dashboard_add_btn_refs', []):
             child.setVisible(not showing_all)
 
-    def _dashboard_fit_portfolio_table_height(self, max_rows: int=8) -> None:
+    def _dashboard_fit_portfolio_table_height(self, max_rows: int=15) -> None:
         """Keep the portfolio table compact while preserving its current column layout."""
         if not hasattr(self, 'port_table'):
             return
@@ -145,7 +145,7 @@ class DashboardMixin:
         scrollbar_pad = 4
         target_height = header_height + (visible_rows * row_height) + frame + scrollbar_pad
         table.setMinimumHeight(target_height)
-        table.setMaximumHeight(target_height)
+        table.setMaximumHeight(16777215)
 
     def _update_main_portfolio_entry(self) -> Any:
         """Persist the current app-wide portfolio fields into the main portfolio slot."""
@@ -162,6 +162,11 @@ class DashboardMixin:
             current_sizes = [int(size) for size in self.dashboard_body_splitter.sizes() if int(size) > 0]
             if len(current_sizes) == 2:
                 splitter_sizes = current_sizes
+        main_splitter_sizes = getattr(self, 'dashboard_chart_state', {}).get('main_splitter_sizes', [3, 5])
+        if hasattr(self, 'dashboard_main_splitter'):
+            current_main = [int(size) for size in self.dashboard_main_splitter.sizes() if int(size) > 0]
+            if len(current_main) == 2:
+                main_splitter_sizes = current_main
         state = normalize_dashboard_chart_settings({
             **getattr(self, 'dashboard_chart_state', {}),
             'symbol': getattr(self, 'dashboard_symbol', self.dashboard_chart_state.get('symbol', 'SPY')),
@@ -169,8 +174,11 @@ class DashboardMixin:
             'indicators': getattr(self, 'dashboard_active_indicators', self.dashboard_chart_state.get('indicators', ['Volume', '200 MA'])),
             'auto': getattr(self, 'dashboard_auto_follow', self.dashboard_chart_state.get('auto', True)),
             'splitter_sizes': splitter_sizes,
+            'main_splitter_sizes': main_splitter_sizes,
         })
-        self.dashboard_chart_state = save_dashboard_chart_settings(state)
+        self.dashboard_chart_state = state
+        if hasattr(self, '_persist_dashboard_state'):
+            self._persist_dashboard_state()
         return self.dashboard_chart_state
 
     def _dashboard_apply_splitter_sizes(self) -> None:
@@ -182,6 +190,17 @@ class DashboardMixin:
 
     def _dashboard_on_splitter_moved(self, *_: Any) -> None:
         """Persist the dashboard sidebar width after a user drag."""
+        self._dashboard_save_state()
+
+    def _dashboard_apply_main_splitter_sizes(self) -> None:
+        """Restore the saved main dashboard splitter sizes."""
+        if not hasattr(self, 'dashboard_main_splitter'):
+            return
+        sizes = normalize_dashboard_chart_settings(getattr(self, 'dashboard_chart_state', {})).get('main_splitter_sizes', [3, 5])
+        self.dashboard_main_splitter.setSizes([int(size) for size in sizes])
+
+    def _dashboard_on_main_splitter_moved(self, *_: Any) -> None:
+        """Persist the main dashboard splitter position after a user drag."""
         self._dashboard_save_state()
 
     def _dashboard_set_status(self, text: Any, status: Any='muted') -> None:
@@ -629,8 +648,15 @@ class DashboardMixin:
                 self.update_page4(self.last_data)
             logger.info('Removed ticker %s', t)
 
-    def refresh_data(self) -> None:
+    def refresh_data(self, *, force: bool=False) -> None:
         """Refresh portfolio data plus the dashboard chart workstation."""
+        if not force and hasattr(self, '_dashboard_refresh_timer'):
+            self._dashboard_refresh_timer.start(150)
+            return
+        self._execute_refresh_data()
+
+    def _execute_refresh_data(self) -> None:
+        """Perform the dashboard refresh immediately."""
         self._news_auto_summarized = False
         if hasattr(self, 'p3_summary_status'):
             self.p3_summary_status.setText('Refreshing news...')
@@ -658,7 +684,12 @@ class DashboardMixin:
 
     def run_worker(self, request_id: int, chart_configs_snapshot: Any) -> None:
         """Run the shared market data worker."""
-        worker = DataWorker(self._get_fetch_tickers(), chart_configs_snapshot, request_id=request_id)
+        worker = DataWorker(
+            self._get_fetch_tickers(),
+            chart_configs_snapshot,
+            request_id=request_id,
+            cancel_check=lambda req=request_id: req != getattr(self, '_dashboard_latest_request_id', 0),
+        )
         worker.finished.connect(self.update_ui)
         worker.error.connect(self.handle_error)
         worker.run()

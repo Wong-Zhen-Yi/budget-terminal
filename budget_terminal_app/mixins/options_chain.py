@@ -20,6 +20,13 @@ class OptionsChainMixin:
         ('Rho', 'rho_calc', '{:.3f}'),
     ]
     _P5_STRATEGIES = ('None', 'Covered Call', 'Cash Secured Put')
+    _P5_STRATEGY_MIN_OI = 25.0
+    _P5_STRATEGY_MIN_VOLUME = 0.0
+    _P5_STRATEGY_MAX_SPREAD_RATIO = 0.60
+    _P5_CC_DELTA_TARGET = 0.275
+    _P5_CSP_DELTA_TARGET = 0.225
+    _P5_CC_DELTA_BAND = (0.15, 0.40)
+    _P5_CSP_DELTA_BAND = (0.12, 0.35)
     def init_page5(self) -> None:
         """Build the Options Chain page UI."""
         layout = QVBoxLayout(self.page5)
@@ -43,6 +50,8 @@ class OptionsChainMixin:
         self.p5_strategy_combo.addItems(list(self._P5_STRATEGIES))
         self.p5_strategy_combo.currentIndexChanged.connect(self._p5_refresh_strategy_view)
         self.p5_status_lbl = QLabel('Enter a ticker to view the full options chain.')
+        self.p5_status_lbl.setWordWrap(True)
+        self.p5_status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.set_theme_role(self.p5_status_lbl, 'status_muted')
         self.p5_price_lbl = QLabel('')
         self.p5_price_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {self.theme_color('accent_positive')}; margin-left: 10px;")
@@ -64,8 +73,6 @@ class OptionsChainMixin:
         controls.addSpacing(14)
         controls.addWidget(QLabel('<b>Strategy:</b>'))
         controls.addWidget(self.p5_strategy_combo)
-        controls.addSpacing(20)
-        controls.addWidget(self.p5_status_lbl)
         controls.addStretch()
         layout.addLayout(controls, 0)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -84,6 +91,7 @@ class OptionsChainMixin:
         splitter.addWidget(calls_widget)
         splitter.addWidget(puts_widget)
         layout.addWidget(splitter, 1)
+        layout.addWidget(self.p5_status_lbl, 0)
 
     def _make_chain_table(self) -> Any:
         """Create a shared options chain table."""
@@ -480,23 +488,28 @@ class OptionsChainMixin:
         calls = df[df['type'] == 'Call'].sort_values('strike').reset_index(drop=True)
         puts = df[df['type'] == 'Put'].sort_values('strike').reset_index(drop=True)
         strategy = self.p5_strategy_combo.currentText()
-        call_ranks = self._p5_rank_strategy_rows(calls, strategy)
-        put_ranks = self._p5_rank_strategy_rows(puts, strategy)
-        self._p5_fill_chain_table(self.p5_calls_table, calls, call_ranks)
-        self._p5_fill_chain_table(self.p5_puts_table, puts, put_ranks)
+        call_ranks, call_details = self._p5_rank_strategy_rows(calls, strategy)
+        put_ranks, put_details = self._p5_rank_strategy_rows(puts, strategy)
+        self._p5_fill_chain_table(self.p5_calls_table, calls, call_ranks, call_details)
+        self._p5_fill_chain_table(self.p5_puts_table, puts, put_ranks, put_details)
         status_text = f"Chain updated at {datetime.datetime.now().strftime('%H:%M:%S')}"
         status_text += f" | r {self._p5_chain_rate * 100:.2f}% ({self._p5_chain_rate_source}) | q {self._p5_chain_dividend_yield * 100:.2f}% ({self._p5_chain_dividend_source})"
         strategy_count = len(call_ranks if strategy == 'Covered Call' else put_ranks if strategy == 'Cash Secured Put' else {})
         if strategy != 'None' and strategy_count:
             side = 'call' if strategy == 'Covered Call' else 'put'
             status_text += f' | {strategy}: highlighted top {strategy_count} {side} candidates'
+            top_details = self._p5_best_strategy_details(strategy, call_details, put_details)
+            if top_details:
+                status_text += f" | #1: {top_details}"
         self.set_status_text(self.p5_status_lbl, status_text, status='positive')
 
-    def _p5_fill_chain_table(self, table: Any, data: Any, ranks: dict[int, int]) -> None:
+    def _p5_fill_chain_table(self, table: Any, data: Any, ranks: dict[int, int], details: dict[int, dict[str, Any]]) -> None:
         """Populate a single chain table with optional recommendation styling."""
         table.setRowCount(len(data))
         for i, (_, row) in enumerate(data.iterrows()):
             rank = ranks.get(i)
+            detail = details.get(i, {})
+            tooltip = self._p5_strategy_tooltip(rank, detail)
             for col_idx, (label, key, fmt) in enumerate(self._P5_CHAIN_COLUMNS):
                 color = None
                 bg_color = self._p5_strategy_bg(rank)
@@ -518,6 +531,8 @@ class OptionsChainMixin:
                     display = self._p5_format_chain_value(value, fmt)
                 item = QTableWidgetItem(display)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if tooltip:
+                    item.setToolTip(tooltip)
                 if color:
                     item.setForeground(QColor(color))
                 if bg_color:
@@ -558,28 +573,33 @@ class OptionsChainMixin:
             txt = str(value)
             return '' if txt.lower() == 'nan' else txt
 
-    def _p5_rank_strategy_rows(self, data: Any, strategy: str) -> dict[int, int]:
+    def _p5_rank_strategy_rows(self, data: Any, strategy: str) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
         """Score and rank the top strategy candidates for one table."""
         if data is None or data.empty or strategy == 'None':
-            return {}
+            return ({}, {})
         if strategy == 'Covered Call' and str(data.iloc[0].get('type', '')).strip() != 'Call':
-            return {}
+            return ({}, {})
         if strategy == 'Cash Secured Put' and str(data.iloc[0].get('type', '')).strip() != 'Put':
-            return {}
-        candidates: list[tuple[float, int]] = []
+            return ({}, {})
+        candidates: list[tuple[float, int, dict[str, Any]]] = []
         spot = float(getattr(self, '_p5_chain_spot_price', 0.0) or 0.0)
         for idx, row in data.iterrows():
-            score = self._p5_strategy_score(row, strategy, spot)
+            score_data = self._p5_strategy_score(row, strategy, spot)
+            score = score_data.get('score') if isinstance(score_data, dict) else None
             if score is not None:
-                candidates.append((score, idx))
+                candidates.append((float(score), idx, score_data))
         candidates.sort(key=lambda item: item[0], reverse=True)
         ranks: dict[int, int] = {}
-        for rank, (_, idx) in enumerate(candidates[:3], start=1):
+        details: dict[int, dict[str, Any]] = {}
+        for rank, (_, idx, score_data) in enumerate(candidates[:3], start=1):
             ranks[int(idx)] = rank
-        return ranks
+            detail = dict(score_data or {})
+            detail['rank'] = rank
+            details[int(idx)] = detail
+        return (ranks, details)
 
-    def _p5_strategy_score(self, row: Any, strategy: str, spot: float) -> float | None:
-        """Return a recommendation score for one row or None if it is ineligible."""
+    def _p5_strategy_score(self, row: Any, strategy: str, spot: float) -> dict[str, Any] | None:
+        """Return a recommendation score breakdown for one row or None if it is ineligible."""
         strike = float(row.get('strike', 0.0) or 0.0)
         bid = float(row.get('bid', 0.0) or 0.0)
         ask = float(row.get('ask', 0.0) or 0.0)
@@ -589,43 +609,217 @@ class OptionsChainMixin:
         iv = float(row.get('impliedVolatility', 0.0) or 0.0)
         delta = row.get('delta_calc')
         gamma = row.get('gamma_calc')
-        theta = row.get('theta_calc')
         vega = row.get('vega_calc')
         if not row.get('greeks_valid') or strike <= 0 or spot <= 0:
             return None
-        if any(v is None or pd.isna(v) for v in (delta, gamma, theta, vega)):
+        if any(v is None or pd.isna(v) for v in (delta, gamma, vega)):
             return None
         if bid <= 0 and ask <= 0 and last <= 0:
             return None
         premium = (bid + ask) / 2.0 if bid > 0 and ask > 0 else last
         if premium <= 0 or iv <= 0:
             return None
-        width_penalty = 0.0
-        if bid <= 0 or ask <= 0:
-            width_penalty += 8.0
-        elif premium > 0:
-            width_penalty += min(20.0, ((ask - bid) / premium) * 100.0)
-        liq_score = min(15.0, math.log1p(max(oi, 0.0)) * 2.2) + min(10.0, math.log1p(max(vol, 0.0)) * 2.0)
-        gamma_penalty = min(8.0, abs(float(gamma)) * 200.0)
-        vega_penalty = min(6.0, abs(float(vega)) * 10.0)
+        delta_abs = abs(float(delta))
+        gamma_abs = abs(float(gamma))
+        vega_abs = abs(float(vega))
+        has_live_spread = bid > 0 and ask > 0 and premium > 0
+        spread_ratio = ((ask - bid) / premium) if has_live_spread else None
+        if spread_ratio is not None and spread_ratio < 0:
+            return None
+        if oi < self._P5_STRATEGY_MIN_OI:
+            return None
+        if vol < self._P5_STRATEGY_MIN_VOLUME:
+            return None
+        if spread_ratio is not None and spread_ratio > self._P5_STRATEGY_MAX_SPREAD_RATIO:
+            return None
+        expiry = str(getattr(self, '_p5_chain_expiry', '') or '').strip()
+        dte = self._p5_strategy_dte(expiry)
+        if dte <= 0:
+            return None
+        spread_score = self._p5_strategy_linear_score(spread_ratio, 0.02, self._P5_STRATEGY_MAX_SPREAD_RATIO, inverse=True) if spread_ratio is not None else 35.0
+        liquidity_score = (
+            self._p5_strategy_linear_score(math.log1p(max(oi, 0.0)), math.log1p(self._P5_STRATEGY_MIN_OI), math.log1p(5000.0))
+            + self._p5_strategy_linear_score(math.log1p(max(vol, 0.0)), math.log1p(self._P5_STRATEGY_MIN_VOLUME), math.log1p(1000.0))
+        ) / 2.0
+        if vol <= 0:
+            liquidity_score = liquidity_score * 0.85
+        greek_stability_score = (
+            self._p5_strategy_linear_score(gamma_abs, 0.0, 0.05, inverse=True) * 0.55
+            + self._p5_strategy_linear_score(vega_abs, 0.0, 0.35, inverse=True) * 0.45
+        )
+        base_details = {
+            'strategy': strategy,
+            'strike': strike,
+            'premium': premium,
+            'delta_abs': delta_abs,
+            'dte': dte,
+            'annualized_yield': 0.0,
+            'spread_ratio': spread_ratio,
+            'oi': oi,
+            'volume': vol,
+            'liquidity_score': liquidity_score,
+            'spread_score': spread_score,
+            'greek_stability_score': greek_stability_score,
+            'score': 0.0,
+            'rationale': '',
+        }
         if strategy == 'Covered Call':
             if strike < spot:
                 return None
-            delta_val = abs(float(delta))
-            delta_target = 0.275
-            delta_score = max(0.0, 45.0 - abs(delta_val - delta_target) * 130.0)
-            yield_score = min(30.0, (premium / spot) * 1000.0)
-            distance_penalty = min(18.0, max(0.0, (spot - strike) / max(spot, 1.0)) * 200.0)
-            itm_penalty = 12.0 if strike <= spot else 0.0
-            return delta_score + yield_score + liq_score - width_penalty - gamma_penalty - vega_penalty - distance_penalty - itm_penalty
+            delta_score = self._p5_strategy_band_score(delta_abs, self._P5_CC_DELTA_TARGET, *self._P5_CC_DELTA_BAND)
+            annualized_yield = (premium / spot) * (365.0 / dte)
+            yield_score = self._p5_strategy_linear_score(annualized_yield, 0.04, 0.30)
+            upside_room = max(0.0, (strike / spot) - 1.0)
+            upside_score = self._p5_strategy_linear_score(upside_room, 0.01, 0.12)
+            strategy_score = (
+                delta_score * 0.30
+                + yield_score * 0.25
+                + liquidity_score * 0.15
+                + spread_score * 0.15
+                + upside_score * 0.15
+                + greek_stability_score * 0.10
+            )
+            if strike <= spot:
+                strategy_score *= 0.90
+            details = dict(base_details)
+            details.update({
+                'annualized_yield': annualized_yield,
+                'delta_score': delta_score,
+                'yield_score': yield_score,
+                'upside_room': upside_room,
+                'upside_score': upside_score,
+                'has_live_spread': has_live_spread,
+                'score': strategy_score,
+                'rationale': self._p5_describe_covered_call(delta_abs, annualized_yield, upside_room, spread_ratio, oi, vol, has_live_spread),
+            })
+            return details
         if strategy == 'Cash Secured Put':
             if strike > spot:
                 return None
-            delta_val = abs(float(delta))
-            delta_target = 0.225
-            delta_score = max(0.0, 45.0 - abs(delta_val - delta_target) * 140.0)
-            yield_score = min(32.0, (premium / strike) * 1000.0)
-            itm_penalty = 14.0 if strike >= spot else 0.0
-            distance_penalty = min(12.0, max(0.0, (strike - spot) / max(spot, 1.0)) * 200.0)
-            return delta_score + yield_score + liq_score - width_penalty - gamma_penalty - vega_penalty - distance_penalty - itm_penalty
+            delta_score = self._p5_strategy_band_score(delta_abs, self._P5_CSP_DELTA_TARGET, *self._P5_CSP_DELTA_BAND)
+            annualized_yield = (premium / strike) * (365.0 / dte)
+            yield_score = self._p5_strategy_linear_score(annualized_yield, 0.05, 0.35)
+            breakeven = strike - premium
+            breakeven_discount = max(0.0, (spot - breakeven) / spot)
+            breakeven_score = self._p5_strategy_linear_score(breakeven_discount, 0.01, 0.12)
+            strategy_score = (
+                delta_score * 0.30
+                + yield_score * 0.25
+                + breakeven_score * 0.20
+                + liquidity_score * 0.15
+                + spread_score * 0.10
+                + greek_stability_score * 0.10
+            )
+            if strike >= spot:
+                strategy_score *= 0.88
+            details = dict(base_details)
+            details.update({
+                'annualized_yield': annualized_yield,
+                'delta_score': delta_score,
+                'yield_score': yield_score,
+                'breakeven': breakeven,
+                'breakeven_discount': breakeven_discount,
+                'breakeven_score': breakeven_score,
+                'has_live_spread': has_live_spread,
+                'score': strategy_score,
+                'rationale': self._p5_describe_cash_secured_put(delta_abs, annualized_yield, breakeven_discount, spread_ratio, oi, vol, has_live_spread),
+            })
+            return details
         return None
+
+    def _p5_strategy_dte(self, expiry: str) -> int:
+        """Return days to expiry for strategy ranking."""
+        if not expiry:
+            return 0
+        try:
+            exp_date = datetime.datetime.strptime(expiry, '%Y-%m-%d').date()
+        except Exception:
+            return 0
+        return max(0, (exp_date - datetime.date.today()).days)
+
+    def _p5_strategy_linear_score(self, value: float, low: float, high: float, inverse: bool=False) -> float:
+        """Map a value into a capped 0-100 score."""
+        try:
+            value_f = float(value)
+            low_f = float(low)
+            high_f = float(high)
+        except (TypeError, ValueError):
+            return 0.0
+        if high_f <= low_f:
+            return 0.0
+        normalized = (value_f - low_f) / (high_f - low_f)
+        normalized = max(0.0, min(1.0, normalized))
+        if inverse:
+            normalized = 1.0 - normalized
+        return normalized * 100.0
+
+    def _p5_strategy_band_score(self, value: float, target: float, lower: float, upper: float) -> float:
+        """Return a 0-100 score for proximity to a target within a preferred band."""
+        try:
+            value_f = float(value)
+            target_f = float(target)
+            lower_f = float(lower)
+            upper_f = float(upper)
+        except (TypeError, ValueError):
+            return 0.0
+        if upper_f <= lower_f or value_f < lower_f or value_f > upper_f:
+            return 0.0
+        band_radius = max(target_f - lower_f, upper_f - target_f, 1e-09)
+        distance = abs(value_f - target_f)
+        return max(0.0, (1.0 - (distance / band_radius)) * 100.0)
+
+    def _p5_strategy_tooltip(self, rank: int | None, details: dict[str, Any]) -> str:
+        """Return a tooltip explaining a ranked strategy row."""
+        if not rank or not details:
+            return ''
+        lines = [
+            f"Rank #{rank} | Score {float(details.get('score', 0.0)):.1f}",
+            str(details.get('rationale', '') or '').strip(),
+            f"Delta {float(details.get('delta_abs', 0.0)):.3f} | DTE {int(details.get('dte', 0) or 0)} | Ann. yield {float(details.get('annualized_yield', 0.0)) * 100:.1f}%",
+            f"{self._p5_format_spread_summary(details)} | OI {float(details.get('oi', 0.0)):.0f} | Vol {float(details.get('volume', 0.0)):.0f}",
+        ]
+        if details.get('strategy') == 'Covered Call':
+            lines.append(f"Upside room {(float(details.get('upside_room', 0.0)) * 100):.1f}%")
+        elif details.get('strategy') == 'Cash Secured Put':
+            lines.append(f"Break-even discount {(float(details.get('breakeven_discount', 0.0)) * 100):.1f}%")
+        return '\n'.join([line for line in lines if line])
+
+    def _p5_best_strategy_details(self, strategy: str, call_details: dict[int, dict[str, Any]], put_details: dict[int, dict[str, Any]]) -> str:
+        """Return a short summary for the top-ranked row."""
+        detail_map = call_details if strategy == 'Covered Call' else put_details if strategy == 'Cash Secured Put' else {}
+        top_detail = next((detail for detail in detail_map.values() if int(detail.get('rank', 0) or 0) == 1), None)
+        if not top_detail:
+            return ''
+        strike = float(top_detail.get('strike', 0.0) or 0.0)
+        summary = f"strike {strike:.1f}, score {float(top_detail.get('score', 0.0)):.1f}"
+        rationale = str(top_detail.get('rationale', '') or '').strip()
+        if rationale:
+            summary += f", {rationale}"
+        return summary
+
+
+    def _p5_describe_covered_call(self, delta_abs: float, annualized_yield: float, upside_room: float, spread_ratio: float | None, oi: float, vol: float, has_live_spread: bool) -> str:
+        """Return a plain-English explanation for a covered-call rank."""
+        spread_text = f"{(spread_ratio * 100):.1f}% spread" if has_live_spread and spread_ratio is not None else 'no live bid/ask spread'
+        return (
+            f"Close to the {self._P5_CC_DELTA_TARGET:.3f} delta target, "
+            f"offers {annualized_yield * 100:.1f}% annualized yield, "
+            f"keeps {upside_room * 100:.1f}% upside room, "
+            f"with {spread_text} and usable liquidity (OI {oi:.0f}, Vol {vol:.0f})."
+        )
+
+    def _p5_describe_cash_secured_put(self, delta_abs: float, annualized_yield: float, breakeven_discount: float, spread_ratio: float | None, oi: float, vol: float, has_live_spread: bool) -> str:
+        """Return a plain-English explanation for a cash-secured-put rank."""
+        spread_text = f"{(spread_ratio * 100):.1f}% spread" if has_live_spread and spread_ratio is not None else 'no live bid/ask spread'
+        return (
+            f"Close to the {self._P5_CSP_DELTA_TARGET:.3f} delta target, "
+            f"offers {annualized_yield * 100:.1f}% annualized yield, "
+            f"improves entry by {breakeven_discount * 100:.1f}% to break-even, "
+            f"with {spread_text} and usable liquidity (OI {oi:.0f}, Vol {vol:.0f})."
+        )
+
+    def _p5_format_spread_summary(self, details: dict[str, Any]) -> str:
+        """Format spread text for live and after-hours ranked rows."""
+        if bool(details.get('has_live_spread')):
+            return f"Spread {(float(details.get('spread_ratio', 0.0)) * 100):.1f}%"
+        return 'Spread unavailable after hours'

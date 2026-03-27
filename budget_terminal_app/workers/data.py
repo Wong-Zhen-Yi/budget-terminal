@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 
 from typing import Any
 
@@ -15,13 +16,25 @@ OPTION_BUCKET_OFFSETS = (('0_week', 0), ('2_weeks', 14), ('4_weeks', 28))
 class DataWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+    _DETAILS_CACHE_TTL_SECONDS = 900.0
+    _stock_details_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _macro_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+    _details_cache_lock = threading.Lock()
 
-    def __init__(self, tickers: Any, chart_configs: Any, request_id: int = 0) -> None:
+    def __init__(self, tickers: Any, chart_configs: Any, request_id: int = 0, cancel_check: Any = None) -> None:
         super().__init__()
         self.tickers = list(tickers) if isinstance(tickers, (list, tuple)) else []
         self.chart_configs = chart_configs
         self.request_id = int(request_id)
+        self.cancel_check = cancel_check
         self._ticker_cache: dict[str, Any] = {}
+
+    def _is_cancelled(self) -> bool:
+        """Return whether the parent request no longer needs this worker result."""
+        try:
+            return bool(self.cancel_check and self.cancel_check())
+        except Exception:
+            return False
 
     def _ticker(self, symbol: Any) -> Any:
         key = str(symbol or '').strip()
@@ -120,6 +133,23 @@ class DataWorker(QObject):
             return None
         return {'price': payload['price'], 'change': payload['change']}
 
+    def _download_symbol_frame(self, symbol: str, period: Any, interval: Any, *, auto_adjust: bool = False) -> Any:
+        """Fetch one symbol's OHLCV frame with a history fallback for brittle assets like ETFs."""
+        try:
+            frame = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=auto_adjust)
+        except Exception as exc:
+            logger.info('Primary download failed for %s period=%s interval=%s: %s', symbol, period, interval, exc)
+            frame = None
+        normalized = self._normalize_chart_frame(symbol, frame)
+        if normalized is not None:
+            return normalized
+        try:
+            history = self._ticker(symbol).history(period=period, interval=interval, auto_adjust=auto_adjust)
+        except Exception as exc:
+            logger.info('History fallback failed for %s period=%s interval=%s: %s', symbol, period, interval, exc)
+            history = None
+        return self._normalize_chart_frame(symbol, history)
+
     def _collect_portfolio_quotes(self, batch_data: Any, all_symbols: list[str]) -> dict[str, dict[str, float]]:
         portfolio_info = {}
         for symbol in self.tickers:
@@ -196,19 +226,44 @@ class DataWorker(QObject):
         }
 
     def _fetch_stock_details(self, ticker: str, portfolio_info: dict[str, Any]) -> Any:
+        now = time.time()
+        with self._details_cache_lock:
+            cached = self._stock_details_cache.get(ticker)
+            if cached and (now - cached[0]) < self._DETAILS_CACHE_TTL_SECONDS:
+                return {
+                    'targets': dict(cached[1]['targets']),
+                    'news': [dict(item) for item in cached[1]['news']],
+                }
         try:
             ticker_obj = self._ticker(ticker)
             info = ticker_obj.info
-            return {
+            payload = {
                 'targets': self._target_payload(ticker, portfolio_info.get(ticker, {}).get('price', 0), info),
                 'news': self._read_news_items(ticker_obj, ticker, 'portfolio'),
             }
+            with self._details_cache_lock:
+                self._stock_details_cache[ticker] = (
+                    now,
+                    {
+                        'targets': dict(payload['targets']),
+                        'news': [dict(item) for item in payload['news']],
+                    },
+                )
+            return payload
         except Exception:
             return None
 
     def _fetch_macro_news(self, ticker: str) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._details_cache_lock:
+            cached = self._macro_news_cache.get(ticker)
+            if cached and (now - cached[0]) < self._DETAILS_CACHE_TTL_SECONDS:
+                return [dict(item) for item in cached[1]]
         try:
-            return self._read_news_items(self._ticker(ticker), ticker, 'macro')
+            articles = self._read_news_items(self._ticker(ticker), ticker, 'macro')
+            with self._details_cache_lock:
+                self._macro_news_cache[ticker] = (now, [dict(item) for item in articles])
+            return articles
         except Exception:
             return []
 
@@ -221,11 +276,15 @@ class DataWorker(QObject):
         if self.tickers:
             with ThreadPoolExecutor(max_workers=self._executor_workers(len(self.tickers))) as executor:
                 for result in executor.map(lambda ticker: self._fetch_stock_details(ticker, portfolio_info), self.tickers):
+                    if self._is_cancelled():
+                        return [], []
                     if result:
                         targets.append(result['targets'])
                         news_list.extend(result['news'])
         with ThreadPoolExecutor(max_workers=self._executor_workers(len(MACRO_TICKERS))) as executor:
             for articles in executor.map(self._fetch_macro_news, MACRO_TICKERS):
+                if self._is_cancelled():
+                    return [], []
                 news_list.extend(articles)
         return targets, news_list
 
@@ -291,10 +350,11 @@ class DataWorker(QObject):
     def _build_daily_ma200(self, symbol: str, source_df: Any, cache: CacheManager) -> Any:
         daily_df = cache.get_data(symbol, '1d')
         if daily_df is None or daily_df.empty:
-            daily_df = yf.download(symbol, period='5y', interval='1d', progress=False, auto_adjust=False)
+            daily_df = self._download_symbol_frame(symbol, '5y', '1d', auto_adjust=False)
             if daily_df is not None and not daily_df.empty:
                 cache.save_data(symbol, '1d', daily_df)
-        daily_df = self._normalize_chart_frame(symbol, daily_df)
+        else:
+            daily_df = self._normalize_chart_frame(symbol, daily_df)
         if daily_df is None or daily_df.empty or 'Close' not in daily_df.columns:
             return pd.Series(index=source_df.index, dtype=float)
         daily_ma = daily_df['Close'].astype(float).rolling(200, min_periods=200).mean().dropna()
@@ -361,8 +421,7 @@ class DataWorker(QObject):
             if raw_df is not None:
                 logger.info('Dashboard chart %s cache rejected for interval %s. Refetching.', symbol, interval)
             source_label = 'download'
-            raw_df = yf.download(symbol, period=period, interval=interval, progress=False)
-            df = self._normalize_chart_frame(symbol, raw_df)
+            df = self._download_symbol_frame(symbol, period, interval)
             if df is not None and interval in ['1d', '1wk', '1mo']:
                 cache.save_data(symbol, interval, df)
         if df is None:
@@ -434,10 +493,19 @@ class DataWorker(QObject):
             dashboard_chart_config = dashboard_chart_configs[0] if dashboard_chart_configs else None
             all_symbols = self._dedupe_symbols(self.tickers, DEFAULT_BATCH_SYMBOLS)
             batch_data = self._download_batch_data(all_symbols)
+            if self._is_cancelled():
+                logger.info('Worker %s cancelled after batch download.', self.request_id)
+                return
             portfolio_info = self._collect_portfolio_quotes(batch_data, all_symbols)
             market_data = self._collect_market_quotes(batch_data, all_symbols)
             targets, news_list = self._collect_targets_and_news(portfolio_info)
+            if self._is_cancelled():
+                logger.info('Worker %s cancelled after targets/news.', self.request_id)
+                return
             charts, chart_options, chart_option_expirations, chart_ma200 = self._collect_chart_data(dashboard_chart_config)
+            if self._is_cancelled():
+                logger.info('Worker %s cancelled after chart collection.', self.request_id)
+                return
             data = {
                 'request_id': self.request_id,
                 'chart_configs': list(dashboard_chart_configs),

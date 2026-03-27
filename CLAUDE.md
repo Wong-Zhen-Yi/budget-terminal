@@ -22,7 +22,7 @@ python -m compileall budget_terminal.py
 # Smoke-test options fetch
 python test_options_fetch.py
 
-# Build Windows executable (requires Python 3.13+, outputs dist\BudgetTerminal-v0.77.exe)
+# Build Windows executable (requires Python 3.13+, outputs dist\BudgetTerminal-v0.81.exe)
 build_exe.bat
 ```
 

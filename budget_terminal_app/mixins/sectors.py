@@ -143,9 +143,6 @@ class SectorsMixin:
 
         layout.addWidget(self.p8_detail_panel)
 
-        self.btn_page8.clicked.connect(self._p8_on_show)
-        self._pages[7]['on_show'] = self._p8_on_show
-
     def _p8_build_sector_order(self) -> list[str]:
         """Build sector card order with explicit overrides for special placements."""
         ordered = sorted(SECTOR_DATA.keys())

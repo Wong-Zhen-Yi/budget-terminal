@@ -25,6 +25,10 @@ class _SessionLogHandler(logging.Handler):
 
 
 class WindowBootstrapMixin:
+    _PORTFOLIO_PERSIST_DEBOUNCE_MS = 250
+    _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
+    _OPTIONS_FETCH_MAX_WORKERS = 4
+
 
     def _portfolio_index_from_id(self, portfolio_id: Any) -> int:
         """Return the fixed slot index for a portfolio id."""
@@ -118,11 +122,41 @@ class WindowBootstrapMixin:
                     combined.append(text)
         return combined
 
-    def _persist_all_portfolios(self) -> None:
-        """Persist the full runtime portfolio state."""
+    def _flush_portfolio_persist(self) -> None:
+        """Write the current in-memory portfolio state to disk immediately."""
         self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
         self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
         save_all_portfolios_state(self.all_portfolios_state)
+
+    def _persist_all_portfolios(self, *, immediate: bool=False) -> None:
+        """Persist the full runtime portfolio state, buffering bursty edits."""
+        self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
+        self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
+        if immediate:
+            if hasattr(self, '_portfolio_persist_timer'):
+                self._portfolio_persist_timer.stop()
+            self._flush_portfolio_persist()
+            return
+        if hasattr(self, '_portfolio_persist_timer'):
+            self._portfolio_persist_timer.start(self._PORTFOLIO_PERSIST_DEBOUNCE_MS)
+        else:
+            self._flush_portfolio_persist()
+
+    def _flush_dashboard_state_persist(self) -> None:
+        """Write the current dashboard chart state to disk immediately."""
+        self.dashboard_chart_state = save_dashboard_chart_settings(self.dashboard_chart_state)
+
+    def _persist_dashboard_state(self, *, immediate: bool=False) -> None:
+        """Persist dashboard chart settings, buffering repeated UI tweaks."""
+        if immediate:
+            if hasattr(self, '_dashboard_state_persist_timer'):
+                self._dashboard_state_persist_timer.stop()
+            self._flush_dashboard_state_persist()
+            return
+        if hasattr(self, '_dashboard_state_persist_timer'):
+            self._dashboard_state_persist_timer.start(self._DASHBOARD_STATE_PERSIST_DEBOUNCE_MS)
+        else:
+            self._flush_dashboard_state_persist()
 
     def _init_session_log_capture(self) -> None:
         """Attach a single in-memory session log collector to the app logger."""
@@ -213,7 +247,7 @@ class WindowBootstrapMixin:
             self.repopulate_portfolio()
         if refresh_main:
             self.last_data = None
-            self.refresh_data()
+            self.refresh_data(force=True)
 
     def set_active_portfolio_index(self, index: Any) -> None:
         """Switch the page-4 editor to a different portfolio slot."""
@@ -243,7 +277,7 @@ class WindowBootstrapMixin:
         self._invoke_main.connect(self._on_invoke_main)
         self._init_session_log_capture()
         self.setWindowTitle(f'Budget Terminal v{__version__}')
-        self.resize(1280, 800)
+        self.resize(1280, 600)
         self.all_portfolios_state = load_all_portfolios_state()
         self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', PORTFOLIO_IDS[0])
         self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
@@ -276,6 +310,20 @@ class WindowBootstrapMixin:
         self._news_auto_summarized = False
         self._data_collection_ts = None
         self._data_collection_sources = []
+        self._portfolio_persist_timer = QTimer(self)
+        self._portfolio_persist_timer.setSingleShot(True)
+        self._portfolio_persist_timer.timeout.connect(self._flush_portfolio_persist)
+        self._dashboard_state_persist_timer = QTimer(self)
+        self._dashboard_state_persist_timer.setSingleShot(True)
+        self._dashboard_state_persist_timer.timeout.connect(self._flush_dashboard_state_persist)
+        self._dashboard_refresh_timer = QTimer(self)
+        self._dashboard_refresh_timer.setSingleShot(True)
+        self._dashboard_refresh_timer.timeout.connect(self._execute_refresh_data)
+        self._options_fetch_executor = ThreadPoolExecutor(max_workers=self._OPTIONS_FETCH_MAX_WORKERS)
+        self._option_chain_memory_cache = {}
+        self._option_chain_memory_cache_ttl = 60.0
+        self._options_expiry_memory_cache = {}
+        self._options_expiry_memory_cache_ttl = 900.0
         self.options_data = []
         self.active_tickers = []
         self.active_tracker_data = {}
@@ -292,7 +340,7 @@ class WindowBootstrapMixin:
         self.init_ui()
         self.theme_manager.apply_theme(self.current_theme_id, persist=False)
         self._sync_after_portfolio_change(refresh_main=False)
-        self.refresh_data()
+        self.refresh_data(force=True)
 
     def _on_invoke_main(self, fn: Any) -> None:
         """Handle invoke main."""

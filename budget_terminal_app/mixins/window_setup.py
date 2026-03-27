@@ -48,16 +48,89 @@ class WindowSetupMixin:
         self.btn_page10.setCheckable(True)
         self.btn_page11 = QPushButton('Multi Charts')
         self.btn_page11.setCheckable(True)
+        self._nav_buttons = [
+            self.btn_page1,
+            self.btn_page4,
+            self.btn_page6,
+            self.btn_page7,
+            self.btn_page3,
+            self.btn_page8,
+            self.btn_page10,
+            self.btn_page11,
+            self.btn_page2,
+            self.btn_page5,
+            self.btn_page13,
+            self.btn_page14,
+            self.btn_page9,
+        ]
         refresh_btn = QPushButton('Refresh')
-        refresh_btn.clicked.connect(self.refresh_data)
+        refresh_btn.clicked.connect(lambda checked=False: self.refresh_data(force=True))
         snap_btn = QPushButton('Screenshot')
         snap_btn.clicked.connect(self.take_screenshot)
-        for button in [self.btn_page1, self.btn_page4, self.btn_page6, self.btn_page7, self.btn_page3, self.btn_page8, self.btn_page10, self.btn_page11, self.btn_page2, self.btn_page5, self.btn_page13, self.btn_page14, self.btn_page9]:
+
+        nav_scroll_left = QPushButton('<')
+        nav_scroll_left.setFixedWidth(24)
+        nav_scroll_left.setFixedHeight(38)
+        nav_scroll_right = QPushButton('>')
+        nav_scroll_right.setFixedWidth(24)
+        nav_scroll_right.setFixedHeight(38)
+
+        nav_container = QWidget()
+        nav_container_layout = QHBoxLayout(nav_container)
+        nav_container_layout.setContentsMargins(0, 0, 0, 0)
+        nav_container_layout.setSpacing(4)
+        for button in self._nav_buttons:
             button.setMinimumHeight(38)
             button.setMinimumWidth(110)
-            self.top_bar.addWidget(button)
-        self.top_bar.addStretch()
-        self._register_navigation_pages()
+            nav_container_layout.addWidget(button)
+
+        self._nav_scroll_area = QScrollArea()
+        self._nav_scroll_area.setWidget(nav_container)
+        self._nav_scroll_area.setWidgetResizable(False)
+        self._nav_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._nav_scroll_area.setFixedHeight(42)
+
+        nav_scroll_left.clicked.connect(lambda: self._nav_scroll_area.horizontalScrollBar().setValue(
+            self._nav_scroll_area.horizontalScrollBar().value() - 200))
+        nav_scroll_right.clicked.connect(lambda: self._nav_scroll_area.horizontalScrollBar().setValue(
+            self._nav_scroll_area.horizontalScrollBar().value() + 200))
+
+        self.top_bar.addWidget(nav_scroll_left)
+        self.top_bar.addWidget(self._nav_scroll_area, 1)
+        self.top_bar.addWidget(nav_scroll_right)
+        self._tab_picker_items = []
+        self._tab_picker_map = {}
+        self._tab_picker_popup = QDialog(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._tab_picker_popup.setModal(False)
+        self._tab_picker_popup.setObjectName('tabPickerPopup')
+        self._tab_picker_popup.setFixedWidth(300)
+        popup_layout = QVBoxLayout(self._tab_picker_popup)
+        popup_layout.setContentsMargins(10, 10, 10, 10)
+        popup_layout.setSpacing(8)
+        self._tab_picker_input = QLineEdit()
+        self._tab_picker_input.setPlaceholderText('Type a tab name')
+        self._tab_picker_input.textChanged.connect(self._filter_tab_picker_items)
+        self._tab_picker_input.installEventFilter(self)
+        popup_layout.addWidget(self._tab_picker_input)
+        self._tab_picker_list = QListWidget()
+        self._tab_picker_list.setMinimumHeight(220)
+        self._tab_picker_list.setMaximumHeight(220)
+        self._tab_picker_list.itemActivated.connect(self._activate_tab_picker_item)
+        self._tab_picker_list.itemClicked.connect(self._activate_tab_picker_item)
+        self._tab_picker_list.installEventFilter(self)
+        popup_layout.addWidget(self._tab_picker_list)
+        self._tab_picker_popup.installEventFilter(self)
+        self._nav_prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self._nav_prev_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._nav_prev_shortcut.activated.connect(lambda: self._handle_main_tab_arrow_shortcut(-1))
+        self._nav_next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._nav_next_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._nav_next_shortcut.activated.connect(lambda: self._handle_main_tab_arrow_shortcut(1))
+        self._tab_picker_shortcut = QShortcut(QKeySequence('`'), self)
+        self._tab_picker_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._tab_picker_shortcut.activated.connect(self._handle_tab_picker_shortcut)
         self.tz_combo = QComboBox()
         self.tz_combo.setFixedWidth(120)
         self._tz_choices = TIMEZONE_CHOICES
@@ -95,7 +168,10 @@ class WindowSetupMixin:
         self.page1 = QWidget()
         self.stacked_widget.addWidget(self.page1)
         main_layout = QHBoxLayout(self.page1)
-        left_col = QVBoxLayout()
+        self.dashboard_main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        left_widget = QWidget()
+        left_col = QVBoxLayout(left_widget)
+        left_col.setContentsMargins(0, 0, 0, 0)
         left_col.setSpacing(8)
         self.ticker_input = QLineEdit()
         self.ticker_input.setPlaceholderText('Enter Ticker (e.g. AAPL)')
@@ -131,6 +207,7 @@ class WindowSetupMixin:
         self.target_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.target_table.verticalHeader().setDefaultSectionSize(24)
         self.target_table.setAlternatingRowColors(True)
+        self.target_table.setMaximumHeight(150)
         self.news_table = QTableWidget(0, 4)
         self.news_table.setHorizontalHeaderLabels(['Headline', 'Ticker', 'Source', 'Time'])
         self.news_table.horizontalHeader().setSectionsMovable(True)
@@ -142,6 +219,7 @@ class WindowSetupMixin:
         self.news_table.setColumnHidden(2, True)
         self.news_table.setColumnHidden(3, True)
         self.news_table.verticalHeader().setDefaultSectionSize(24)
+        self.news_table.setMaximumHeight(150)
         self.news_table.itemClicked.connect(self.open_news_link)
         portfolio_box = QGroupBox()
         self.set_theme_role(portfolio_box, 'panel')
@@ -165,6 +243,9 @@ class WindowSetupMixin:
         port_header.addWidget(add_btn)
         portfolio_layout.addLayout(port_header)
         portfolio_layout.addWidget(self.port_table)
+        portfolio_label = QLabel('<b>Portfolio</b>')
+        self.set_theme_role(portfolio_label, 'section_title')
+        left_col.addWidget(portfolio_label)
         left_col.addWidget(portfolio_box)
         targets_label = QLabel('<b>Analyst Price Targets</b>')
         self.set_theme_role(targets_label, 'section_title')
@@ -174,7 +255,9 @@ class WindowSetupMixin:
         self.set_theme_role(news_label, 'section_title')
         left_col.addWidget(news_label)
         left_col.addWidget(self.news_table)
-        right_col = QVBoxLayout()
+        right_widget = QWidget()
+        right_col = QVBoxLayout(right_widget)
+        right_col.setContentsMargins(0, 0, 0, 0)
         indices_bar = QHBoxLayout()
         self.index_labels = {}
         for index_name in ['SPY', 'DXY', 'VIX', 'GLD', 'WTI']:
@@ -333,8 +416,13 @@ class WindowSetupMixin:
         self._dashboard_apply_splitter_sizes()
         self.dashboard_crosshair_proxy = pg.SignalProxy(self.dashboard_main_plot.scene().sigMouseMoved, rateLimit=30, slot=self._dashboard_on_mouse_moved)
         self._dashboard_refresh_portfolio_selector()
-        main_layout.addLayout(left_col, 1)
-        main_layout.addLayout(right_col, 4)
+        self.dashboard_main_splitter.addWidget(left_widget)
+        self.dashboard_main_splitter.addWidget(right_widget)
+        self.dashboard_main_splitter.setStretchFactor(0, 3)
+        self.dashboard_main_splitter.setStretchFactor(1, 5)
+        self.dashboard_main_splitter.splitterMoved.connect(self._dashboard_on_main_splitter_moved)
+        main_layout.addWidget(self.dashboard_main_splitter)
+        self._dashboard_apply_main_splitter_sizes()
 
     def _init_additional_pages(self) -> None:
         """Handle init additional pages."""

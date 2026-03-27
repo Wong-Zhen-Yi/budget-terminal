@@ -8,7 +8,7 @@ USER_DATA_BACKUP_VERSION = 3
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
-DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2]}
+DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
 MAX_PORTFOLIOS = 3
@@ -30,8 +30,12 @@ def _read_json(path: Any, default: Any) -> Any:
 
 def _write_json(path: Any, data: Any, *, indent: Any=None) -> None:
     """Write JSON data to disk."""
-    with Path(path).open('w') as f:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_suffix(f'{target.suffix}.tmp')
+    with temp_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=indent)
+    temp_path.replace(target)
 
 
 def _portfolio_payload_with_chart_slots(data: Any, chart_slots: Any=None) -> Any:
@@ -829,12 +833,25 @@ def _normalize_dashboard_chart_settings(settings: Any) -> Any:
                 splitter_sizes.append(size)
     if len(splitter_sizes) != 2:
         splitter_sizes = list(DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
+    raw_main_splitter = saved.get('main_splitter_sizes', DEFAULT_DASHBOARD_CHART_SETTINGS['main_splitter_sizes'])
+    main_splitter_sizes = []
+    if isinstance(raw_main_splitter, list):
+        for value in raw_main_splitter[:2]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                main_splitter_sizes.append(size)
+    if len(main_splitter_sizes) != 2:
+        main_splitter_sizes = list(DEFAULT_DASHBOARD_CHART_SETTINGS['main_splitter_sizes'])
     return {
         'symbol': symbol or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol'],
         'timeframe_label': timeframe_label or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label'],
         'indicators': indicators,
         'auto': auto_enabled,
         'splitter_sizes': splitter_sizes,
+        'main_splitter_sizes': main_splitter_sizes,
     }
 
 

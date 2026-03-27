@@ -1,8 +1,69 @@
 from __future__ import annotations
+import time
 from typing import Any
 from ..compat import *
 
 class OptionsFetchMixin:
+    def _get_cached_options_expiries(self, ticker: Any) -> Any:
+        """Return cached expiry dates from memory or SQLite before hitting the network."""
+        ticker_key = str(ticker or '').strip().upper()
+        if not ticker_key:
+            return None
+        now = time.time()
+        cached = getattr(self, '_options_expiry_memory_cache', {}).get(ticker_key)
+        if cached and (now - cached[0]) < getattr(self, '_options_expiry_memory_cache_ttl', 900.0):
+            return list(cached[1])
+        cache = CacheManager()
+        expiries = cache.get_options_expiries(ticker_key)
+        if expiries:
+            self._options_expiry_memory_cache[ticker_key] = (now, list(expiries))
+            return list(expiries)
+        return None
+
+    def _save_cached_options_expiries(self, ticker: Any, expiries: Any) -> None:
+        """Persist expiry dates into the short-lived memory cache and SQLite."""
+        ticker_key = str(ticker or '').strip().upper()
+        expiry_list = [str(expiry) for expiry in list(expiries or []) if expiry]
+        if not ticker_key or not expiry_list:
+            return
+        self._options_expiry_memory_cache[ticker_key] = (time.time(), expiry_list)
+        CacheManager().save_options_expiries(ticker_key, expiry_list)
+
+    def _get_cached_option_chain(self, ticker: Any, expiry: Any) -> Any:
+        """Return one option chain for a ticker/expiry, reusing memory and SQLite caches."""
+        ticker_key = str(ticker or '').strip().upper()
+        expiry_key = str(expiry or '').strip()
+        if not ticker_key or not expiry_key:
+            return None
+        cache_key = (ticker_key, expiry_key)
+        now = time.time()
+        cached = getattr(self, '_option_chain_memory_cache', {}).get(cache_key)
+        if cached and (now - cached[0]) < getattr(self, '_option_chain_memory_cache_ttl', 60.0):
+            return cached[1].copy()
+        cache = CacheManager()
+        chain_df = cache.get_options_chain(ticker_key, expiry_key)
+        if chain_df is None:
+            with YF_LOCK:
+                chain = yf.Ticker(ticker_key).option_chain(expiry_key)
+            calls = chain.calls.copy()
+            puts = chain.puts.copy()
+            calls['type'] = 'Call'
+            puts['type'] = 'Put'
+            chain_df = pd.concat([calls, puts], ignore_index=True)
+            if chain_df is not None and not chain_df.empty:
+                cache.save_options_chain(ticker_key, expiry_key, chain_df)
+        if chain_df is None:
+            return None
+        self._option_chain_memory_cache[cache_key] = (now, chain_df.copy())
+        return chain_df.copy()
+
+    def _submit_options_fetch(self, fn: Any) -> None:
+        """Run bounded background work for options fetches."""
+        executor = getattr(self, '_options_fetch_executor', None)
+        if executor is None:
+            threading.Thread(target=fn, daemon=True).start()
+            return
+        executor.submit(fn)
 
     def _resolve_active_option_row(self, row: Any, ticker: Any, portfolio_id: Any=None) -> Any:
         """Return a still-valid row index for an async options callback."""
@@ -80,14 +141,13 @@ class OptionsFetchMixin:
             row_id = ''
             if 0 <= row < len(self.options_data):
                 row_id = str(self.options_data[row].get('row_id', '') or '').strip()
-            cache = CacheManager()
-            exps = cache.get_options_expiries(ticker)
+            exps = self._get_cached_options_expiries(ticker)
             if exps is None:
                 with YF_LOCK:
                     t_obj = yf.Ticker(ticker)
                     exps = t_obj.options
                 if exps:
-                    cache.save_options_expiries(ticker, exps)
+                    self._save_cached_options_expiries(ticker, exps)
             if exps:
                 self._invoke_main.emit(lambda: self._set_expiry_combo(row_id, ticker, list(exps), portfolio_id))
         except Exception as e:
@@ -111,11 +171,14 @@ class OptionsFetchMixin:
             self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
             return
         try:
-            with YF_LOCK:
-                t_obj = yf.Ticker(ticker)
-                chain = t_obj.option_chain(expiry)
+            chain_df = self._get_cached_option_chain(ticker, expiry)
+            if chain_df is None or chain_df.empty:
+                data_package = {'error': 'No Data'}
+                self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
+                return
             is_call = 'Call' in strategy or 'Calls' == strategy
-            df = chain.calls if is_call else chain.puts
+            option_type = 'Call' if is_call else 'Put'
+            df = chain_df[chain_df.get('type', '') == option_type].copy() if 'type' in chain_df.columns else chain_df
             if df.empty:
                 data_package = {'error': 'No Data'}
                 self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
@@ -162,7 +225,7 @@ class OptionsFetchMixin:
 
     def _fetch_single_option_price(self, row: Any) -> None:
         """Background fetch of the current price for a single option row."""
-        threading.Thread(target=lambda: self._fetch_single_option_price_sync(row), daemon=True).start()
+        self._submit_options_fetch(lambda: self._fetch_single_option_price_sync(row))
 
     def _update_option_price_ui(self, row_id: Any, ticker: Any, data: Any, portfolio_id: Any=None) -> None:
         """Handle update option price ui."""
@@ -196,8 +259,7 @@ class OptionsFetchMixin:
             try:
                 portfolio_id = getattr(self, 'active_portfolio_id', '')
                 ticker_clean = ticker.strip().upper()
-                cache = CacheManager()
-                exps = cache.get_options_expiries(ticker_clean)
+                exps = self._get_cached_options_expiries(ticker_clean)
                 if exps:
                     logger.info(f'Loaded {len(exps)} expiries for {ticker_clean} from cache')
                     self._invoke_main.emit(lambda: self._set_expiry_combo(row_id, ticker_clean, list(exps), portfolio_id))
@@ -206,7 +268,7 @@ class OptionsFetchMixin:
                 ticker_obj = yf.Ticker(ticker_clean)
                 exps = ticker_obj.options
                 if exps:
-                    cache.save_options_expiries(ticker_clean, exps)
+                    self._save_cached_options_expiries(ticker_clean, exps)
                     logger.info(f'Found {len(exps)} expiries for {ticker_clean}')
                     self._invoke_main.emit(lambda: self._set_expiry_combo(row_id, ticker_clean, list(exps), portfolio_id))
                 else:
@@ -215,7 +277,7 @@ class OptionsFetchMixin:
             except Exception as ex:
                 logger.error(f'Options expiry fetch failed for {ticker}: {ex}', exc_info=True)
                 self._invoke_main.emit(lambda: self._reset_expiry_placeholder(row_id, ticker, 'N/A', portfolio_id))
-        threading.Thread(target=_run, daemon=True).start()
+        self._submit_options_fetch(_run)
 
     def _reset_expiry_placeholder(self, row_id: Any, ticker: Any, text: Any, portfolio_id: Any=None) -> None:
         """Reset the expiry cell to a plain text item when no options are available."""
