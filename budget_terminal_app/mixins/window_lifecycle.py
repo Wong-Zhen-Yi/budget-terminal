@@ -21,7 +21,7 @@ class WindowLifecycleMixin:
         """Handle register navigation pages."""
         self._pages.clear()
         self._register_page(0, self.btn_page1)
-        self._register_page(1, self.btn_page4)
+        self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
         self._register_page(2, self.btn_page6)
         self._register_page(3, self.btn_page7)
         self._register_page(4, self.btn_page3, on_show=lambda: self.p3_crawler_timer.start(40) if hasattr(self, 'p3_crawler_timer') else None, on_hide=lambda: self.p3_crawler_timer.stop() if hasattr(self, 'p3_crawler_timer') else None)
@@ -42,6 +42,9 @@ class WindowLifecycleMixin:
         if hasattr(self, '_dashboard_fit_portfolio_table_height'):
             if not hasattr(self, 'stacked_widget') or self.stacked_widget.currentIndex() == 0:
                 self._dashboard_fit_portfolio_table_height()
+        if hasattr(self, '_p4_apply_portfolio_table_widths') and hasattr(self, 'stacked_widget'):
+            if self.stacked_widget.currentIndex() == 1:
+                self._p4_apply_portfolio_table_widths()
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
             if self.stacked_widget.currentIndex() == 9:
                 self._p2_relayout_charts()

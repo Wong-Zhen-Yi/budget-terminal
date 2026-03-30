@@ -12,6 +12,10 @@ class PieChartWidget(QWidget):
         self.slices = []
         self.slice_colors = tuple(self.COLORS)
         self.legend_text_color = '#ffffff'
+        self._donut_enabled = False
+        self._donut_hole_ratio = 0.56
+        self._center_text = ''
+        self._center_subtext = ''
         self.setMinimumWidth(200)
 
     def set_theme(self, slice_colors: Any, legend_text_color: Any) -> None:
@@ -24,6 +28,18 @@ class PieChartWidget(QWidget):
                 (label, value, self.slice_colors[index % len(self.slice_colors)])
                 for index, (label, value, _color) in enumerate(self.slices)
             ]
+        self.update()
+
+    def set_donut(self, enabled: bool=True, hole_ratio: float=0.56) -> None:
+        """Toggle donut rendering and control the hole size."""
+        self._donut_enabled = bool(enabled)
+        self._donut_hole_ratio = max(0.2, min(0.85, float(hole_ratio)))
+        self.update()
+
+    def set_center_text(self, text: str='', subtext: str='') -> None:
+        """Update the text shown in the donut center."""
+        self._center_text = str(text or '')
+        self._center_subtext = str(subtext or '')
         self.update()
 
     def set_data(self, weights: dict) -> None:
@@ -40,15 +56,25 @@ class PieChartWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = (self.width(), self.height())
         margin = 10
-        legend_w = 110
-        diameter = min(w - legend_w - margin * 3, h - margin * 2)
-        if diameter < 20 or not self.slices:
+        has_legend = bool(self.slices)
+        legend_w = 110 if has_legend else 0
+        content_w = max(0, w - legend_w - margin * 3) if has_legend else max(0, w - margin * 2)
+        diameter = min(content_w, h - margin * 2)
+        if diameter < 20:
             return
-        cx = margin + diameter / 2
+        block_w = diameter + (margin + legend_w if has_legend else 0)
+        left = max(float(margin), (w - block_w) / 2)
+        cx = left + diameter / 2
         cy = h / 2
         rect = QRectF(cx - diameter / 2, cy - diameter / 2, diameter, diameter)
         total = sum((v for _, v, _ in self.slices))
-        if total == 0:
+        if not self.slices or total == 0:
+            if self._donut_enabled:
+                outer_color = self.palette().color(QPalette.ColorRole.Mid)
+                painter.setBrush(outer_color)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(rect)
+                self._draw_donut_center(painter, cx, cy, diameter)
             return
         angle = 90 * 16
         for label, val, color in self.slices:
@@ -57,13 +83,44 @@ class PieChartWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPie(rect, angle, span)
             angle += span
-        lx = int(cx + diameter / 2 + margin)
-        ly = margin
+        if self._donut_enabled:
+            self._draw_donut_center(painter, cx, cy, diameter)
+        lx = int(left + diameter + margin)
+        visible_items = min(len(self.slices), max(1, int((h - margin * 2) / 16)))
+        legend_h = visible_items * 16
+        ly = max(margin, int(cy - legend_h / 2))
         painter.setFont(QFont('Arial', 8))
         for label, val, color in self.slices:
+            pct = (val / total) * 100 if total else 0
             painter.fillRect(lx, ly, 10, 10, QColor(color))
             painter.setPen(QColor(self.legend_text_color))
-            painter.drawText(lx + 14, ly + 10, f'{label} {val:.1f}%')
+            painter.drawText(lx + 14, ly + 10, f'{label} {pct:.1f}%')
             ly += 16
             if ly > h - margin:
                 break
+
+    def _draw_donut_center(self, painter: Any, cx: float, cy: float, diameter: float) -> None:
+        """Render the hollow center and optional center text."""
+        from PyQt6.QtGui import QColor, QFont
+        from PyQt6.QtCore import QRectF
+        inner_diameter = diameter * self._donut_hole_ratio
+        inner_rect = QRectF(
+            cx - inner_diameter / 2,
+            cy - inner_diameter / 2,
+            inner_diameter,
+            inner_diameter,
+        )
+        painter.setBrush(self.palette().color(QPalette.ColorRole.Window))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(inner_rect)
+
+        painter.setPen(QColor(self.legend_text_color))
+        value_font = QFont('Arial', 10)
+        value_font.setBold(True)
+        painter.setFont(value_font)
+        painter.drawText(inner_rect.adjusted(8, 20, -8, -2), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self._center_text)
+
+        if self._center_subtext:
+            sub_font = QFont('Arial', 8)
+            painter.setFont(sub_font)
+            painter.drawText(inner_rect.adjusted(8, 2, -8, -20), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, self._center_subtext)

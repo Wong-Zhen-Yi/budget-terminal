@@ -3,9 +3,13 @@ from typing import Any
 from ..compat import *
 
 _P4_POSITIONS_SPLITTER_CONFIG = user_data_path('p4_splitter.json')
+_P4_STOCK_TABLE_WIDTHS_CONFIG = user_data_path('p4_stock_table_widths.json')
+_P4_OPTIONS_TABLE_WIDTHS_CONFIG = user_data_path('p4_options_table_widths.json')
 _P4_DEFAULT_POSITIONS_SPLITTER_SIZES = [7, 4]
 _P4_STOCK_SECTION_MIN_HEIGHT = 260
 _P4_OPTIONS_SECTION_MIN_HEIGHT = 180
+_P4_TABLE_FIXED_ACTION_WIDTH = 36
+_P4_TABLE_RESIZE_DEBOUNCE_MS = 120
 
 class PortfolioSetupMixin:
 
@@ -125,6 +129,197 @@ class PortfolioSetupMixin:
             pass
         self.p4_positions_splitter.setSizes(list(_P4_DEFAULT_POSITIONS_SPLITTER_SIZES))
 
+    def _p4_table_width_specs(self) -> dict[str, dict[str, Any]]:
+        """Return width-persistence metadata for the page-4 tables."""
+        return {
+            'stock': {
+                'table_attr': 'p4_table',
+                'config_path': _P4_STOCK_TABLE_WIDTHS_CONFIG,
+                'resizable_cols': tuple(range(P4_PORTFOLIO_COL_ACTION)),
+                'fixed_cols': {P4_PORTFOLIO_COL_ACTION: _P4_TABLE_FIXED_ACTION_WIDTH},
+            },
+            'options': {
+                'table_attr': 'p4_opt_table',
+                'config_path': _P4_OPTIONS_TABLE_WIDTHS_CONFIG,
+                'resizable_cols': tuple(range(15)),
+                'fixed_cols': {15: _P4_TABLE_FIXED_ACTION_WIDTH},
+            },
+        }
+
+    def _p4_table_width_spec(self, table_key: str) -> dict[str, Any]:
+        """Return one page-4 table width spec."""
+        return self._p4_table_width_specs().get(table_key, {})
+
+    def _p4_table_widget(self, table_key: str) -> Any:
+        """Resolve one page-4 table widget from its key."""
+        spec = self._p4_table_width_spec(table_key)
+        return getattr(self, spec.get('table_attr', ''), None)
+
+    def _p4_table_width_guard_attr(self, table_key: str) -> str:
+        """Return the guard attribute for programmatic width updates."""
+        return f'_p4_{table_key}_table_width_guard'
+
+    def _p4_table_width_timer_attr(self, table_key: str) -> str:
+        """Return the debounce timer attribute for one page-4 table."""
+        return f'_p4_{table_key}_table_width_timer'
+
+    def _p4_configure_table_widths(self, table_key: str) -> None:
+        """Make one page-4 table user-resizable while keeping action columns fixed."""
+        table = self._p4_table_widget(table_key)
+        if table is None:
+            return
+        spec = self._p4_table_width_spec(table_key)
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(18)
+        for col in spec.get('resizable_cols', ()):
+            header.setSectionResizeMode(int(col), QHeaderView.ResizeMode.Interactive)
+        for col, width in spec.get('fixed_cols', {}).items():
+            header.setSectionResizeMode(int(col), QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(int(col), int(width))
+
+    def _p4_table_visible_width(self, table_key: str) -> int:
+        """Return the visible width available to one table's columns."""
+        table = self._p4_table_widget(table_key)
+        if table is None:
+            return 0
+        viewport_width = int(table.viewport().width())
+        if viewport_width > 0:
+            return viewport_width
+        fallback = int(table.width()) - (table.frameWidth() * 2)
+        if table.verticalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
+            fallback -= int(table.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent))
+        return max(fallback, 0)
+
+    def _p4_capture_table_width_preferences(self, table_key: str) -> dict[int, int]:
+        """Capture the current resizable-column widths for one table."""
+        table = self._p4_table_widget(table_key)
+        spec = self._p4_table_width_spec(table_key)
+        if table is None:
+            return {}
+        widths = {}
+        for col in spec.get('resizable_cols', ()):
+            width = int(table.columnWidth(int(col)))
+            if width <= 0:
+                return {}
+            widths[int(col)] = width
+        return widths
+
+    def _p4_load_table_width_preferences(self, table_key: str) -> dict[int, int]:
+        """Load saved manual widths for one page-4 table."""
+        spec = self._p4_table_width_spec(table_key)
+        expected_columns = {int(col) for col in spec.get('resizable_cols', ())}
+        try:
+            raw = json.loads(spec.get('config_path').read_text())
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        parsed = {}
+        for key, value in raw.items():
+            try:
+                col = int(key)
+                width = int(value)
+            except (TypeError, ValueError):
+                return {}
+            if width <= 0:
+                return {}
+            parsed[col] = width
+        return parsed if set(parsed.keys()) == expected_columns else {}
+
+    def _p4_save_table_width_preferences(self, table_key: str, widths: Any = None) -> None:
+        """Persist manual widths for one page-4 table."""
+        if getattr(self, self._p4_table_width_guard_attr(table_key), False):
+            return
+        spec = self._p4_table_width_spec(table_key)
+        widths = widths or self._p4_capture_table_width_preferences(table_key)
+        if not widths:
+            return
+        payload = {str(int(col)): int(width) for col, width in widths.items() if int(width) > 0}
+        if len(payload) != len(spec.get('resizable_cols', ())):
+            return
+        try:
+            spec.get('config_path').write_text(json.dumps(payload))
+        except Exception:
+            pass
+
+    def _p4_scale_table_widths(self, widths: dict[int, int], target_total: int) -> dict[int, int]:
+        """Scale one table's saved widths to fit a new total width."""
+        if not widths:
+            return {}
+        columns = [int(col) for col in widths.keys()]
+        target_total = max(int(target_total), len(columns))
+        weights = {col: max(int(widths[col]), 1) for col in columns}
+        total_weight = max(sum(weights.values()), 1)
+        scaled = {col: int((target_total * weights[col]) // total_weight) for col in columns}
+        used = sum(scaled.values())
+        remainder = max(target_total - used, 0)
+        fractions = sorted(
+            columns,
+            key=lambda col: ((target_total * weights[col]) / total_weight) - scaled[col],
+            reverse=True,
+        )
+        for index in range(remainder):
+            scaled[fractions[index % len(fractions)]] += 1
+        return scaled
+
+    def _p4_apply_table_width_preferences(self, table_key: str, preferred_widths: Any = None) -> None:
+        """Fit one page-4 table's columns to its visible panel width."""
+        table = self._p4_table_widget(table_key)
+        if table is None:
+            return
+        spec = self._p4_table_width_spec(table_key)
+        self._p4_configure_table_widths(table_key)
+        fixed_total = sum(int(width) for width in spec.get('fixed_cols', {}).values())
+        available_width = self._p4_table_visible_width(table_key)
+        if available_width <= fixed_total:
+            return
+        base_widths = preferred_widths or self._p4_load_table_width_preferences(table_key)
+        if not base_widths:
+            base_widths = {int(col): 1 for col in spec.get('resizable_cols', ())}
+        scaled = self._p4_scale_table_widths(base_widths, available_width - fixed_total)
+        guard_attr = self._p4_table_width_guard_attr(table_key)
+        setattr(self, guard_attr, True)
+        table.setUpdatesEnabled(False)
+        try:
+            for col in spec.get('resizable_cols', ()):
+                width = int(scaled.get(int(col), 1))
+                table.setColumnWidth(int(col), width)
+            for col, width in spec.get('fixed_cols', {}).items():
+                table.setColumnWidth(int(col), int(width))
+        finally:
+            table.setUpdatesEnabled(True)
+            setattr(self, guard_attr, False)
+
+    def _p4_apply_portfolio_table_widths(self, *_: Any) -> None:
+        """Fit both page-4 tables to their current visible panel widths."""
+        self._p4_apply_table_width_preferences('stock')
+        self._p4_apply_table_width_preferences('options')
+
+    def _p4_schedule_table_width_fit(self, table_key: str) -> None:
+        """Debounce one table's width normalization after a user resize."""
+        timer = getattr(self, self._p4_table_width_timer_attr(table_key), None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda key=table_key: self._p4_apply_table_width_preferences(key))
+            setattr(self, self._p4_table_width_timer_attr(table_key), timer)
+        timer.start(_P4_TABLE_RESIZE_DEBOUNCE_MS)
+
+    def _p4_on_table_section_resized(self, table_key: str, logical_index: int, _old_size: int, _new_size: int) -> None:
+        """Persist one table's manual widths and re-fit them to the visible panel."""
+        spec = self._p4_table_width_spec(table_key)
+        if int(logical_index) not in {int(col) for col in spec.get('resizable_cols', ())}:
+            return
+        if getattr(self, self._p4_table_width_guard_attr(table_key), False):
+            return
+        self._p4_save_table_width_preferences(table_key)
+        self._p4_schedule_table_width_fit(table_key)
+
+    def _p4_on_show(self) -> None:
+        """Refresh page-4 table widths when the Portfolio tab becomes visible."""
+        self._p4_apply_portfolio_table_widths()
+
     def _p4_try_call_runtime(self, names: Any, *args: Any) -> bool:
         """Call the first runtime helper that exists."""
         for name in names:
@@ -158,6 +353,7 @@ class PortfolioSetupMixin:
             self.p4_table.blockSignals(True)
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
+            self._p4_apply_table_width_preferences('stock')
 
     def _p4_rename_active_portfolio(self) -> None:
         """Prompt the user to rename the selected portfolio slot."""
@@ -342,25 +538,13 @@ class PortfolioSetupMixin:
         self.p4_table.setHorizontalHeaderLabels(P4_PORTFOLIO_COLUMNS)
         hh = self.p4_table.horizontalHeader()
         hh.setSectionsMovable(True)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_SYMBOL, QHeaderView.ResizeMode.Fixed)
-        self.p4_table.setColumnWidth(P4_PORTFOLIO_COL_SYMBOL, 78)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_SHARES, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_AVG_PRICE, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_COST, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_PRICE, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_DAY_CHANGE, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_MARKET_VALUE, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_WEIGHT, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_DOLLAR_GAIN, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_GROWTH, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_MARKET_CAP, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(P4_PORTFOLIO_COL_ACTION, QHeaderView.ResizeMode.Fixed)
-        self.p4_table.setColumnWidth(P4_PORTFOLIO_COL_ACTION, 36)
         self.p4_table.verticalHeader().setVisible(False)
         self.p4_table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
         self.p4_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.p4_table.verticalHeader().setDefaultSectionSize(52)
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
+        self._p4_apply_table_width_preferences('stock')
+        hh.sectionResized.connect(lambda logical, old, new: self._p4_on_table_section_resized('stock', logical, old, new))
         stock_layout.addWidget(self.p4_table, 1)
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
@@ -414,13 +598,16 @@ class PortfolioSetupMixin:
         self.p4_positions_splitter.setStretchFactor(1, 2)
         self._p4_restore_positions_splitter_sizes()
         self.p4_positions_splitter.splitterMoved.connect(self._p4_save_positions_splitter_sizes)
+        self.p4_positions_splitter.splitterMoved.connect(self._p4_apply_portfolio_table_widths)
         self.p4_main_splitter.addWidget(self.p4_positions_splitter)
         self.p4_main_splitter.addWidget(right_widget)
         self.p4_main_splitter.setCollapsible(0, False)
         self.p4_main_splitter.setCollapsible(1, False)
         self.p4_main_splitter.setStretchFactor(0, 3)
         self.p4_main_splitter.setStretchFactor(1, 1)
+        self.p4_main_splitter.splitterMoved.connect(self._p4_apply_portfolio_table_widths)
         layout.addWidget(self.p4_main_splitter, 1)
+        QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
         self._p4_refresh_portfolio_selector()
 
     def _on_add_stock_clicked(self) -> None:
@@ -478,6 +665,8 @@ class PortfolioSetupMixin:
         layout.addWidget(self.p4_opt_table, 1)
         for pos in self.options_data:
             self._insert_options_row(pos)
+        self._p4_apply_table_width_preferences('options')
+        oh.sectionResized.connect(lambda logical, old, new: self._p4_on_table_section_resized('options', logical, old, new))
         return options_widget
 
     def _sync_all_options(self) -> None:

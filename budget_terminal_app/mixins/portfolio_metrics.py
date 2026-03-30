@@ -590,6 +590,8 @@ class PortfolioMetricsMixin:
         finally:
             self.p4_table.setUpdatesEnabled(True)
             self.p4_table.blockSignals(False)
+        if hasattr(self, '_p4_apply_table_width_preferences'):
+            self._p4_apply_table_width_preferences('stock')
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart(weights)
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)

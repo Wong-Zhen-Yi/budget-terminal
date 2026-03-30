@@ -3,6 +3,7 @@ import json
 import re
 import time
 from typing import Any
+from ..constants import SECTOR_DATA, _SECTOR_KEYWORDS
 from ..dependencies import *
 from ..paths import user_data_path
 
@@ -10,6 +11,11 @@ CAPITOL_TRADES_URL = 'https://www.capitoltrades.com/trades'
 CACHE_DIR = 'politics_cache'
 CACHE_TTL = 4 * 3600
 PAGE_SIZE = 100
+_THEME_BY_TICKER = {
+    str(ticker).upper(): sector
+    for sector, tickers in SECTOR_DATA.items()
+    for ticker in tickers
+}
 
 
 class PoliticsWorker(QObject):
@@ -27,6 +33,7 @@ class PoliticsWorker(QObject):
             if not self.force_refresh and cache_path.exists():
                 try:
                     cached = json.loads(cache_path.read_text(encoding='utf-8'))
+                    cached = self._normalize_cached_result(cached)
                     if time.time() - cached.get('fetched_at', 0) < CACHE_TTL:
                         self.finished.emit(cached)
                         return
@@ -116,19 +123,43 @@ class PoliticsWorker(QObject):
             first = pol.get('firstName', '')
             last = pol.get('lastName', '')
             name = f'{first} {last}'.strip() or 'Unknown'
+            asset_description = iss.get('issuerName', '')
+            amount_value = self._parse_value(rec.get('value')) or 0
 
             rows.append({
                 'politician': name,
                 'chamber': rec.get('chamber', '').title(),
                 'party': self._parse_party(pol.get('party', '')),
                 'ticker': ticker.upper() if ticker else '',
-                'asset_description': iss.get('issuerName', ''),
+                'asset_description': asset_description,
+                'theme': self._infer_theme(ticker, asset_description),
                 'trade_type': self._normalize_type(rec.get('txType', '')),
                 'amount': self._format_value(rec.get('value')),
+                'amount_value': amount_value,
                 'transaction_date': (rec.get('txDate') or '')[:10],
                 'disclosure_date': (rec.get('pubDate') or '')[:10],
             })
         return rows, len(raw_trades)
+
+    def _normalize_cached_result(self, cached: dict[str, Any]) -> dict[str, Any]:
+        trades = [self._normalize_trade(trade) for trade in cached.get('trades', [])]
+        cached['trades'] = trades
+        cached['top_tickers'] = self._top_counts(trades, 'ticker', 15)
+        cached['top_politicians'] = self._top_counts(trades, 'politician', 15)
+        return cached
+
+    def _normalize_trade(self, trade: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(trade)
+        ticker = str(normalized.get('ticker', '') or '').upper().strip()
+        asset_description = str(normalized.get('asset_description', '') or '')
+        amount_value = self._parse_value(normalized.get('amount_value'))
+        if amount_value is None:
+            amount_value = self._parse_value(normalized.get('amount'))
+        normalized['ticker'] = ticker
+        normalized['asset_description'] = asset_description
+        normalized['amount_value'] = amount_value or 0
+        normalized['theme'] = str(normalized.get('theme', '') or '').strip() or self._infer_theme(ticker, asset_description)
+        return normalized
 
     @staticmethod
     def _parse_party(value: str) -> str:
@@ -167,6 +198,50 @@ class PoliticsWorker(QObject):
             return f'${v:,}'
         except (ValueError, TypeError):
             return str(value)
+
+    @staticmethod
+    def _parse_value(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip().upper()
+        if not text:
+            return None
+        text = text.replace('$', '').replace(',', '')
+        multiplier = 1
+        if text.endswith('B'):
+            multiplier = 1_000_000_000
+            text = text[:-1]
+        elif text.endswith('M'):
+            multiplier = 1_000_000
+            text = text[:-1]
+        elif text.endswith('K'):
+            multiplier = 1_000
+            text = text[:-1]
+        match = re.search(r'-?\d+(?:\.\d+)?', text)
+        if not match:
+            return None
+        try:
+            return int(float(match.group(0)) * multiplier)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _infer_theme(ticker: str, asset_description: str) -> str:
+        ticker_key = str(ticker or '').upper().strip()
+        if ticker_key in _THEME_BY_TICKER:
+            return _THEME_BY_TICKER[ticker_key]
+        words = set(re.findall(r'[A-Z0-9]+', str(asset_description or '').upper()))
+        theme_hits = []
+        for theme, keywords in _SECTOR_KEYWORDS.items():
+            hits = len({str(word).upper() for word in keywords} & words)
+            if hits > 0:
+                theme_hits.append((hits, theme))
+        if theme_hits:
+            theme_hits.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            return theme_hits[0][1]
+        return 'Other'
 
     @staticmethod
     def _top_counts(trades: list[dict], key: str, limit: int) -> list[list]:

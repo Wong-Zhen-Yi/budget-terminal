@@ -336,6 +336,8 @@ class SettingsMixin:
         table.blockSignals(False)
         for pos in self.options_data:
             self._insert_options_row(pos)
+        if hasattr(self, '_p4_apply_table_width_preferences'):
+            self._p4_apply_table_width_preferences('options')
         self._update_total_pl_label()
 
     def _normalize_runtime_payload(self, payload: Any) -> Any:

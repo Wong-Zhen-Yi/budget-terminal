@@ -91,6 +91,8 @@ class OptionsTableRowsMixin:
         t.setCellWidget(row, 15, rm_btn)
         t.blockSignals(False)
         self._recalc_options_row(row)
+        if hasattr(self, '_p4_apply_table_width_preferences'):
+            self._p4_apply_table_width_preferences('options')
         if ticker_val:
             self._fetch_option_expiries(row_id, ticker_val)
 
@@ -147,4 +149,6 @@ class OptionsTableRowsMixin:
                     pass
                 st_combo.currentTextChanged.connect(partial(self._on_status_changed_item, ticker_item))
         t.blockSignals(False)
+        if hasattr(self, '_p4_apply_table_width_preferences'):
+            self._p4_apply_table_width_preferences('options')
         self._update_total_pl_label()
