@@ -10,7 +10,8 @@ class NetWorthMixin:
         breakdown = []
         all_state = getattr(self, 'all_portfolios_state', {})
         portfolios = all_state.get('portfolios', {}) if isinstance(all_state, dict) else {}
-        for portfolio_id in PORTFOLIO_IDS:
+        portfolio_order = all_state.get('portfolio_order', list(portfolios.keys())) if isinstance(all_state, dict) else []
+        for portfolio_id in portfolio_order:
             entry = portfolios.get(portfolio_id, {})
             if not isinstance(entry, dict):
                 continue

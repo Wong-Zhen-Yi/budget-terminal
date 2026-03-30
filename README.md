@@ -1,4 +1,4 @@
-# Budget Terminal v0.82
+# Budget Terminal v0.825
 
 ## Architecture
 This project is now organized as a small package around the `BudgetTerminalApp` Qt main window. The root `budget_terminal.py` file stays as a thin launcher so existing run commands continue to work.
@@ -23,7 +23,7 @@ The refactor is structural only: data files, launch command, and worker/page beh
 This is a `PyQt6` desktop GUI app, so the recommended packaging target is a windowed PyInstaller build using the top-level launcher `budget_terminal.py`.
 
 The default build is a `one-file` executable.
-- The output is a single versioned executable such as `BudgetTerminal-v0.82.exe` under `dist\`.
+- The output is a single versioned executable such as `BudgetTerminal-v0.825.exe` under `dist\`.
 - Startup can be slower than a one-folder build because the bundled app unpacks at launch.
 - The build still runs as a windowed/no-console desktop application.
 
@@ -42,7 +42,7 @@ The script will:
 - create `.venv` if needed
 - install runtime requirements plus `pyinstaller`
 - remove old `build/` and `dist/` folders
-- replace older `release\BudgetTerminal-v*-windows.zip` archives with a fresh zip for the current version
+- create or replace the current version's `release\BudgetTerminal-v*-windows.zip` archive while keeping older release zips
 - build the packaged app from `budget_terminal.spec` as a single executable
 - create a versioned release zip containing the new executable
 
@@ -56,13 +56,13 @@ dist\
 The main executable will be:
 
 ```text
-dist\BudgetTerminal-v0.82.exe
+dist\BudgetTerminal-v0.825.exe
 ```
 
 The release archive will be:
 
 ```text
-release\BudgetTerminal-v0.82-windows.zip
+release\BudgetTerminal-v0.825-windows.zip
 ```
 
 ### Notes for packaged runs
@@ -86,4 +86,4 @@ After updating the source, rerun:
 build_exe.bat
 ```
 
-That regenerates the versioned executable in `dist\`, for example `dist\BudgetTerminal-v0.82.exe`, and replaces the versioned release zip in `release\`.
+That regenerates the versioned executable in `dist\`, for example `dist\BudgetTerminal-v0.825.exe`, and updates the matching versioned release zip in `release\` without deleting older archives.

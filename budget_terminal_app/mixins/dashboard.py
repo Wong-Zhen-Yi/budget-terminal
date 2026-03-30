@@ -41,7 +41,7 @@ class DashboardMixin:
         if hasattr(self, '_p4_get_portfolio_slots'):
             slots = self._p4_get_portfolio_slots()
         else:
-            slots = [{'id': index, 'name': f'Portfolio {index + 1}'} for index in range(3)]
+            slots = [{'id': 0, 'name': 'Portfolio 1'}]
         showing_all = getattr(self, '_dashboard_showing_all', False)
         if not showing_all:
             if hasattr(self, '_p4_get_main_portfolio_index'):
@@ -53,12 +53,13 @@ class DashboardMixin:
         self.dashboard_portfolio_combo.addItem('All Portfolios', -1)
         for index, slot in enumerate(slots):
             label = str(slot.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}')
-            self.dashboard_portfolio_combo.addItem(label, index)
+            self.dashboard_portfolio_combo.addItem(label, int(slot.get('id', index)))
         if showing_all:
             self.dashboard_portfolio_combo.setCurrentIndex(0)
             self._dashboard_apply_all_portfolios()
         else:
-            self.dashboard_portfolio_combo.setCurrentIndex(min(max(int(current_index), 0), max(self.dashboard_portfolio_combo.count() - 2, 0)) + 1)
+            combo_index = self.dashboard_portfolio_combo.findData(int(current_index))
+            self.dashboard_portfolio_combo.setCurrentIndex(combo_index if combo_index >= 0 else min(1, max(self.dashboard_portfolio_combo.count() - 1, 0)))
         self.dashboard_portfolio_combo.blockSignals(False)
         self._dashboard_update_add_ticker_visibility()
 
@@ -76,7 +77,6 @@ class DashboardMixin:
             return
         self._dashboard_showing_all = False
         portfolio_index = int(combo_data)
-        portfolio_index = min(max(portfolio_index, 0), 2)
         if hasattr(self, '_p4_get_main_portfolio_index') and portfolio_index == self._p4_get_main_portfolio_index():
             self._dashboard_refresh_portfolio_selector()
             return
@@ -96,9 +96,10 @@ class DashboardMixin:
         """Merge all portfolio tickers and tracker data for the combined 'All' view."""
         all_state = getattr(self, 'all_portfolios_state', {})
         portfolios = all_state.get('portfolios', {}) if isinstance(all_state, dict) else {}
+        portfolio_order = all_state.get('portfolio_order', list(portfolios.keys())) if isinstance(all_state, dict) else []
         merged_tickers = []
         merged_tracker = {}
-        for portfolio_id in PORTFOLIO_IDS:
+        for portfolio_id in portfolio_order:
             entry = portfolios.get(portfolio_id, {})
             if not isinstance(entry, dict):
                 continue

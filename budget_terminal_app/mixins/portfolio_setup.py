@@ -2,40 +2,48 @@ from __future__ import annotations
 from typing import Any
 from ..compat import *
 
+_P4_POSITIONS_SPLITTER_CONFIG = user_data_path('p4_splitter.json')
+_P4_DEFAULT_POSITIONS_SPLITTER_SIZES = [7, 4]
+_P4_STOCK_SECTION_MIN_HEIGHT = 260
+_P4_OPTIONS_SECTION_MIN_HEIGHT = 180
+
 class PortfolioSetupMixin:
 
     def _p4_get_portfolio_slots(self) -> Any:
-        """Return a normalized list of up to 3 portfolio slot dicts."""
+        """Return a normalized ordered list of existing portfolio slot dicts."""
         slots = []
         raw = getattr(self, 'portfolio_slots', None)
         if isinstance(raw, list):
-            for index, entry in enumerate(raw[:3]):
+            for index, entry in enumerate(raw[:MAX_PORTFOLIOS]):
                 if isinstance(entry, dict):
                     slots.append({
                         'id': int(entry.get('id', index)),
+                        'portfolio_id': str(entry.get('portfolio_id', entry.get('id', index)) or entry.get('id', index)),
                         'name': str(entry.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}'),
                     })
-        for index in range(len(slots), 3):
-            slots.append({'id': index, 'name': f'Portfolio {index + 1}'})
+        if not slots:
+            slots.append({'id': 0, 'portfolio_id': DEFAULT_MAIN_PORTFOLIO_ID, 'name': 'Portfolio 1'})
         return slots
 
     def _p4_get_active_portfolio_index(self) -> int:
         """Return the selected portfolio index for the page-4 workspace."""
+        slots = self._p4_get_portfolio_slots()
         value = getattr(self, 'active_portfolio_index', 0)
         try:
             value = int(value)
         except (TypeError, ValueError):
             value = 0
-        return min(max(value, 0), 2)
+        return min(max(value, 0), max(len(slots) - 1, 0))
 
     def _p4_get_main_portfolio_index(self) -> int:
         """Return the app-wide main portfolio index."""
+        slots = self._p4_get_portfolio_slots()
         for attr_name in ('main_portfolio_index', 'primary_portfolio_index'):
             value = getattr(self, attr_name, None)
             if value is None:
                 continue
             try:
-                return min(max(int(value), 0), 2)
+                return min(max(int(value), 0), max(len(slots) - 1, 0))
             except (TypeError, ValueError):
                 return 0
         return self._p4_get_active_portfolio_index()
@@ -49,9 +57,9 @@ class PortfolioSetupMixin:
 
     def _p4_apply_fallback_portfolio_identity(self, index: int, *, make_main: bool=False) -> None:
         """Update local identity state when shared runtime helpers are unavailable."""
-        index = min(max(int(index), 0), 2)
-        self.active_portfolio_index = index
         slots = self._p4_get_portfolio_slots()
+        index = min(max(int(index), 0), max(len(slots) - 1, 0))
+        self.active_portfolio_index = index
         self.portfolio_slots = slots
         if make_main:
             self.main_portfolio_index = index
@@ -64,6 +72,8 @@ class PortfolioSetupMixin:
         active_index = self._p4_get_active_portfolio_index()
         main_index = self._p4_get_main_portfolio_index()
         self.p4_portfolio_tabs.blockSignals(True)
+        while self.p4_portfolio_tabs.count() > len(slots):
+            self.p4_portfolio_tabs.removeTab(self.p4_portfolio_tabs.count() - 1)
         while self.p4_portfolio_tabs.count() < len(slots):
             self.p4_portfolio_tabs.addTab(QWidget(), '')
         for index, slot in enumerate(slots):
@@ -82,8 +92,38 @@ class PortfolioSetupMixin:
             else:
                 self.p4_set_main_btn.setText('Set as Main')
                 self.p4_set_main_btn.setEnabled(True)
+        if hasattr(self, 'p4_new_portfolio_btn'):
+            self.p4_new_portfolio_btn.setEnabled(len(slots) < MAX_PORTFOLIOS)
+        if hasattr(self, 'p4_delete_portfolio_btn'):
+            self.p4_delete_portfolio_btn.setEnabled(len(slots) > 1)
         if hasattr(self, 'port_header_lbl'):
             self.port_header_lbl.setText(f'{self._p4_portfolio_name(main_index)} ({len(getattr(self, "tickers", []))})')
+
+    def _p4_save_positions_splitter_sizes(self, *_: Any) -> None:
+        """Persist the page-4 stock/options splitter sizes to disk."""
+        if not hasattr(self, 'p4_positions_splitter'):
+            return
+        sizes = [int(size) for size in self.p4_positions_splitter.sizes() if int(size) > 0]
+        if len(sizes) != 2:
+            return
+        try:
+            _P4_POSITIONS_SPLITTER_CONFIG.write_text(json.dumps(sizes))
+        except Exception:
+            pass
+
+    def _p4_restore_positions_splitter_sizes(self) -> None:
+        """Restore saved page-4 splitter sizes or apply the default layout."""
+        if not hasattr(self, 'p4_positions_splitter'):
+            return
+        try:
+            sizes = json.loads(_P4_POSITIONS_SPLITTER_CONFIG.read_text())
+            if isinstance(sizes, list) and len(sizes) == 2:
+                clean_sizes = [max(int(size), 1) for size in sizes]
+                self.p4_positions_splitter.setSizes(clean_sizes)
+                return
+        except Exception:
+            pass
+        self.p4_positions_splitter.setSizes(list(_P4_DEFAULT_POSITIONS_SPLITTER_SIZES))
 
     def _p4_try_call_runtime(self, names: Any, *args: Any) -> bool:
         """Call the first runtime helper that exists."""
@@ -96,7 +136,10 @@ class PortfolioSetupMixin:
 
     def _p4_on_portfolio_changed(self, index: int) -> None:
         """Switch the shared page-4 workspace to a different portfolio."""
-        index = min(max(int(index), 0), 2)
+        slots = self._p4_get_portfolio_slots()
+        if not slots:
+            return
+        index = min(max(int(index), 0), len(slots) - 1)
         if not self._p4_try_call_runtime(
             ('set_active_portfolio_index', '_set_active_portfolio_index', '_activate_portfolio_index', '_switch_active_portfolio'),
             index,
@@ -134,6 +177,68 @@ class PortfolioSetupMixin:
             self.portfolio_slots = slots
         self._p4_refresh_portfolio_selector()
 
+    def _p4_create_portfolio(self) -> None:
+        """Create a new empty portfolio up to the configured cap."""
+        slots = self._p4_get_portfolio_slots()
+        if len(slots) >= MAX_PORTFOLIOS:
+            QMessageBox.information(self, 'Portfolio Limit Reached', f'You can create up to {MAX_PORTFOLIOS} portfolios.')
+            return
+        handled = False
+        created = False
+        for name in ('create_portfolio', '_create_portfolio', 'add_portfolio', '_add_portfolio'):
+            fn = getattr(self, name, None)
+            if callable(fn):
+                handled = True
+                created = bool(fn())
+                break
+        if not handled:
+            fallback_slots = self._p4_get_portfolio_slots()
+            next_index = len(fallback_slots)
+            fallback_slots.append({'id': next_index, 'portfolio_id': f'portfolio_{next_index + 1}', 'name': f'Portfolio {next_index + 1}'})
+            self.portfolio_slots = fallback_slots
+            self.active_portfolio_index = next_index
+            created = True
+        if created:
+            self._p4_refresh_portfolio_selector()
+
+    def _p4_delete_active_portfolio(self) -> None:
+        """Delete the currently selected portfolio after confirmation."""
+        slots = self._p4_get_portfolio_slots()
+        if len(slots) <= 1:
+            QMessageBox.information(self, 'Delete Portfolio', 'At least one portfolio must remain.')
+            return
+        active_index = self._p4_get_active_portfolio_index()
+        portfolio_name = self._p4_portfolio_name(active_index)
+        reply = QMessageBox.question(
+            self,
+            'Delete Portfolio',
+            f'Delete "{portfolio_name}" and all of its stock, tracker, and options data?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        handled = False
+        deleted = False
+        for name in ('delete_portfolio', '_delete_portfolio', 'remove_portfolio', '_remove_portfolio'):
+            fn = getattr(self, name, None)
+            if callable(fn):
+                handled = True
+                deleted = bool(fn(active_index))
+                break
+        if not handled:
+            fallback_slots = self._p4_get_portfolio_slots()
+            if 0 <= active_index < len(fallback_slots):
+                del fallback_slots[active_index]
+                for index, slot in enumerate(fallback_slots):
+                    slot['id'] = index
+                self.portfolio_slots = fallback_slots
+                self.active_portfolio_index = min(active_index, len(fallback_slots) - 1)
+                self.main_portfolio_index = min(self._p4_get_main_portfolio_index(), len(fallback_slots) - 1)
+                deleted = True
+        if deleted:
+            self._p4_refresh_portfolio_selector()
+
     def _p4_set_active_as_main(self) -> None:
         """Mark the selected portfolio as the app-wide main portfolio."""
         active_index = self._p4_get_active_portfolio_index()
@@ -165,15 +270,21 @@ class PortfolioSetupMixin:
         layout.addLayout(summary_bar)
         selector_bar = QHBoxLayout()
         selector_bar.setSpacing(8)
-        selector_label = QLabel('Portfolio Slots')
+        selector_label = QLabel('Portfolios')
         self.set_theme_role(selector_label, 'card_title')
         self.p4_portfolio_tabs = QTabWidget()
         self.p4_portfolio_tabs.setDocumentMode(True)
         self.p4_portfolio_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.p4_portfolio_tabs.tabBar().setMinimumHeight(32)
-        for _ in range(3):
-            self.p4_portfolio_tabs.addTab(QWidget(), '')
         self.p4_portfolio_tabs.currentChanged.connect(self._p4_on_portfolio_changed)
+        self.p4_new_portfolio_btn = QPushButton('New Portfolio')
+        self.set_theme_variant(self.p4_new_portfolio_btn, 'positive')
+        self.p4_new_portfolio_btn.setMinimumHeight(30)
+        self.p4_new_portfolio_btn.clicked.connect(self._p4_create_portfolio)
+        self.p4_delete_portfolio_btn = QPushButton('Delete Portfolio')
+        self.set_theme_variant(self.p4_delete_portfolio_btn, 'danger')
+        self.p4_delete_portfolio_btn.setMinimumHeight(30)
+        self.p4_delete_portfolio_btn.clicked.connect(self._p4_delete_active_portfolio)
         self.p4_rename_btn = QPushButton('Rename')
         self.set_theme_variant(self.p4_rename_btn, 'accent')
         self.p4_rename_btn.setMinimumHeight(30)
@@ -186,12 +297,26 @@ class PortfolioSetupMixin:
         self.set_theme_role(self.p4_main_portfolio_label, 'muted')
         selector_bar.addWidget(selector_label)
         selector_bar.addWidget(self.p4_portfolio_tabs, 1)
+        selector_bar.addWidget(self.p4_new_portfolio_btn)
+        selector_bar.addWidget(self.p4_delete_portfolio_btn)
         selector_bar.addWidget(self.p4_rename_btn)
         selector_bar.addWidget(self.p4_set_main_btn)
         selector_bar.addWidget(self.p4_main_portfolio_label)
         layout.addLayout(selector_bar)
-        self.p4_main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.p4_main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.p4_main_splitter.setHandleWidth(6)
+        self.p4_main_splitter.setChildrenCollapsible(False)
+        self.p4_main_splitter.setStyleSheet(
+            'QSplitter::handle { background: #2a2a4a; border-radius: 2px; }'
+        )
+        self.p4_positions_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.p4_positions_splitter.setHandleWidth(6)
+        self.p4_positions_splitter.setChildrenCollapsible(False)
+        self.p4_positions_splitter.setStyleSheet(
+            'QSplitter::handle { background: #2a2a4a; border-radius: 2px; }'
+        )
         stock_widget = QWidget()
+        stock_widget.setMinimumHeight(_P4_STOCK_SECTION_MIN_HEIGHT)
         stock_layout = QVBoxLayout(stock_widget)
         stock_layout.setContentsMargins(0, 4, 0, 0)
         stock_layout.setSpacing(4)
@@ -213,7 +338,6 @@ class PortfolioSetupMixin:
         stock_header_layout.addWidget(export_llm_btn)
         stock_header_layout.addStretch()
         stock_layout.addLayout(stock_header_layout)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
         self.p4_table = QTableWidget(0, len(P4_PORTFOLIO_COLUMNS))
         self.p4_table.setHorizontalHeaderLabels(P4_PORTFOLIO_COLUMNS)
         hh = self.p4_table.horizontalHeader()
@@ -237,6 +361,7 @@ class PortfolioSetupMixin:
         self.p4_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.p4_table.verticalHeader().setDefaultSectionSize(52)
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
+        stock_layout.addWidget(self.p4_table, 1)
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 0, 0, 0)
@@ -279,16 +404,22 @@ class PortfolioSetupMixin:
         right_layout.addWidget(dip_finder_label)
         right_layout.addWidget(self.p4_returns_tabs, 1)
         right_layout.addWidget(weight_container, 1)
-        splitter.addWidget(self.p4_table)
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        stock_layout.addWidget(splitter, 1)
-        self.p4_main_splitter.addWidget(stock_widget)
         options_widget = self._init_options_tab()
-        self.p4_main_splitter.addWidget(options_widget)
+        options_widget.setMinimumHeight(_P4_OPTIONS_SECTION_MIN_HEIGHT)
+        self.p4_positions_splitter.addWidget(stock_widget)
+        self.p4_positions_splitter.addWidget(options_widget)
+        self.p4_positions_splitter.setCollapsible(0, False)
+        self.p4_positions_splitter.setCollapsible(1, False)
+        self.p4_positions_splitter.setStretchFactor(0, 3)
+        self.p4_positions_splitter.setStretchFactor(1, 2)
+        self._p4_restore_positions_splitter_sizes()
+        self.p4_positions_splitter.splitterMoved.connect(self._p4_save_positions_splitter_sizes)
+        self.p4_main_splitter.addWidget(self.p4_positions_splitter)
+        self.p4_main_splitter.addWidget(right_widget)
+        self.p4_main_splitter.setCollapsible(0, False)
+        self.p4_main_splitter.setCollapsible(1, False)
         self.p4_main_splitter.setStretchFactor(0, 3)
-        self.p4_main_splitter.setStretchFactor(1, 2)
+        self.p4_main_splitter.setStretchFactor(1, 1)
         layout.addWidget(self.p4_main_splitter, 1)
         self._p4_refresh_portfolio_selector()
 

@@ -25,6 +25,36 @@ class _SessionLogHandler(logging.Handler):
             return
 
 
+def _window_bootstrap_default_portfolio_entry(portfolio_id: Any) -> Any:
+    """Build a local empty portfolio entry without importing private persistence helpers."""
+    return {
+        'id': portfolio_id,
+        'name': DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, str(portfolio_id or DEFAULT_MAIN_PORTFOLIO_ID)),
+        'portfolio': [],
+        'chart_slots': list(DEFAULT_CHART_SLOTS),
+        'portfolio_tracker': {},
+        'options_tracker': [],
+    }
+
+
+def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: Any=None) -> list[str]:
+    """Return a non-empty ordered list of supported portfolio ids."""
+    order = []
+    if isinstance(raw_order, list):
+        for value in raw_order:
+            portfolio_id = str(value or '').strip()
+            if portfolio_id in PORTFOLIO_IDS and portfolio_id not in order:
+                order.append(portfolio_id)
+    portfolios = raw_portfolios if isinstance(raw_portfolios, dict) else {}
+    for portfolio_id in portfolios.keys():
+        clean_id = str(portfolio_id or '').strip()
+        if clean_id in PORTFOLIO_IDS and clean_id not in order:
+            order.append(clean_id)
+    if not order:
+        order = [DEFAULT_MAIN_PORTFOLIO_ID]
+    return order[:MAX_PORTFOLIOS]
+
+
 class WindowBootstrapMixin:
     _PORTFOLIO_PERSIST_DEBOUNCE_MS = 250
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
@@ -38,31 +68,44 @@ class WindowBootstrapMixin:
             self._cache_manager = cache
         return cache
 
+    def _portfolio_order(self) -> list[str]:
+        """Return the current ordered portfolio id list, keeping state non-empty."""
+        portfolios = self.all_portfolios_state.setdefault('portfolios', {})
+        raw_order = self.all_portfolios_state.get('portfolio_order', [])
+        order = [pid for pid in _window_bootstrap_normalize_portfolio_order(raw_order, portfolios) if pid in portfolios]
+        if not order:
+            order = [DEFAULT_MAIN_PORTFOLIO_ID]
+            portfolios[DEFAULT_MAIN_PORTFOLIO_ID] = _window_bootstrap_default_portfolio_entry(DEFAULT_MAIN_PORTFOLIO_ID)
+        self.all_portfolios_state['portfolio_order'] = order
+        return list(order)
+
     def _portfolio_index_from_id(self, portfolio_id: Any) -> int:
-        """Return the fixed slot index for a portfolio id."""
-        portfolio_ids = list(PORTFOLIO_IDS)
+        """Return the current ordered tab index for a portfolio id."""
+        portfolio_ids = self._portfolio_order()
         try:
             return portfolio_ids.index(str(portfolio_id or '').strip())
         except ValueError:
             return 0
 
     def _portfolio_id_from_index(self, index: Any) -> Any:
-        """Return the fixed slot id for a tab index."""
+        """Return the current ordered portfolio id for a tab index."""
+        portfolio_ids = self._portfolio_order()
         try:
             numeric = int(index)
         except (TypeError, ValueError):
             numeric = 0
-        numeric = min(max(numeric, 0), len(PORTFOLIO_IDS) - 1)
-        return PORTFOLIO_IDS[numeric]
+        numeric = min(max(numeric, 0), len(portfolio_ids) - 1)
+        return portfolio_ids[numeric]
 
     def _rebuild_portfolio_slots(self) -> None:
-        """Mirror the persisted portfolio catalog into the UI-friendly slot list."""
+        """Mirror the persisted portfolio catalog into the UI-friendly ordered slot list."""
         slots = []
         portfolios = self.all_portfolios_state.get('portfolios', {})
-        for portfolio_id in PORTFOLIO_IDS:
+        portfolio_order = self._portfolio_order()
+        for index, portfolio_id in enumerate(portfolio_order):
             entry = portfolios.get(portfolio_id, {})
             slots.append({
-                'id': self._portfolio_index_from_id(portfolio_id),
+                'id': index,
                 'portfolio_id': portfolio_id,
                 'name': str(entry.get('name', DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)) or DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)),
             })
@@ -72,7 +115,12 @@ class WindowBootstrapMixin:
 
     def _get_portfolio_entry(self, portfolio_id: Any=None) -> Any:
         """Return a mutable portfolio entry from the runtime state."""
-        pid = self._portfolio_id_from_index(self.active_portfolio_index if portfolio_id is None else self._portfolio_index_from_id(portfolio_id))
+        portfolio_order = self._portfolio_order()
+        if portfolio_id is None:
+            pid = self._portfolio_id_from_index(self.active_portfolio_index)
+        else:
+            clean_id = str(portfolio_id or '').strip()
+            pid = clean_id if clean_id in portfolio_order else portfolio_order[0]
         entry = self.all_portfolios_state.setdefault('portfolios', {}).setdefault(pid, {
             'name': DEFAULT_PORTFOLIO_NAMES.get(pid, pid),
             'portfolio': [],
@@ -122,7 +170,7 @@ class WindowBootstrapMixin:
     def _get_fetch_tickers(self) -> Any:
         """Return the deduplicated ticker set needed across saved portfolios."""
         combined = []
-        for portfolio_id in PORTFOLIO_IDS:
+        for portfolio_id in self._portfolio_order():
             entry = self._get_portfolio_entry(portfolio_id)
             for ticker in list(entry.get('portfolio', [])):
                 text = str(ticker or '').upper().strip()
@@ -134,12 +182,14 @@ class WindowBootstrapMixin:
         """Write the current in-memory portfolio state to disk immediately."""
         self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
         self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
+        self.all_portfolios_state['portfolio_order'] = self._portfolio_order()
         save_all_portfolios_state(self.all_portfolios_state)
 
     def _persist_all_portfolios(self, *, immediate: bool=False) -> None:
         """Persist the full runtime portfolio state, buffering bursty edits."""
         self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
         self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
+        self.all_portfolios_state['portfolio_order'] = self._portfolio_order()
         if immediate:
             if hasattr(self, '_portfolio_persist_timer'):
                 self._portfolio_persist_timer.stop()
@@ -310,7 +360,7 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=False)
 
     def rename_portfolio(self, index: Any, name: Any) -> None:
-        """Rename one of the fixed portfolio slots."""
+        """Rename an existing portfolio."""
         portfolio_id = self._portfolio_id_from_index(index)
         clean_name = str(name or '').strip() or DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)
         self._get_portfolio_entry(portfolio_id)['name'] = clean_name
@@ -318,11 +368,68 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=False)
 
     def set_main_portfolio_index(self, index: Any) -> None:
-        """Promote the selected portfolio slot to the app-wide main portfolio."""
+        """Promote the selected portfolio to the app-wide main portfolio."""
         self.main_portfolio_id = self._portfolio_id_from_index(index)
         self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
         self._persist_all_portfolios()
         self._sync_after_portfolio_change(refresh_main=True)
+
+    def create_portfolio(self) -> bool:
+        """Create a new empty portfolio and switch the editor to it."""
+        portfolio_order = self._portfolio_order()
+        if len(portfolio_order) >= MAX_PORTFOLIOS:
+            return False
+        available_ids = [portfolio_id for portfolio_id in PORTFOLIO_IDS if portfolio_id not in portfolio_order]
+        if not available_ids:
+            return False
+        portfolio_id = available_ids[0]
+        portfolios = self.all_portfolios_state.setdefault('portfolios', {})
+        portfolios[portfolio_id] = _window_bootstrap_default_portfolio_entry(portfolio_id)
+        portfolio_order.append(portfolio_id)
+        self.all_portfolios_state['portfolio_order'] = portfolio_order
+        self.active_portfolio_id = portfolio_id
+        self.all_portfolios_state['active_portfolio_id'] = portfolio_id
+        self._persist_all_portfolios()
+        self._sync_after_portfolio_change(refresh_main=False)
+        return True
+
+    def delete_portfolio(self, index: Any) -> bool:
+        """Delete one portfolio while preserving a valid active and main selection."""
+        portfolio_order = self._portfolio_order()
+        if len(portfolio_order) <= 1:
+            return False
+        try:
+            delete_index = int(index)
+        except (TypeError, ValueError):
+            delete_index = self._portfolio_index_from_id(self.active_portfolio_id)
+        delete_index = min(max(delete_index, 0), len(portfolio_order) - 1)
+        portfolio_id = portfolio_order[delete_index]
+        remaining_order = [pid for pid in portfolio_order if pid != portfolio_id]
+        if not remaining_order:
+            return False
+        replacement_index = min(delete_index, len(remaining_order) - 1)
+        replacement_id = remaining_order[replacement_index]
+        deleted_main = portfolio_id == self.main_portfolio_id
+        deleted_active = portfolio_id == self.active_portfolio_id
+        self.all_portfolios_state.setdefault('portfolios', {}).pop(portfolio_id, None)
+        self.all_portfolios_state['portfolio_order'] = remaining_order
+        if deleted_main:
+            self.main_portfolio_id = replacement_id
+        if deleted_active or self.active_portfolio_id not in remaining_order:
+            self.active_portfolio_id = replacement_id
+        self.all_portfolios_state['main_portfolio_id'] = self.main_portfolio_id
+        self.all_portfolios_state['active_portfolio_id'] = self.active_portfolio_id
+        self._return_metrics_cache = {
+            key: value for key, value in getattr(self, '_return_metrics_cache', {}).items()
+            if str(key[0]) != str(portfolio_id)
+        }
+        self._return_metrics_fetching = {
+            key: value for key, value in getattr(self, '_return_metrics_fetching', {}).items()
+            if str(key[0]) != str(portfolio_id)
+        }
+        self._persist_all_portfolios()
+        self._sync_after_portfolio_change(refresh_main=deleted_main)
+        return True
 
     def __init__(self) -> None:
         """Initialize the object."""
@@ -332,7 +439,7 @@ class WindowBootstrapMixin:
         self.setWindowTitle(f'Budget Terminal v{__version__}')
         self.resize(1280, 600)
         self.all_portfolios_state = load_all_portfolios_state()
-        self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', PORTFOLIO_IDS[0])
+        self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
         self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
         self._rebuild_portfolio_slots()
         self.tickers = []

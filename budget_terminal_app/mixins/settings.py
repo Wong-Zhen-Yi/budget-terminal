@@ -361,15 +361,16 @@ class SettingsMixin:
             return normalized
         raw_slots = payload.get('portfolio_slots', payload.get('portfolios', []))
         if isinstance(raw_slots, list):
-            for index, slot in enumerate(raw_slots[:3]):
+            for index, slot in enumerate(raw_slots[:MAX_PORTFOLIOS]):
                 if isinstance(slot, dict):
                     normalized['portfolio_slots'].append({
                         'id': int(slot.get('id', index)),
                         'name': str(slot.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}'),
                     })
+        slot_count = max(len(normalized['portfolio_slots']), 1)
         for key in ('active_portfolio_index', 'main_portfolio_index'):
             try:
-                normalized[key] = min(max(int(payload.get(key, normalized[key])), 0), 2)
+                normalized[key] = min(max(int(payload.get(key, normalized[key])), 0), slot_count - 1)
             except (TypeError, ValueError):
                 normalized[key] = 0
         return normalized
@@ -380,7 +381,7 @@ class SettingsMixin:
         self._return_metrics_fetching = {}
         if isinstance(payload, dict) and isinstance(payload.get('portfolios'), dict):
             self.all_portfolios_state = save_all_portfolios_state(payload)
-            self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', PORTFOLIO_IDS[0])
+            self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
             self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
         else:
             normalized = self._normalize_runtime_payload(payload)
@@ -388,16 +389,24 @@ class SettingsMixin:
             self.chart_slots = list(normalized.get('portfolio', {}).get('chart_slots', self.chart_slots))
             self.tracker_data = dict(normalized.get('portfolio_tracker', {}))
             self.options_data = list(normalized.get('options_tracker', []))
-            self.main_portfolio_id = self._portfolio_id_from_index(normalized.get('main_portfolio_index', 0))
-            self.active_portfolio_id = self._portfolio_id_from_index(normalized.get('active_portfolio_index', normalized.get('main_portfolio_index', 0)))
+            slot_specs = list(normalized.get('portfolio_slots', []))[:MAX_PORTFOLIOS]
+            if not slot_specs:
+                slot_specs = [{'id': 0, 'name': DEFAULT_PORTFOLIO_NAMES.get(DEFAULT_MAIN_PORTFOLIO_ID, DEFAULT_MAIN_PORTFOLIO_ID)}]
+            portfolio_order = PORTFOLIO_IDS[:len(slot_specs)]
+            main_index = min(max(int(normalized.get('main_portfolio_index', 0)), 0), len(portfolio_order) - 1)
+            active_index = min(max(int(normalized.get('active_portfolio_index', main_index)), 0), len(portfolio_order) - 1)
+            self.main_portfolio_id = portfolio_order[main_index]
+            self.active_portfolio_id = portfolio_order[active_index]
             self.all_portfolios_state = {
                 'main_portfolio_id': self.main_portfolio_id,
                 'active_portfolio_id': self.active_portfolio_id,
+                'portfolio_order': list(portfolio_order),
                 'portfolios': {},
             }
-            for portfolio_id in PORTFOLIO_IDS:
+            for index, portfolio_id in enumerate(portfolio_order):
+                slot_name = str(slot_specs[index].get('name', DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)) or DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id))
                 self.all_portfolios_state['portfolios'][portfolio_id] = {
-                    'name': DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id),
+                    'name': slot_name,
                     'portfolio': list(self.tickers) if portfolio_id == self.main_portfolio_id else [],
                     'chart_slots': list(self.chart_slots) if portfolio_id == self.main_portfolio_id else list(DEFAULT_CHART_SLOTS),
                     'portfolio_tracker': dict(self.tracker_data) if portfolio_id == self.main_portfolio_id else {},

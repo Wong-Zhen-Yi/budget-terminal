@@ -31,10 +31,6 @@ if not exist "release" mkdir "release"
 python -c "from pathlib import Path; from zipfile import ZipFile, ZIP_DEFLATED; exe_path = Path('dist') / r'%APP_EXE%'; zip_path = Path('release') / r'%APP_ZIP%'; zip_path.unlink(missing_ok=True); zf = ZipFile(zip_path, 'w', compression=ZIP_DEFLATED); zf.write(exe_path, arcname=exe_path.name); zf.close()"
 if errorlevel 1 exit /b 1
 
-for %%f in ("release\BudgetTerminal-v*-windows.zip") do (
-    if /i not "%%~nxf"=="%APP_ZIP%" del /q "%%~f"
-)
-
 echo.
 echo Build complete.
 echo Main executable: dist\%APP_EXE%

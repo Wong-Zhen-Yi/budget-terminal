@@ -6,6 +6,17 @@ from ..compat import *
 _P7_SPLITTER_CONFIG = user_data_path('p7_splitter.json')
 
 class CalendarPageMixin:
+    def _p7_calendar_display_flags(self) -> Any:
+        """Return the current calendar/export category visibility toggles."""
+        show_econ = self.p7_export_economic_cb.isChecked() if hasattr(self, 'p7_export_economic_cb') else True
+        show_company = self.p7_export_company_cb.isChecked() if hasattr(self, 'p7_export_company_cb') else True
+        show_options = self.p7_export_options_cb.isChecked() if hasattr(self, 'p7_export_options_cb') else True
+        return show_econ, show_company, show_options
+
+    def _p7_on_calendar_filter_changed(self, *_: Any) -> None:
+        """Re-render the calendar immediately when a category toggle changes."""
+        self._p7_render_month()
+
     def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 6) -> None:
         """Set all detail tables to the same height based on the tallest one."""
         valid = [t for t in tables if t is not None]
@@ -279,21 +290,24 @@ class CalendarPageMixin:
         export_opts_layout = QVBoxLayout(export_opts_widget)
         export_opts_layout.setContentsMargins(6, 6, 6, 6)
         export_opts_layout.setSpacing(4)
-        export_opts_lbl = QLabel('<b>LLM Export Options</b>')
+        export_opts_lbl = QLabel('<b>Show on Calendar</b>')
         export_opts_lbl.setStyleSheet('font-size: 15px; color: #8888aa;')
         export_opts_layout.addWidget(export_opts_lbl)
         cb_style = 'QCheckBox { color: #ccc; font-size: 12px; border: none; }'
         self.p7_export_economic_cb = QCheckBox('Economic Events')
         self.p7_export_economic_cb.setChecked(True)
         self.p7_export_economic_cb.setStyleSheet(cb_style)
+        self.p7_export_economic_cb.toggled.connect(self._p7_on_calendar_filter_changed)
         export_opts_layout.addWidget(self.p7_export_economic_cb)
         self.p7_export_company_cb = QCheckBox('Earnings && Corporate Events')
         self.p7_export_company_cb.setChecked(True)
         self.p7_export_company_cb.setStyleSheet(cb_style)
+        self.p7_export_company_cb.toggled.connect(self._p7_on_calendar_filter_changed)
         export_opts_layout.addWidget(self.p7_export_company_cb)
         self.p7_export_options_cb = QCheckBox('Options Expirations')
         self.p7_export_options_cb.setChecked(True)
         self.p7_export_options_cb.setStyleSheet(cb_style)
+        self.p7_export_options_cb.toggled.connect(self._p7_on_calendar_filter_changed)
         export_opts_layout.addWidget(self.p7_export_options_cb)
         export_opts_layout.addStretch()
         self.p7_details_splitter.addWidget(export_opts_widget)
@@ -339,40 +353,44 @@ class CalendarPageMixin:
         import calendar
         today = self._p7_get_reference_today()
         year, month = (self._p7_year, self._p7_month)
+        show_econ, show_company, show_options = self._p7_calendar_display_flags()
         self.p7_month_label.setText(f'{calendar.month_name[month]} {year}')
         _ECON_COLORS = {'FOMC Decision': '#e040fb', 'CPI Release': '#ff5252', 'NFP Jobs Report': '#ffab40', 'PCE Inflation': '#7c4dff', 'GDP Report': '#69f0ae'}
-        econ_events = _get_economic_events(year, month)
+        econ_events = _get_economic_events(year, month) if show_econ else []
         date_events = {}
-        for d, name, _imp in econ_events:
-            color = _ECON_COLORS.get(name, '#aaa')
-            short = name.split()[0]
-            date_events.setdefault(d.day, []).append((short, '', color))
-        for ticker, info in self._p7_events.items():
-            if info.get('earnings'):
-                d = info['earnings']
-                if d.year == year and d.month == month:
-                    date_events.setdefault(d.day, []).append((ticker, 'Earnings', '#ff9800'))
-            if info.get('exdiv'):
-                d = info['exdiv']
-                if d.year == year and d.month == month:
-                    date_events.setdefault(d.day, []).append((ticker, 'ExDiv', '#4fc3f7'))
+        if show_econ:
+            for d, name, _imp in econ_events:
+                color = _ECON_COLORS.get(name, '#aaa')
+                short = name.split()[0]
+                date_events.setdefault(d.day, []).append((short, '', color))
+        if show_company:
+            for ticker, info in self._p7_events.items():
+                if info.get('earnings'):
+                    d = info['earnings']
+                    if d.year == year and d.month == month:
+                        date_events.setdefault(d.day, []).append((ticker, 'Earnings', '#ff9800'))
+                if info.get('exdiv'):
+                    d = info['exdiv']
+                    if d.year == year and d.month == month:
+                        date_events.setdefault(d.day, []).append((ticker, 'ExDiv', '#4fc3f7'))
         _STRATEGY_SHORT = {'Calls': 'C', 'Puts': 'P', 'Covered Call': 'CC', 'Cash Secured Put': 'CSP'}
-        for pos in self._p7_get_main_portfolio_options():
-            status = str(pos.get('status', 'Open') or 'Open')
-            if status.lower() != 'open':
-                continue
-            expiry_text = str(pos.get('expiry', '') or '').strip()
-            if not expiry_text:
-                continue
-            try:
-                expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
-            except ValueError:
-                continue
-            if expiry_date.year == year and expiry_date.month == month:
-                ticker_opt = str(pos.get('ticker', '') or '').upper().strip()
-                strategy = str(pos.get('strategy', 'Calls') or 'Calls')
-                short = _STRATEGY_SHORT.get(strategy, strategy[:2])
-                date_events.setdefault(expiry_date.day, []).append((ticker_opt, short, '#e91e63'))
+        if show_options:
+            for pos in self._p7_get_main_portfolio_options():
+                status = str(pos.get('status', 'Open') or 'Open')
+                if status.lower() != 'open':
+                    continue
+                expiry_text = str(pos.get('expiry', '') or '').strip()
+                if not expiry_text:
+                    continue
+                try:
+                    expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
+                except ValueError:
+                    continue
+                if expiry_date.year == year and expiry_date.month == month:
+                    ticker_opt = str(pos.get('ticker', '') or '').upper().strip()
+                    strategy = str(pos.get('strategy', 'Calls') or 'Calls')
+                    short = _STRATEGY_SHORT.get(strategy, strategy[:2])
+                    date_events.setdefault(expiry_date.day, []).append((ticker_opt, short, '#e91e63'))
         cal = calendar.Calendar(firstweekday=0)
         month_days = list(cal.itermonthdays(year, month))
         for row in range(6):
@@ -441,9 +459,7 @@ class CalendarPageMixin:
         year, month = self._p7_year, self._p7_month
         month_name = _calendar_mod.month_name[month]
         today = self._p7_get_reference_today()
-        inc_econ = self.p7_export_economic_cb.isChecked() if hasattr(self, 'p7_export_economic_cb') else True
-        inc_company = self.p7_export_company_cb.isChecked() if hasattr(self, 'p7_export_company_cb') else True
-        inc_options = self.p7_export_options_cb.isChecked() if hasattr(self, 'p7_export_options_cb') else True
+        inc_econ, inc_company, inc_options = self._p7_calendar_display_flags()
 
         # --- Collect economic events ---
         econ_events = []

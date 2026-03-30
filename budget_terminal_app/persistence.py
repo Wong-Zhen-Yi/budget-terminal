@@ -11,8 +11,8 @@ DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'wat
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-MAX_PORTFOLIOS = 3
-MULTI_PORTFOLIO_VERSION = 2
+MAX_PORTFOLIOS = 5
+MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
@@ -54,6 +54,32 @@ def _normalize_portfolio_id(value: Any) -> Any:
     """Normalize a requested portfolio id into a known fixed slot id."""
     text = str(value or '').strip()
     return text if text in PORTFOLIO_IDS else DEFAULT_MAIN_PORTFOLIO_ID
+
+
+def _normalize_portfolio_order(raw_order: Any, raw_portfolios: Any=None) -> Any:
+    """Normalize portfolio order into a non-empty ordered subset of supported ids."""
+    order = []
+    if isinstance(raw_order, list):
+        for value in raw_order:
+            portfolio_id = _normalize_portfolio_id(value)
+            if portfolio_id not in order:
+                order.append(portfolio_id)
+    portfolios = raw_portfolios if isinstance(raw_portfolios, dict) else {}
+    for portfolio_id in portfolios.keys():
+        clean_id = _normalize_portfolio_id(portfolio_id)
+        if clean_id not in order:
+            order.append(clean_id)
+    if not order:
+        order = [DEFAULT_MAIN_PORTFOLIO_ID]
+    return order[:MAX_PORTFOLIOS]
+
+
+def _normalize_selected_portfolio_id(value: Any, portfolio_order: Any, fallback: Any=None) -> Any:
+    """Return a selected portfolio id that exists in the ordered portfolio catalog."""
+    order = _normalize_portfolio_order(portfolio_order)
+    fallback_id = _normalize_portfolio_id(fallback or (order[0] if order else DEFAULT_MAIN_PORTFOLIO_ID))
+    portfolio_id = _normalize_portfolio_id(value)
+    return portfolio_id if portfolio_id in order else fallback_id
 
 
 def _normalize_theme_setting(value: Any) -> Any:
@@ -202,11 +228,12 @@ def _normalize_portfolio_name(portfolio_id: Any, name: Any) -> Any:
     return text if text else DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, str(portfolio_id or DEFAULT_MAIN_PORTFOLIO_ID))
 
 
-def _normalize_portfolio_catalog(raw_catalog: Any) -> Any:
-    """Normalize metadata for the fixed set of supported portfolios."""
+def _normalize_portfolio_catalog(raw_catalog: Any, portfolio_order: Any=None) -> Any:
+    """Normalize metadata for the ordered set of existing portfolios."""
     catalog = {}
     source = raw_catalog if isinstance(raw_catalog, dict) else {}
-    for portfolio_id in PORTFOLIO_IDS:
+    order = _normalize_portfolio_order(portfolio_order, source)
+    for portfolio_id in order:
         entry = source.get(portfolio_id, {})
         if not isinstance(entry, dict):
             entry = {}
@@ -273,17 +300,21 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
         'version': MULTI_PORTFOLIO_VERSION,
         'main_portfolio_id': DEFAULT_MAIN_PORTFOLIO_ID,
         'active_portfolio_id': DEFAULT_MAIN_PORTFOLIO_ID,
-        'portfolios': {portfolio_id: _default_portfolio_entry(portfolio_id, chart_slots if portfolio_id == DEFAULT_MAIN_PORTFOLIO_ID else None) for portfolio_id in PORTFOLIO_IDS},
+        'portfolio_order': [DEFAULT_MAIN_PORTFOLIO_ID],
+        'portfolios': {DEFAULT_MAIN_PORTFOLIO_ID: _default_portfolio_entry(DEFAULT_MAIN_PORTFOLIO_ID, chart_slots)},
     }
     if not isinstance(payload, dict):
         return normalized
-    normalized['main_portfolio_id'] = _normalize_main_portfolio_id(payload.get('main_portfolio_id'))
-    normalized['active_portfolio_id'] = _normalize_main_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']))
-    metadata = _normalize_portfolio_catalog(payload.get('portfolio_catalog') or payload.get('portfolios'))
     portfolio_map = payload.get('portfolios', {})
     if not isinstance(portfolio_map, dict):
         portfolio_map = {}
-    for portfolio_id in PORTFOLIO_IDS:
+    order = _normalize_portfolio_order(payload.get('portfolio_order'), payload.get('portfolio_catalog') or portfolio_map)
+    metadata = _normalize_portfolio_catalog(payload.get('portfolio_catalog') or portfolio_map, order)
+    normalized['portfolio_order'] = order
+    normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), order, order[0])
+    normalized['active_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']), order, normalized['main_portfolio_id'])
+    normalized['portfolios'] = {}
+    for portfolio_id in order:
         meta_entry = metadata.get(portfolio_id, {})
         raw_entry = portfolio_map.get(portfolio_id, {})
         if not isinstance(raw_entry, dict):
@@ -303,48 +334,58 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
         legacy_portfolio = _portfolio_payload_with_chart_slots(payload.get('portfolio', []), chart_slots)
         legacy_tracker = payload.get('portfolio_tracker', {})
         legacy_options = payload.get('options_tracker', [])
+        if DEFAULT_MAIN_PORTFOLIO_ID not in normalized['portfolio_order']:
+            normalized['portfolio_order'].insert(0, DEFAULT_MAIN_PORTFOLIO_ID)
         normalized['portfolios'][DEFAULT_MAIN_PORTFOLIO_ID] = {
             'id': DEFAULT_MAIN_PORTFOLIO_ID,
-            'name': normalized['portfolios'][DEFAULT_MAIN_PORTFOLIO_ID]['name'],
+            'name': normalized['portfolios'].get(DEFAULT_MAIN_PORTFOLIO_ID, {}).get('name', _normalize_portfolio_name(DEFAULT_MAIN_PORTFOLIO_ID, None)),
             'portfolio': list(legacy_portfolio.get('portfolio', [])),
             'chart_slots': _sanitize_chart_slots(legacy_portfolio.get('chart_slots')),
             'portfolio_tracker': legacy_tracker if isinstance(legacy_tracker, dict) else {},
             'options_tracker': list(legacy_options) if isinstance(legacy_options, list) else [],
         }
+        normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), normalized['portfolio_order'], DEFAULT_MAIN_PORTFOLIO_ID)
+        normalized['active_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']), normalized['portfolio_order'], normalized['main_portfolio_id'])
     return normalized
 
 
 def _serialize_portfolio_storage(state: Any) -> Any:
     """Build the on-disk portfolio.json payload from normalized state."""
+    normalized = _normalize_multi_portfolio_state(state)
     return {
         'version': MULTI_PORTFOLIO_VERSION,
-        'main_portfolio_id': _normalize_main_portfolio_id(state.get('main_portfolio_id')),
-        'active_portfolio_id': _normalize_main_portfolio_id(state.get('active_portfolio_id', state.get('main_portfolio_id'))),
+        'main_portfolio_id': normalized['main_portfolio_id'],
+        'active_portfolio_id': normalized['active_portfolio_id'],
+        'portfolio_order': list(normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': {
             portfolio_id: _portfolio_payload_with_chart_slots(
-                state.get('portfolios', {}).get(portfolio_id, {}),
-                state.get('portfolios', {}).get(portfolio_id, {}).get('chart_slots'),
-            ) for portfolio_id in PORTFOLIO_IDS
+                normalized.get('portfolios', {}).get(portfolio_id, {}),
+                normalized.get('portfolios', {}).get(portfolio_id, {}).get('chart_slots'),
+            ) for portfolio_id in normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])
         },
     }
 
 
 def _serialize_tracker_storage(state: Any) -> Any:
     """Build the on-disk portfolio_tracker.json payload from normalized state."""
+    normalized = _normalize_multi_portfolio_state(state)
     return {
         'version': MULTI_PORTFOLIO_VERSION,
+        'portfolio_order': list(normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': {
-            portfolio_id: dict(state.get('portfolios', {}).get(portfolio_id, {}).get('portfolio_tracker', {})) for portfolio_id in PORTFOLIO_IDS
+            portfolio_id: dict(normalized.get('portfolios', {}).get(portfolio_id, {}).get('portfolio_tracker', {})) for portfolio_id in normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])
         },
     }
 
 
 def _serialize_options_storage(state: Any) -> Any:
     """Build the on-disk options_tracker.json payload from normalized state."""
+    normalized = _normalize_multi_portfolio_state(state)
     return {
         'version': MULTI_PORTFOLIO_VERSION,
+        'portfolio_order': list(normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': {
-            portfolio_id: list(state.get('portfolios', {}).get(portfolio_id, {}).get('options_tracker', [])) for portfolio_id in PORTFOLIO_IDS
+            portfolio_id: list(normalized.get('portfolios', {}).get(portfolio_id, {}).get('options_tracker', [])) for portfolio_id in normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])
         },
     }
 
@@ -410,6 +451,7 @@ def _default_user_data_document() -> Any:
         'version': USER_DATA_BACKUP_VERSION,
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
         'active_portfolio_id': portfolio_state['active_portfolio_id'],
+        'portfolio_order': list(portfolio_state.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': portfolio_state['portfolios'],
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
@@ -429,6 +471,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'version': USER_DATA_BACKUP_VERSION,
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
         'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
+        'portfolio_order': list(portfolio_state.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': portfolio_state['portfolios'],
         'chart_page': _normalize_chart_page_settings(saved.get('chart_page', default['chart_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
@@ -480,23 +523,7 @@ def _save_user_data_document(data: Any) -> Any:
 def load_all_portfolios_state() -> Any:
     """Load the normalized state for all supported portfolios."""
     document = _load_user_data_document()
-    state = {
-        'version': MULTI_PORTFOLIO_VERSION,
-        'main_portfolio_id': _normalize_main_portfolio_id(document.get('main_portfolio_id')),
-        'active_portfolio_id': _normalize_main_portfolio_id(document.get('active_portfolio_id', document.get('main_portfolio_id'))),
-        'portfolios': {},
-    }
-    for portfolio_id in PORTFOLIO_IDS:
-        portfolio_entry = document.get('portfolios', {}).get(portfolio_id, _default_portfolio_entry(portfolio_id))
-        state['portfolios'][portfolio_id] = {
-            'id': portfolio_id,
-            'name': _normalize_portfolio_name(portfolio_id, portfolio_entry.get('name')),
-            'portfolio': list(portfolio_entry.get('portfolio', [])),
-            'chart_slots': _sanitize_chart_slots(portfolio_entry.get('chart_slots')),
-            'portfolio_tracker': dict(portfolio_entry.get('portfolio_tracker', {})) if isinstance(portfolio_entry.get('portfolio_tracker', {}), dict) else {},
-            'options_tracker': list(portfolio_entry.get('options_tracker', [])) if isinstance(portfolio_entry.get('options_tracker', []), list) else [],
-        }
-    return state
+    return _normalize_multi_portfolio_state(document)
 
 
 def save_all_portfolios_state(state: Any) -> Any:
@@ -505,18 +532,26 @@ def save_all_portfolios_state(state: Any) -> Any:
     document = _load_user_data_document()
     document['main_portfolio_id'] = normalized['main_portfolio_id']
     document['active_portfolio_id'] = normalized.get('active_portfolio_id', normalized['main_portfolio_id'])
+    document['portfolio_order'] = list(normalized.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID]))
     document['portfolios'] = normalized['portfolios']
     _save_user_data_document(document)
     return normalized
 
 
+def _resolve_state_portfolio_id(state: Any, portfolio_id: Any=None) -> Any:
+    """Return an existing portfolio id from normalized state."""
+    order = _normalize_portfolio_order(state.get('portfolio_order'), state.get('portfolios', {})) if isinstance(state, dict) else [DEFAULT_MAIN_PORTFOLIO_ID]
+    fallback = state.get('active_portfolio_id') if isinstance(state, dict) else DEFAULT_MAIN_PORTFOLIO_ID
+    return _normalize_selected_portfolio_id(portfolio_id or fallback or DEFAULT_MAIN_PORTFOLIO_ID, order, order[0])
+
+
 def load_active_portfolio_state(portfolio_id: Any=None) -> Any:
     """Load one normalized portfolio state."""
     state = load_all_portfolios_state()
-    active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
+    active_id = _resolve_state_portfolio_id(state, portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     active = state['portfolios'][active_id]
     return {
-        'main_portfolio_id': active_id,
+        'main_portfolio_id': state.get('main_portfolio_id', active_id),
         'portfolio_id': active_id,
         'portfolio_name': active.get('name', DEFAULT_PORTFOLIO_NAMES.get(active_id, active_id)),
         'portfolio': list(active.get('portfolio', [])),
@@ -537,7 +572,7 @@ def load_tickers() -> Any:
 def save_tickers(portfolio: Any, chart_slots: Any=None, portfolio_id: Any=None) -> None:
     """Save tickers."""
     state = load_all_portfolios_state()
-    active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
+    active_id = _resolve_state_portfolio_id(state, portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['portfolio'] = list(portfolio) if isinstance(portfolio, list) else []
     state['portfolios'][active_id]['chart_slots'] = _sanitize_chart_slots(chart_slots if chart_slots is not None else state['portfolios'][active_id].get('chart_slots'))
     save_all_portfolios_state(state)
@@ -549,7 +584,7 @@ def load_tracker_data(portfolio_id: Any=None) -> Any:
 def save_tracker_data(data: Any, portfolio_id: Any=None) -> None:
     """Save tracker data."""
     state = load_all_portfolios_state()
-    active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
+    active_id = _resolve_state_portfolio_id(state, portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['portfolio_tracker'] = data if isinstance(data, dict) else {}
     save_all_portfolios_state(state)
 
@@ -560,7 +595,7 @@ def load_options_data(portfolio_id: Any=None) -> Any:
 def save_options_data(data: Any, portfolio_id: Any=None) -> None:
     """Save options data."""
     state = load_all_portfolios_state()
-    active_id = _normalize_main_portfolio_id(portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
+    active_id = _resolve_state_portfolio_id(state, portfolio_id or state.get('active_portfolio_id') or state['main_portfolio_id'])
     state['portfolios'][active_id]['options_tracker'] = list(data) if isinstance(data, list) else []
     save_all_portfolios_state(state)
 
@@ -607,7 +642,8 @@ def build_ai_user_data_export() -> str:
         '',
     ]
     portfolios = payload.get('portfolios', {})
-    for portfolio_id in PORTFOLIO_IDS:
+    portfolio_order = _normalize_portfolio_order(payload.get('portfolio_order'), portfolios)
+    for portfolio_id in portfolio_order:
         entry = portfolios.get(portfolio_id, {})
         name = str(entry.get('name', DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id)) or DEFAULT_PORTFOLIO_NAMES.get(portfolio_id, portfolio_id))
         tickers = list(entry.get('portfolio', []))
@@ -704,8 +740,9 @@ def reset_user_data(chart_slots: Any=None) -> Any:
     normalized = {
         'main_portfolio_id': DEFAULT_MAIN_PORTFOLIO_ID,
         'active_portfolio_id': DEFAULT_MAIN_PORTFOLIO_ID,
+        'portfolio_order': [DEFAULT_MAIN_PORTFOLIO_ID],
         'portfolios': {
-            portfolio_id: _default_portfolio_entry(portfolio_id, chart_slots if portfolio_id == DEFAULT_MAIN_PORTFOLIO_ID else None) for portfolio_id in PORTFOLIO_IDS
+            DEFAULT_MAIN_PORTFOLIO_ID: _default_portfolio_entry(DEFAULT_MAIN_PORTFOLIO_ID, chart_slots)
         },
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
@@ -724,6 +761,7 @@ def load_app_config() -> Any:
         'portfolio_state': {
             'main_portfolio_id': document['main_portfolio_id'],
             'active_portfolio_id': document.get('active_portfolio_id', document['main_portfolio_id']),
+            'portfolio_order': list(document.get('portfolio_order', [document['main_portfolio_id']])),
             'portfolios': {portfolio_id: {'name': entry.get('name')} for portfolio_id, entry in document.get('portfolios', {}).items()},
         },
         'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
@@ -741,13 +779,26 @@ def save_app_config(data: Any) -> None:
     saved = data if isinstance(data, dict) else {}
     portfolio_state = saved.get('portfolio_state', {})
     if isinstance(portfolio_state, dict):
-        current['main_portfolio_id'] = _normalize_main_portfolio_id(portfolio_state.get('main_portfolio_id', current['main_portfolio_id']))
-        current['active_portfolio_id'] = _normalize_main_portfolio_id(portfolio_state.get('active_portfolio_id', current.get('active_portfolio_id', current['main_portfolio_id'])))
-        names = _normalize_portfolio_catalog(portfolio_state.get('portfolios'))
+        order = _normalize_portfolio_order(
+            portfolio_state.get('portfolio_order'),
+            portfolio_state.get('portfolios', current.get('portfolios', {})),
+        )
+        current['portfolio_order'] = list(order)
+        current['main_portfolio_id'] = _normalize_selected_portfolio_id(portfolio_state.get('main_portfolio_id', current['main_portfolio_id']), order, order[0])
+        current['active_portfolio_id'] = _normalize_selected_portfolio_id(
+            portfolio_state.get('active_portfolio_id', current.get('active_portfolio_id', current['main_portfolio_id'])),
+            order,
+            current['main_portfolio_id'],
+        )
+        names = _normalize_portfolio_catalog(portfolio_state.get('portfolios'), order)
         portfolio_map = current.get('portfolios', {})
-        for portfolio_id in PORTFOLIO_IDS:
-            entry = portfolio_map.setdefault(portfolio_id, _default_portfolio_entry(portfolio_id))
+        current['portfolios'] = {}
+        for portfolio_id in order:
+            entry = portfolio_map.get(portfolio_id, _default_portfolio_entry(portfolio_id))
+            if not isinstance(entry, dict):
+                entry = _default_portfolio_entry(portfolio_id)
             entry['name'] = names.get(portfolio_id, {}).get('name', entry.get('name'))
+            current['portfolios'][portfolio_id] = entry
     if 'theme' in saved:
         current['theme'] = _normalize_theme_payload(saved.get('theme'))
     if 'chart_page' in saved:
@@ -866,10 +917,11 @@ def load_portfolio_preferences() -> Any:
     saved = config.get('portfolio_state', {})
     if not isinstance(saved, dict):
         saved = {}
-    catalog = _normalize_portfolio_catalog(saved.get('portfolios'))
-    main_portfolio_id = _normalize_main_portfolio_id(saved.get('main_portfolio_id'))
-    active_portfolio_id = _normalize_main_portfolio_id(saved.get('active_portfolio_id', main_portfolio_id))
-    return {'main_portfolio_id': main_portfolio_id, 'active_portfolio_id': active_portfolio_id, 'portfolios': catalog}
+    order = _normalize_portfolio_order(saved.get('portfolio_order'), saved.get('portfolios'))
+    catalog = _normalize_portfolio_catalog(saved.get('portfolios'), order)
+    main_portfolio_id = _normalize_selected_portfolio_id(saved.get('main_portfolio_id'), order, order[0])
+    active_portfolio_id = _normalize_selected_portfolio_id(saved.get('active_portfolio_id', main_portfolio_id), order, main_portfolio_id)
+    return {'main_portfolio_id': main_portfolio_id, 'active_portfolio_id': active_portfolio_id, 'portfolio_order': order, 'portfolios': catalog}
 
 
 def save_portfolio_preferences(settings: Any) -> Any:
@@ -877,12 +929,15 @@ def save_portfolio_preferences(settings: Any) -> Any:
     current = load_app_config()
     state = load_portfolio_preferences()
     if isinstance(settings, dict):
-        state['main_portfolio_id'] = _normalize_main_portfolio_id(settings.get('main_portfolio_id', state['main_portfolio_id']))
-        state['active_portfolio_id'] = _normalize_main_portfolio_id(settings.get('active_portfolio_id', state.get('active_portfolio_id', state['main_portfolio_id'])))
-        state['portfolios'] = _normalize_portfolio_catalog(settings.get('portfolios', state['portfolios']))
+        order = _normalize_portfolio_order(settings.get('portfolio_order', state.get('portfolio_order')), settings.get('portfolios', state['portfolios']))
+        state['portfolio_order'] = order
+        state['main_portfolio_id'] = _normalize_selected_portfolio_id(settings.get('main_portfolio_id', state['main_portfolio_id']), order, order[0])
+        state['active_portfolio_id'] = _normalize_selected_portfolio_id(settings.get('active_portfolio_id', state.get('active_portfolio_id', state['main_portfolio_id'])), order, state['main_portfolio_id'])
+        state['portfolios'] = _normalize_portfolio_catalog(settings.get('portfolios', state['portfolios']), order)
     current['portfolio_state'] = {
         'main_portfolio_id': state['main_portfolio_id'],
         'active_portfolio_id': state['active_portfolio_id'],
+        'portfolio_order': list(state.get('portfolio_order', [state['main_portfolio_id']])),
         'portfolios': state['portfolios'],
     }
     save_app_config(current)
