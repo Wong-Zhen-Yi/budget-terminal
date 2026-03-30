@@ -118,7 +118,7 @@ class OptionsChainMixin:
         def _run() -> None:
             """Fetch expiries and current spot."""
             try:
-                cache = CacheManager()
+                cache = self._get_cache_manager()
                 price = None
                 try:
                     with YF_LOCK:
@@ -179,7 +179,7 @@ class OptionsChainMixin:
         def _run() -> None:
             """Load raw chain, enrich it, and update the UI."""
             try:
-                cache = CacheManager()
+                cache = self._get_cache_manager()
                 current_spot = spot_price
                 if current_spot <= 0:
                     try:

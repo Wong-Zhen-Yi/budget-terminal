@@ -4,6 +4,8 @@ from typing import Any
 
 from ..compat import *
 
+_P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
+
 
 class PortfolioMetricsMixin:
     def _p4_returns_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
@@ -200,6 +202,49 @@ class PortfolioMetricsMixin:
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart({symbol: item['weight'] for symbol, item in metrics_map.items()})
 
+    def _p4_on_tracker_delete_clicked(self) -> None:
+        """Remove the ticker assigned to a reused page-4 action button."""
+        sender = self.sender()
+        if not isinstance(sender, QPushButton):
+            return
+        ticker = str(sender.property('portfolio_ticker') or '').strip().upper()
+        if not ticker:
+            return
+        if bool(sender.property('remove_from_main_portfolio')):
+            self.remove_ticker(ticker)
+        else:
+            self._p4_remove_active_ticker(ticker)
+
+    def _p4_ensure_tracker_item(self, row: Any, col: Any, flags: Any) -> Any:
+        """Return an existing tracker cell item or create it once."""
+        item = self.p4_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem('')
+            self.p4_table.setItem(row, col, item)
+        item.setFlags(flags)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        return item
+
+    def _p4_clear_mktcap_item(self, row: Any) -> None:
+        """Clear stale market-cap text when a reused row has no cached value yet."""
+        ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
+        item.setText('')
+        item.setForeground(self.theme_qcolor('text_muted'))
+
+    def _p4_ensure_tracker_delete_button(self, row: Any) -> Any:
+        """Return an existing per-row action button or create it once."""
+        widget = self.p4_table.cellWidget(row, P4_PORTFOLIO_COL_ACTION)
+        if isinstance(widget, QPushButton):
+            return widget
+        del_btn = QPushButton('X')
+        del_btn.setFixedSize(22, 22)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        del_btn.clicked.connect(self._p4_on_tracker_delete_clicked)
+        self.p4_table.setCellWidget(row, P4_PORTFOLIO_COL_ACTION, del_btn)
+        return del_btn
+
     def _set_tracker_row(
         self,
         row: Any,
@@ -217,43 +262,37 @@ class PortfolioMetricsMixin:
         """Handle set tracker row."""
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         ed_flags = ro_flags | Qt.ItemFlag.ItemIsEditable
+        default_text_color = self.theme_qcolor('text_primary')
         gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
         change_color = self.theme_qcolor('accent_positive' if change >= 0 else 'accent_negative')
 
-        def _item(text: Any, flags: Any = ro_flags, color: Any = None) -> Any:
-            it = QTableWidgetItem(text)
-            it.setFlags(flags)
-            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if color:
-                it.setForeground(color)
-            return it
+        def _update_item(col: Any, text: Any, flags: Any = ro_flags, color: Any = None) -> None:
+            item = self._p4_ensure_tracker_item(row, col, flags)
+            item.setText(text)
+            item.setForeground(color if color is not None else default_text_color)
 
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_SYMBOL, _item(ticker))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_SHARES, _item(f'{shares:g}', ed_flags))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_AVG_PRICE, _item(f'{avg_price:.2f}', ed_flags))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_COST, _item(f'${cost:,.2f}'))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_PRICE, _item(f'${price:.2f}'))
+        _update_item(P4_PORTFOLIO_COL_SYMBOL, ticker)
+        _update_item(P4_PORTFOLIO_COL_SHARES, f'{shares:g}', ed_flags)
+        _update_item(P4_PORTFOLIO_COL_AVG_PRICE, f'{avg_price:.2f}', ed_flags)
+        _update_item(P4_PORTFOLIO_COL_COST, f'${cost:,.2f}')
+        _update_item(P4_PORTFOLIO_COL_PRICE, f'${price:.2f}')
         sign = '+' if change >= 0 else ''
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_DAY_CHANGE, _item(f'{sign}{change:.2f}%', color=change_color))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_MARKET_VALUE, _item(f'${mkt_val:,.2f}'))
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_WEIGHT, _item(f'{weight:.1f}%'))
+        _update_item(P4_PORTFOLIO_COL_DAY_CHANGE, f'{sign}{change:.2f}%', color=change_color)
+        _update_item(P4_PORTFOLIO_COL_MARKET_VALUE, f'${mkt_val:,.2f}')
+        _update_item(P4_PORTFOLIO_COL_WEIGHT, f'{weight:.1f}%')
         gain_sign = '+' if dollar_gain >= 0 else ''
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_DOLLAR_GAIN, _item(f'{gain_sign}${dollar_gain:,.2f}', color=gain_color))
+        _update_item(P4_PORTFOLIO_COL_DOLLAR_GAIN, f'{gain_sign}${dollar_gain:,.2f}', color=gain_color)
         growth_sign = '+' if growth >= 0 else ''
-        self.p4_table.setItem(row, P4_PORTFOLIO_COL_GROWTH, _item(f'{growth_sign}{growth:.1f}%', color=gain_color))
-        del_btn = QPushButton('X')
-        del_btn.setFixedSize(22, 22)
+        _update_item(P4_PORTFOLIO_COL_GROWTH, f'{growth_sign}{growth:.1f}%', color=gain_color)
+        del_btn = self._p4_ensure_tracker_delete_button(row)
         del_btn.setStyleSheet(
             f'background-color: {self.theme_color("accent_negative_bg")}; '
             f'color: {self.theme_color("text_primary")}; '
             f'border-radius: 11px; font-weight: bold; '
             f'border: 1px solid {self.theme_color("accent_negative")};'
         )
-        if self.active_portfolio_id == self.main_portfolio_id:
-            del_btn.clicked.connect(lambda checked=False, sym=ticker: self.remove_ticker(sym))
-        else:
-            del_btn.clicked.connect(lambda checked=False, sym=ticker: self._p4_remove_active_ticker(sym))
-        self.p4_table.setCellWidget(row, P4_PORTFOLIO_COL_ACTION, del_btn)
+        del_btn.setProperty('portfolio_ticker', ticker)
+        del_btn.setProperty('remove_from_main_portfolio', self.active_portfolio_id == self.main_portfolio_id)
 
     def _p4_remove_active_ticker(self, ticker: Any) -> None:
         """Remove a ticker from the currently selected page-4 portfolio."""
@@ -417,6 +456,51 @@ class PortfolioMetricsMixin:
             return self.theme_series_color(3)
         return self.theme_color('accent_negative')
 
+    def _p4_mktcap_cache_ttl_seconds(self) -> float:
+        """Return the reuse window for cached market-cap values."""
+        return float(getattr(self, '_mktcap_cache_ttl_seconds', _P4_MKTCAP_CACHE_TTL_SECONDS))
+
+    def _p4_mktcap_cache_now(self) -> float:
+        """Return the current UTC timestamp for market-cap freshness checks."""
+        return datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    def _p4_has_fresh_mktcap(self, ticker: Any) -> bool:
+        """Return whether one cached market-cap entry is still fresh."""
+        symbol = str(ticker or '').strip().upper()
+        if not symbol:
+            return False
+        cache_ts = getattr(self, '_mktcap_cache_ts', {})
+        fetched_at = cache_ts.get(symbol)
+        if fetched_at is None:
+            return False
+        return (self._p4_mktcap_cache_now() - float(fetched_at)) < self._p4_mktcap_cache_ttl_seconds()
+
+    def _p4_get_mktcap_refresh_candidates(self, tickers: Any = None) -> list[str]:
+        """Return missing or stale tickers that still need a market-cap refresh."""
+        candidates = []
+        inflight = set(getattr(self, '_mktcap_inflight_tickers', set()))
+        queued = set(getattr(self, '_mktcap_queued_tickers', set()))
+        for ticker in tickers if tickers is not None else self._p4_active_tickers():
+            symbol = str(ticker or '').strip().upper()
+            if not symbol or symbol in inflight or symbol in queued:
+                continue
+            if (symbol not in self._mktcap_cache) or (not self._p4_has_fresh_mktcap(symbol)):
+                candidates.append(symbol)
+        return candidates
+
+    def _p4_start_market_cap_fetch(self, tickers: Any) -> bool:
+        """Launch one page-4 market-cap worker for the provided tickers."""
+        symbols = [str(ticker or '').strip().upper() for ticker in tickers]
+        symbols = [symbol for symbol in symbols if symbol]
+        if not symbols:
+            return False
+        worker = MarketCapWorker(symbols)
+        self._mktcap_fetching = True
+        self._mktcap_inflight_tickers = set(symbols)
+        worker.finished.connect(self._on_market_caps_ready)
+        threading.Thread(target=worker.run, daemon=True).start()
+        return True
+
     def _update_mktcap_item(self, row: Any, ticker: Any, mc: Any) -> None:
         """Handle update mktcap item."""
         text = self._format_market_cap(mc)
@@ -433,47 +517,79 @@ class PortfolioMetricsMixin:
         self.p4_table.blockSignals(False)
         item.setForeground(QColor(self._mktcap_color(mc)))
 
-    def _fetch_market_caps(self) -> None:
+    def _fetch_market_caps(self, tickers: Any = None) -> None:
         """Fetch market caps."""
-        self._launch_worker(MarketCapWorker(list(self._p4_active_tickers())), self._on_market_caps_ready, '_mktcap_fetching')
+        needed = self._p4_get_mktcap_refresh_candidates(tickers)
+        if not needed:
+            return
+        if getattr(self, '_mktcap_fetching', False):
+            queued = set(getattr(self, '_mktcap_queued_tickers', set()))
+            queued.update(needed)
+            self._mktcap_queued_tickers = queued
+            return
+        self._p4_start_market_cap_fetch(needed)
 
     def _on_market_caps_ready(self, results: Any) -> None:
         """Handle market caps ready."""
         self._mktcap_fetching = False
-        self._mktcap_cache.update(results)
+        request_tickers = set(getattr(self, '_mktcap_inflight_tickers', set()))
+        self._mktcap_inflight_tickers = set()
+        if isinstance(results, dict) and results:
+            fetched_at = self._p4_mktcap_cache_now()
+            for ticker, mc in results.items():
+                symbol = str(ticker or '').strip().upper()
+                if not symbol:
+                    continue
+                self._mktcap_cache[symbol] = mc
+                self._mktcap_cache_ts[symbol] = fetched_at
         for row in range(self.p4_table.rowCount()):
             item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
             if item and item.text() in results:
                 self._update_mktcap_item(row, item.text(), results[item.text()])
+        queued = list(getattr(self, '_mktcap_queued_tickers', set()))
+        self._mktcap_queued_tickers = set()
+        if queued:
+            remaining = [ticker for ticker in queued if ticker not in request_tickers]
+            self._fetch_market_caps(remaining)
 
     def update_page4(self, data: Any) -> None:
         """Update page4."""
         portfolio = data.get('portfolio', {})
         tickers = self._p4_active_tickers()
         metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
-        self.p4_table.blockSignals(True)
-        self.p4_table.setRowCount(len(tickers))
-        sorted_tickers = sorted(tickers, key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0), reverse=True)
         weights = {}
-        for i, ticker in enumerate(sorted_tickers):
-            metrics = metrics_map.get(ticker, {})
-            weights[ticker] = metrics.get('weight', 0)
-            self._set_tracker_row(
-                i,
-                ticker,
-                metrics.get('shares', 0),
-                metrics.get('avg_price', 0),
-                metrics.get('price', 0),
-                metrics.get('change', 0),
-                metrics.get('cost', 0),
-                metrics.get('market_value', 0),
-                metrics.get('weight', 0),
-                metrics.get('dollar_gain', 0),
-                metrics.get('growth', 0),
+        self.p4_table.blockSignals(True)
+        self.p4_table.setUpdatesEnabled(False)
+        try:
+            self.p4_table.setRowCount(len(tickers))
+            sorted_tickers = sorted(
+                tickers,
+                key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0),
+                reverse=True,
             )
-            if ticker in self._mktcap_cache:
-                self._update_mktcap_item(i, ticker, self._mktcap_cache[ticker])
-        self.p4_table.blockSignals(False)
+            for i, ticker in enumerate(sorted_tickers):
+                metrics = metrics_map.get(ticker, {})
+                weights[ticker] = metrics.get('weight', 0)
+                self._set_tracker_row(
+                    i,
+                    ticker,
+                    metrics.get('shares', 0),
+                    metrics.get('avg_price', 0),
+                    metrics.get('price', 0),
+                    metrics.get('change', 0),
+                    metrics.get('cost', 0),
+                    metrics.get('market_value', 0),
+                    metrics.get('weight', 0),
+                    metrics.get('dollar_gain', 0),
+                    metrics.get('growth', 0),
+                )
+                if ticker in self._mktcap_cache:
+                    self._update_mktcap_item(i, ticker, self._mktcap_cache[ticker])
+                else:
+                    self._p4_clear_mktcap_item(i)
+        finally:
+            self.p4_table.setUpdatesEnabled(True)
+            self.p4_table.blockSignals(False)
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart(weights)
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
@@ -488,4 +604,4 @@ class PortfolioMetricsMixin:
             )
         else:
             self._fetch_returns_for_timeframe(self._active_return_timeframe)
-        self._fetch_market_caps()
+        self._fetch_market_caps(sorted_tickers)

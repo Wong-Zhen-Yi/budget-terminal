@@ -32,14 +32,16 @@ class WindowLifecycleMixin:
         self._register_page(9, self.btn_page5)
         self._register_page(10, self.btn_page13)
         self._register_page(11, self.btn_page14, on_show=self._p14_refresh)
-        self._register_page(12, self.btn_page9)
+        self._register_page(12, self.btn_page15, on_show=self._p15_refresh)
+        self._register_page(13, self.btn_page9)
         self._refresh_main_tab_picker_items()
 
     def resizeEvent(self, event: Any) -> None:
         """Handle resizeEvent."""
         super().resizeEvent(event)
-        if self.last_data:
-            self.repopulate_portfolio()
+        if hasattr(self, '_dashboard_fit_portfolio_table_height'):
+            if not hasattr(self, 'stacked_widget') or self.stacked_widget.currentIndex() == 0:
+                self._dashboard_fit_portfolio_table_height()
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
             if self.stacked_widget.currentIndex() == 9:
                 self._p2_relayout_charts()

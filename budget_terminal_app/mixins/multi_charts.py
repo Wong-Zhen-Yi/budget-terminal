@@ -643,7 +643,7 @@ class MultiChartsMixin:
                     self._mc_timeframe_label,
                     self._mc_timeframe_map[MC_DEFAULT_TIMEFRAME],
                 )
-                cache = CacheManager()
+                cache = self._get_cache_manager()
                 df = cache.get_data(symbol, interval)
                 if df is None or df.empty:
                     with YF_LOCK:

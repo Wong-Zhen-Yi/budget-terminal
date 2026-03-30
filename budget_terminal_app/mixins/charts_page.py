@@ -61,6 +61,13 @@ class ChartsPageMixin:
         self._p10_manual_x_range = None
         self._p10_pending_x_range = None
         self._p10_overlay_items = {}
+        self.p10_candle_item = None
+        self.p10_ma_line_item = None
+        self.p10_last_price_line = None
+        self.p10_volume_item = None
+        self.p10_rsi_line_item = None
+        self.p10_rsi_upper_line = None
+        self.p10_rsi_lower_line = None
         self._p10_timeframe_group = QButtonGroup(self)
         self._p10_timeframe_group.setExclusive(True)
         self._p10_timeframe_map = {label: (period, interval) for label, period, interval in P10_TIMEFRAME_OPTIONS}
@@ -404,24 +411,21 @@ class ChartsPageMixin:
                 self.p10_active_indicators.append(name)
         else:
             self.p10_active_indicators = [indicator for indicator in self.p10_active_indicators if indicator != name]
-        ordered = []
-        for indicator in ('Volume', 'RSI', '200 MA'):
-            if indicator in self.p10_active_indicators and indicator not in ordered:
-                ordered.append(indicator)
-        self.p10_active_indicators = ordered
+        self.p10_active_indicators = [indicator for indicator in ('Volume', 'RSI', '200 MA') if indicator in self.p10_active_indicators]
         self._p10_update_indicator_button_styles()
         self._p10_save_state()
         if self._p10_chart_rows:
-            interval = self._p10_timeframe_map.get(self.p10_timeframe_label, self._p10_timeframe_map['1 Day'])[1]
-            self._p10_render_main_chart(self.p10_chart_stats, interval, self.p10_rsi_series, self.p10_ma200_series)
+            current_range = self._p10_get_current_x_range()
+            self._p10_refresh_chart_presentation()
             if self.p10_auto_follow:
-                self._p10_apply_auto_x_range(self._p10_get_current_x_range())
+                self._p10_apply_auto_x_range(current_range)
             else:
                 self._p10_restore_manual_x_range()
+                self._p10_apply_auto_y_range(self._p10_get_current_x_range() or current_range or self._p10_manual_x_range)
             self._p10_show_row_details(len(self._p10_chart_rows) - 1)
         else:
             self._p10_render_indicator_panels()
-        self._p10_update_indicator_panel_labels()
+            self._p10_update_indicator_panel_labels()
 
     def _p10_set_timeframe(self, label: Any, *_: Any) -> None:
         """Switch the active chart timeframe and refresh."""
@@ -546,7 +550,7 @@ class ChartsPageMixin:
     def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any) -> Any:
         """Fetch a single chart dataset plus summary stats."""
         period, interval = self._p10_timeframe_map.get(timeframe_label, self._p10_timeframe_map['1 Day'])
-        cache = CacheManager()
+        cache = self._get_cache_manager()
         df = cache.get_data(symbol, interval)
         if df is None or df.empty:
             df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
@@ -612,7 +616,7 @@ class ChartsPageMixin:
 
     def _p10_fetch_daily_ma200(self, symbol: Any, source_df: Any) -> Any:
         """Build a 200-day moving average aligned to the active chart index."""
-        cache = CacheManager()
+        cache = self._get_cache_manager()
         daily_df = cache.get_data(symbol, '1d')
         if daily_df is None or daily_df.empty:
             daily_df = yf.download(symbol, period='5y', interval='1d', progress=False, auto_adjust=False)
@@ -676,10 +680,6 @@ class ChartsPageMixin:
 
     def _p10_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main candlestick chart and lower indicator panels."""
-        self.p10_main_plot.clear()
-        self.p10_volume_plot.clear()
-        self.p10_rsi_plot.clear()
-        self._p10_overlay_items = {}
         points = []
         volume_brushes = []
         volumes = []
@@ -697,30 +697,68 @@ class ChartsPageMixin:
             up_color=self.theme_color('chart_up_candle'),
             down_color=self.theme_color('chart_down_candle'),
         )
+        self._p10_remove_chart_item(self.p10_main_plot, getattr(self, 'p10_candle_item', None))
+        self.p10_candle_item = candle_item
         self.p10_main_plot.addItem(candle_item)
-        if ma200_series is not None and '200 MA' in self.p10_active_indicators:
+        if ma200_series is not None:
+            ma_line_item = getattr(self, 'p10_ma_line_item', None)
+            if ma_line_item is None:
+                ma_line_item = self.p10_main_plot.plot([], [], pen=self.theme_pen('chart_ma', width=2.0), antialias=True)
+                self.p10_ma_line_item = ma_line_item
             ma_values = [float(value) if not pd.isna(value) else float('nan') for value in ma200_series]
-            if ma_values:
-                self.p10_main_plot.plot(list(range(len(ma_values))), ma_values, pen=self.theme_pen('chart_ma', width=2.0), antialias=True)
+            ma_line_item.setData(list(range(len(ma_values))), ma_values)
+        else:
+            self._p10_remove_chart_item(self.p10_main_plot, getattr(self, 'p10_ma_line_item', None))
+            self.p10_ma_line_item = None
         last_close = float(stats.get('close', 0.0)) if isinstance(stats, dict) else 0.0
-        last_price_line = pg.InfiniteLine(pos=last_close, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
-        self.p10_main_plot.addItem(last_price_line)
+        last_price_line = getattr(self, 'p10_last_price_line', None)
+        if last_price_line is None:
+            last_price_line = pg.InfiniteLine(pos=last_close, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
+            self.p10_main_plot.addItem(last_price_line)
+            self.p10_last_price_line = last_price_line
+        last_price_line.setValue(last_close)
         dates = self.p10_chart_df.index.to_list()
         self.p10_chart_axis.set_dates(dates, interval)
         self.p10_volume_axis.set_dates(dates, interval)
         self.p10_rsi_axis.set_dates(dates, interval)
         if volumes:
-            volume_item = pg.BarGraphItem(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
-            self.p10_volume_plot.addItem(volume_item)
+            volume_item = getattr(self, 'p10_volume_item', None)
+            if volume_item is None:
+                volume_item = pg.BarGraphItem(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
+                self.p10_volume_plot.addItem(volume_item)
+                self.p10_volume_item = volume_item
+            else:
+                volume_item.setOpts(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
+        else:
+            self._p10_remove_chart_item(self.p10_volume_plot, getattr(self, 'p10_volume_item', None))
+            self.p10_volume_item = None
         if rsi_series is not None:
             x_values = list(range(len(rsi_series)))
             y_values = [float(value) if not pd.isna(value) else float('nan') for value in rsi_series]
-            self.p10_rsi_plot.plot(x_values, y_values, pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
-            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine)))
-            self.p10_rsi_plot.addItem(pg.InfiniteLine(pos=30, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine)))
+            rsi_line_item = getattr(self, 'p10_rsi_line_item', None)
+            if rsi_line_item is None:
+                rsi_line_item = self.p10_rsi_plot.plot([], [], pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
+                self.p10_rsi_line_item = rsi_line_item
+            rsi_line_item.setData(x_values, y_values)
+            rsi_upper_line = getattr(self, 'p10_rsi_upper_line', None)
+            if rsi_upper_line is None:
+                rsi_upper_line = pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
+                self.p10_rsi_plot.addItem(rsi_upper_line)
+                self.p10_rsi_upper_line = rsi_upper_line
+            rsi_lower_line = getattr(self, 'p10_rsi_lower_line', None)
+            if rsi_lower_line is None:
+                rsi_lower_line = pg.InfiniteLine(pos=30, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine))
+                self.p10_rsi_plot.addItem(rsi_lower_line)
+                self.p10_rsi_lower_line = rsi_lower_line
             self.p10_rsi_plot.setYRange(0, 100, padding=0.02)
-        self._p10_update_indicator_panel_labels()
-        self._p10_render_indicator_panels()
+        else:
+            self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_line_item', None))
+            self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_upper_line', None))
+            self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_lower_line', None))
+            self.p10_rsi_line_item = None
+            self.p10_rsi_upper_line = None
+            self.p10_rsi_lower_line = None
+        self._p10_refresh_chart_presentation()
 
     def _p10_render_indicator_panels(self) -> None:
         """Show or hide indicator panels based on active indicators."""
@@ -759,7 +797,12 @@ class ChartsPageMixin:
     def _p10_set_overlay_text(self, key: Any, plot: Any, text: Any, color: Any) -> None:
         """Render a top-right overlay label inside a plot."""
         if not text:
-            self._p10_overlay_items.pop(key, None)
+            item = self._p10_overlay_items.pop(key, None)
+            if item is not None:
+                try:
+                    plot.removeItem(item)
+                except Exception:
+                    pass
             return
         item = self._p10_overlay_items.get(key)
         if item is None:
@@ -825,6 +868,58 @@ class ChartsPageMixin:
         self._p10_set_overlay_text('rsi', self.p10_rsi_plot, rsi_text, self.theme_color('chart_rsi'))
         self._p10_refresh_overlay_positions()
 
+    def _p10_remove_chart_item(self, plot: Any, item: Any) -> None:
+        """Best-effort removal of a persisted charts-page plot item."""
+        if item is None:
+            return
+        try:
+            plot.removeItem(item)
+        except Exception:
+            pass
+
+    def _p10_build_volume_brushes(self) -> list[Any]:
+        """Return themed volume brushes for the current page-10 dataset."""
+        brushes = []
+        for row in self._p10_chart_rows:
+            open_value = float(getattr(row, 'Open'))
+            close_value = float(getattr(row, 'Close'))
+            brushes.append(self.theme_brush('chart_volume_up' if close_value >= open_value else 'chart_volume_down'))
+        return brushes
+
+    def _p10_refresh_chart_presentation(self) -> None:
+        """Refresh chart colors and indicator visibility without rebuilding datasets."""
+        candle_item = getattr(self, 'p10_candle_item', None)
+        if candle_item is not None:
+            candle_item.set_colors(
+                self.theme_color('chart_up_candle'),
+                self.theme_color('chart_down_candle'),
+            )
+        ma_line_item = getattr(self, 'p10_ma_line_item', None)
+        if ma_line_item is not None:
+            ma_line_item.setPen(self.theme_pen('chart_ma', width=2.0))
+            ma_line_item.setVisible(self.p10_ma200_series is not None and '200 MA' in self.p10_active_indicators)
+        last_price_line = getattr(self, 'p10_last_price_line', None)
+        if last_price_line is not None:
+            last_price_line.setPen(self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
+            last_price_line.setValue(float(getattr(self, 'p10_chart_stats', {}).get('close', 0.0)))
+        volume_item = getattr(self, 'p10_volume_item', None)
+        if volume_item is not None and self._p10_chart_rows:
+            try:
+                volume_item.setOpts(brushes=self._p10_build_volume_brushes())
+            except Exception:
+                pass
+        rsi_line_item = getattr(self, 'p10_rsi_line_item', None)
+        if rsi_line_item is not None:
+            rsi_line_item.setPen(self.theme_pen('chart_rsi', width=2.0))
+        rsi_upper_line = getattr(self, 'p10_rsi_upper_line', None)
+        if rsi_upper_line is not None:
+            rsi_upper_line.setPen(self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
+        rsi_lower_line = getattr(self, 'p10_rsi_lower_line', None)
+        if rsi_lower_line is not None:
+            rsi_lower_line.setPen(self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine))
+        self._p10_render_indicator_panels()
+        self._p10_update_indicator_panel_labels()
+
     def _apply_charts_page_theme(self) -> None:
         """Refresh charts-page theme-dependent widgets and plots."""
         self.style_plot_widget(self.p10_main_plot)
@@ -840,8 +935,7 @@ class ChartsPageMixin:
         self._p10_update_indicator_button_styles()
         self._p10_rebuild_watchlists()
         if self._p10_chart_rows:
-            interval = self._p10_timeframe_map.get(self.p10_timeframe_label, self._p10_timeframe_map['1 Day'])[1]
-            self._p10_render_main_chart(self.p10_chart_stats, interval, self.p10_rsi_series, self.p10_ma200_series)
+            self._p10_refresh_chart_presentation()
 
     def _p10_show_row_details(self, row_index: Any) -> None:
         """Update the OHLC readout for a chart row."""

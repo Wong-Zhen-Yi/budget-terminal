@@ -13,7 +13,7 @@ class OptionsFetchMixin:
         cached = getattr(self, '_options_expiry_memory_cache', {}).get(ticker_key)
         if cached and (now - cached[0]) < getattr(self, '_options_expiry_memory_cache_ttl', 900.0):
             return list(cached[1])
-        cache = CacheManager()
+        cache = self._get_cache_manager()
         expiries = cache.get_options_expiries(ticker_key)
         if expiries:
             self._options_expiry_memory_cache[ticker_key] = (now, list(expiries))
@@ -27,7 +27,7 @@ class OptionsFetchMixin:
         if not ticker_key or not expiry_list:
             return
         self._options_expiry_memory_cache[ticker_key] = (time.time(), expiry_list)
-        CacheManager().save_options_expiries(ticker_key, expiry_list)
+        self._get_cache_manager().save_options_expiries(ticker_key, expiry_list)
 
     def _get_cached_option_chain(self, ticker: Any, expiry: Any) -> Any:
         """Return one option chain for a ticker/expiry, reusing memory and SQLite caches."""
@@ -40,7 +40,7 @@ class OptionsFetchMixin:
         cached = getattr(self, '_option_chain_memory_cache', {}).get(cache_key)
         if cached and (now - cached[0]) < getattr(self, '_option_chain_memory_cache_ttl', 60.0):
             return cached[1].copy()
-        cache = CacheManager()
+        cache = self._get_cache_manager()
         chain_df = cache.get_options_chain(ticker_key, expiry_key)
         if chain_df is None:
             with YF_LOCK:

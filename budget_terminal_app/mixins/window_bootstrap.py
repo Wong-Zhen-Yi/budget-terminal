@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections import deque
 from typing import Any
 from .. import __version__
 from ..compat import *
@@ -29,6 +30,13 @@ class WindowBootstrapMixin:
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
     _OPTIONS_FETCH_MAX_WORKERS = 4
 
+    def _get_cache_manager(self) -> Any:
+        """Return the shared cache manager for the running app session."""
+        cache = getattr(self, '_cache_manager', None)
+        if cache is None:
+            cache = CacheManager()
+            self._cache_manager = cache
+        return cache
 
     def _portfolio_index_from_id(self, portfolio_id: Any) -> int:
         """Return the fixed slot index for a portfolio id."""
@@ -160,31 +168,69 @@ class WindowBootstrapMixin:
 
     def _init_session_log_capture(self) -> None:
         """Attach a single in-memory session log collector to the app logger."""
-        self._session_log_buffer = []
         self._session_log_max_entries = 1500
+        self._session_log_buffer = deque(maxlen=self._session_log_max_entries)
         self._session_log_paused = False
+        self._session_log_rendered_entries = 0
+        self._session_log_needs_rebuild = False
         self.settings_log_output = None
         self._session_log_handler = _SessionLogHandler(self)
         self._session_log_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
         logger.addHandler(self._session_log_handler)
+
+    def _configure_settings_log_output(self, widget: Any) -> None:
+        """Apply bounded live-log document settings to the Settings viewer."""
+        if widget is None:
+            return
+        widget.document().setMaximumBlockCount(max(int(getattr(self, '_session_log_max_entries', 0) or 0), 1))
+
+    def _rebuild_settings_log_output(self) -> None:
+        """Replace the Settings log viewer text from the current bounded buffer."""
+        if self.settings_log_output is None:
+            return
+        self._configure_settings_log_output(self.settings_log_output)
+        self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+        self._session_log_rendered_entries = len(self._session_log_buffer)
+        self._session_log_needs_rebuild = False
+
+    def _append_settings_log_lines(self, lines: Any) -> None:
+        """Append one or more preformatted log lines to the live Settings viewer."""
+        if self.settings_log_output is None:
+            return
+        text_lines = [str(line or '').rstrip() for line in list(lines)]
+        text_lines = [line for line in text_lines if line]
+        if not text_lines:
+            return
+        self._configure_settings_log_output(self.settings_log_output)
+        self.settings_log_output.setUpdatesEnabled(False)
+        try:
+            for line in text_lines:
+                self.settings_log_output.appendPlainText(line)
+        finally:
+            self.settings_log_output.setUpdatesEnabled(True)
+            self.settings_log_output.viewport().update()
+        self._session_log_rendered_entries = len(self._session_log_buffer)
 
     def _append_session_log_entry(self, message: Any) -> None:
         """Append a formatted log line to the session buffer and Settings panel."""
         text = str(message or '').rstrip()
         if not text:
             return
+        overflow = len(self._session_log_buffer) >= self._session_log_max_entries
         self._session_log_buffer.append(text)
-        overflow = len(self._session_log_buffer) - self._session_log_max_entries
-        if overflow > 0:
-            del self._session_log_buffer[:overflow]
-        if self.settings_log_output is None:
-            return
-        if overflow > 0:
-            self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
-        elif not self._session_log_paused:
-            self.settings_log_output.appendPlainText(text)
         self._refresh_settings_log_status()
-        if not self._session_log_paused:
+        if self.settings_log_output is None:
+            self._session_log_needs_rebuild = True
+            return
+        if self._session_log_paused:
+            if overflow:
+                self._session_log_needs_rebuild = True
+            return
+        if self._session_log_needs_rebuild:
+            self._rebuild_settings_log_output()
+        else:
+            self._append_settings_log_lines((text,))
+        if self.settings_log_output is not None:
             scrollbar = self.settings_log_output.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
@@ -193,7 +239,7 @@ class WindowBootstrapMixin:
         self.settings_log_output = widget
         if self.settings_log_output is None:
             return
-        self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+        self._rebuild_settings_log_output()
         self._refresh_settings_log_status()
         if not self._session_log_paused:
             scrollbar = self.settings_log_output.verticalScrollBar()
@@ -202,6 +248,8 @@ class WindowBootstrapMixin:
     def _clear_session_logs(self) -> None:
         """Clear the visible in-memory session log history."""
         self._session_log_buffer.clear()
+        self._session_log_rendered_entries = 0
+        self._session_log_needs_rebuild = False
         if self.settings_log_output is not None:
             self.settings_log_output.clear()
         self._refresh_settings_log_status()
@@ -211,7 +259,12 @@ class WindowBootstrapMixin:
         self._session_log_paused = bool(paused)
         self._refresh_settings_log_status()
         if not self._session_log_paused and self.settings_log_output is not None:
-            self.settings_log_output.setPlainText('\n'.join(self._session_log_buffer))
+            if self._session_log_needs_rebuild or self._session_log_rendered_entries > len(self._session_log_buffer):
+                self._rebuild_settings_log_output()
+            else:
+                pending_lines = list(self._session_log_buffer)[self._session_log_rendered_entries:]
+                if pending_lines:
+                    self._append_settings_log_lines(pending_lines)
             scrollbar = self.settings_log_output.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
@@ -300,10 +353,14 @@ class WindowBootstrapMixin:
         self.chart_configs = []
         self._dashboard_request_seq = 0
         self._dashboard_latest_request_id = 0
+        self._cache_manager = CacheManager()
         self.last_data = None
         self.p2_current_data = None
         self.tracker_data = {}
         self._mktcap_cache = {}
+        self._mktcap_cache_ts = {}
+        self._mktcap_inflight_tickers = set()
+        self._mktcap_queued_tickers = set()
         self._return_metrics_cache = {}
         self._return_metrics_fetching = {}
         self._active_return_timeframe = 'dip_finder'

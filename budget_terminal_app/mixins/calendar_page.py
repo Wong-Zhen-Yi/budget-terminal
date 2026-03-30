@@ -3,6 +3,8 @@ import calendar as _calendar_mod
 from typing import Any
 from ..compat import *
 
+_P7_SPLITTER_CONFIG = user_data_path('p7_splitter.json')
+
 class CalendarPageMixin:
     def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 6) -> None:
         """Set all detail tables to the same height based on the tallest one."""
@@ -49,6 +51,28 @@ class CalendarPageMixin:
             self._p7_apply_equal_table_widths(self.p7_economic_events_table)
         if hasattr(self, 'p7_options_exp_table'):
             self._p7_apply_equal_table_widths(self.p7_options_exp_table)
+
+    def _p7_save_splitter_sizes(self, *_: Any) -> None:
+        """Persist the calendar detail splitter sizes to disk."""
+        if not hasattr(self, 'p7_details_splitter'):
+            return
+        sizes = [int(s) for s in self.p7_details_splitter.sizes() if int(s) > 0]
+        if len(sizes) == 4:
+            try:
+                _P7_SPLITTER_CONFIG.write_text(json.dumps(sizes))
+            except Exception:
+                pass
+
+    def _p7_restore_splitter_sizes(self) -> None:
+        """Restore saved calendar detail splitter sizes from disk."""
+        if not hasattr(self, 'p7_details_splitter'):
+            return
+        try:
+            sizes = json.loads(_P7_SPLITTER_CONFIG.read_text())
+            if isinstance(sizes, list) and len(sizes) == 4:
+                self.p7_details_splitter.setSizes([int(s) for s in sizes])
+        except Exception:
+            pass
 
     def _p7_get_main_portfolio_options(self) -> Any:
         """Return saved options positions for the current main portfolio."""
@@ -175,9 +199,11 @@ class CalendarPageMixin:
                 row_cells.append(cell)
             self.p7_day_cells.append(row_cells)
         layout.addLayout(self.p7_grid, 1)
-        details_row = QHBoxLayout()
-        details_row.setContentsMargins(0, 0, 0, 0)
-        details_row.setSpacing(8)
+        self.p7_details_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.p7_details_splitter.setHandleWidth(6)
+        self.p7_details_splitter.setStyleSheet(
+            'QSplitter::handle { background: #2a2a4a; border-radius: 2px; }'
+        )
         company_widget = QWidget()
         company_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         company_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
@@ -200,7 +226,7 @@ class CalendarPageMixin:
             'border: 0; border-bottom: 1px solid #333; padding: 4px 6px; }'
         )
         company_layout.addWidget(self.p7_company_events_table)
-        details_row.addWidget(company_widget, 1)
+        self.p7_details_splitter.addWidget(company_widget)
         econ_widget = QWidget()
         econ_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         econ_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
@@ -223,7 +249,7 @@ class CalendarPageMixin:
             'border: 0; border-bottom: 1px solid #333; padding: 4px 6px; }'
         )
         econ_layout.addWidget(self.p7_economic_events_table)
-        details_row.addWidget(econ_widget, 1)
+        self.p7_details_splitter.addWidget(econ_widget)
         options_widget = QWidget()
         options_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         options_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
@@ -246,8 +272,36 @@ class CalendarPageMixin:
             'border: 0; border-bottom: 1px solid #333; padding: 4px 6px; }'
         )
         options_tab_layout.addWidget(self.p7_options_exp_table)
-        details_row.addWidget(options_widget, 1)
-        layout.addLayout(details_row)
+        self.p7_details_splitter.addWidget(options_widget)
+        export_opts_widget = QWidget()
+        export_opts_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        export_opts_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
+        export_opts_layout = QVBoxLayout(export_opts_widget)
+        export_opts_layout.setContentsMargins(6, 6, 6, 6)
+        export_opts_layout.setSpacing(4)
+        export_opts_lbl = QLabel('<b>LLM Export Options</b>')
+        export_opts_lbl.setStyleSheet('font-size: 15px; color: #8888aa;')
+        export_opts_layout.addWidget(export_opts_lbl)
+        cb_style = 'QCheckBox { color: #ccc; font-size: 12px; border: none; }'
+        self.p7_export_economic_cb = QCheckBox('Economic Events')
+        self.p7_export_economic_cb.setChecked(True)
+        self.p7_export_economic_cb.setStyleSheet(cb_style)
+        export_opts_layout.addWidget(self.p7_export_economic_cb)
+        self.p7_export_company_cb = QCheckBox('Earnings && Corporate Events')
+        self.p7_export_company_cb.setChecked(True)
+        self.p7_export_company_cb.setStyleSheet(cb_style)
+        export_opts_layout.addWidget(self.p7_export_company_cb)
+        self.p7_export_options_cb = QCheckBox('Options Expirations')
+        self.p7_export_options_cb.setChecked(True)
+        self.p7_export_options_cb.setStyleSheet(cb_style)
+        export_opts_layout.addWidget(self.p7_export_options_cb)
+        export_opts_layout.addStretch()
+        self.p7_details_splitter.addWidget(export_opts_widget)
+        for i in range(4):
+            self.p7_details_splitter.setStretchFactor(i, 1)
+        self._p7_restore_splitter_sizes()
+        self.p7_details_splitter.splitterMoved.connect(self._p7_save_splitter_sizes)
+        layout.addWidget(self.p7_details_splitter)
         today = self._p7_get_reference_today()
         self._p7_year = today.year
         self._p7_month = today.month
@@ -387,46 +441,52 @@ class CalendarPageMixin:
         year, month = self._p7_year, self._p7_month
         month_name = _calendar_mod.month_name[month]
         today = self._p7_get_reference_today()
+        inc_econ = self.p7_export_economic_cb.isChecked() if hasattr(self, 'p7_export_economic_cb') else True
+        inc_company = self.p7_export_company_cb.isChecked() if hasattr(self, 'p7_export_company_cb') else True
+        inc_options = self.p7_export_options_cb.isChecked() if hasattr(self, 'p7_export_options_cb') else True
 
         # --- Collect economic events ---
         econ_events = []
-        for d, name, imp in _get_economic_events(year, month):
-            econ_events.append((d, name, imp))
-        econ_events.sort(key=lambda x: x[0])
+        if inc_econ:
+            for d, name, imp in _get_economic_events(year, month):
+                econ_events.append((d, name, imp))
+            econ_events.sort(key=lambda x: x[0])
 
         # --- Collect company events (earnings, ex-div) ---
         company_events = []
-        for ticker, info in self._p7_events.items():
-            if info.get('earnings'):
-                d = info['earnings']
-                if d.year == year and d.month == month:
-                    company_events.append((d, ticker, 'Earnings'))
-            if info.get('exdiv'):
-                d = info['exdiv']
-                if d.year == year and d.month == month:
-                    company_events.append((d, ticker, 'Ex-Dividend'))
-        company_events.sort(key=lambda x: (x[0], x[1]))
+        if inc_company:
+            for ticker, info in self._p7_events.items():
+                if info.get('earnings'):
+                    d = info['earnings']
+                    if d.year == year and d.month == month:
+                        company_events.append((d, ticker, 'Earnings'))
+                if info.get('exdiv'):
+                    d = info['exdiv']
+                    if d.year == year and d.month == month:
+                        company_events.append((d, ticker, 'Ex-Dividend'))
+            company_events.sort(key=lambda x: (x[0], x[1]))
 
         # --- Collect options expirations ---
         options_events = []
-        for pos in self._p7_get_main_portfolio_options():
-            status = str(pos.get('status', 'Open') or 'Open')
-            if status.lower() != 'open':
-                continue
-            expiry_text = str(pos.get('expiry', '') or '').strip()
-            if not expiry_text:
-                continue
-            try:
-                expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
-            except ValueError:
-                continue
-            if expiry_date.year == year and expiry_date.month == month:
-                ticker = str(pos.get('ticker', '') or '').upper().strip()
-                strategy = str(pos.get('strategy', 'Calls') or 'Calls')
-                strike = float(pos.get('strike', 0.0) or 0.0)
-                contracts = int(float(pos.get('contracts', 1) or 1))
-                options_events.append((expiry_date, ticker, strategy, strike, contracts))
-        options_events.sort(key=lambda x: (x[0], x[1]))
+        if inc_options:
+            for pos in self._p7_get_main_portfolio_options():
+                status = str(pos.get('status', 'Open') or 'Open')
+                if status.lower() != 'open':
+                    continue
+                expiry_text = str(pos.get('expiry', '') or '').strip()
+                if not expiry_text:
+                    continue
+                try:
+                    expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
+                except ValueError:
+                    continue
+                if expiry_date.year == year and expiry_date.month == month:
+                    ticker = str(pos.get('ticker', '') or '').upper().strip()
+                    strategy = str(pos.get('strategy', 'Calls') or 'Calls')
+                    strike = float(pos.get('strike', 0.0) or 0.0)
+                    contracts = int(float(pos.get('contracts', 1) or 1))
+                    options_events.append((expiry_date, ticker, strategy, strike, contracts))
+            options_events.sort(key=lambda x: (x[0], x[1]))
 
         # --- Build the export text ---
         lines = []
@@ -450,10 +510,13 @@ class CalendarPageMixin:
         lines.append('  - Calendar: Use the user\'s default calendar or a "Finance" calendar if available')
         lines.append('')
         lines.append('TITLE FORMATS:')
-        lines.append('  Economic events  -> "[ECON] <Event Name>"')
-        lines.append('  Earnings         -> "[EARNINGS] <TICKER>"')
-        lines.append('  Ex-Dividend      -> "[EX-DIV] <TICKER>"')
-        lines.append('  Options Expiry   -> "[OPTIONS] <TICKER> <STRIKE> <STRATEGY> x<QTY> expires"')
+        if inc_econ:
+            lines.append('  Economic events  -> "[ECON] <Event Name>"')
+        if inc_company:
+            lines.append('  Earnings         -> "[EARNINGS] <TICKER>"')
+            lines.append('  Ex-Dividend      -> "[EX-DIV] <TICKER>"')
+        if inc_options:
+            lines.append('  Options Expiry   -> "[OPTIONS] <TICKER> <STRIKE> <STRATEGY> x<QTY> expires"')
         lines.append('')
         lines.append('IMPORTANT:')
         lines.append('  - Do NOT create duplicate events if they already exist on the calendar.')
@@ -462,37 +525,40 @@ class CalendarPageMixin:
         lines.append('')
 
         # Economic events section
-        lines.append('-' * 70)
-        lines.append('ECONOMIC EVENTS')
-        lines.append('-' * 70)
-        if econ_events:
-            for d, name, imp in econ_events:
-                lines.append(f'  {d.strftime("%Y-%m-%d")}  {name}  (Importance: {imp})')
-        else:
-            lines.append('  (none)')
-        lines.append('')
+        if inc_econ:
+            lines.append('-' * 70)
+            lines.append('ECONOMIC EVENTS')
+            lines.append('-' * 70)
+            if econ_events:
+                for d, name, imp in econ_events:
+                    lines.append(f'  {d.strftime("%Y-%m-%d")}  {name}  (Importance: {imp})')
+            else:
+                lines.append('  (none)')
+            lines.append('')
 
         # Company events section
-        lines.append('-' * 70)
-        lines.append('COMPANY EVENTS (Earnings & Ex-Dividend)')
-        lines.append('-' * 70)
-        if company_events:
-            for d, ticker, event_type in company_events:
-                lines.append(f'  {d.strftime("%Y-%m-%d")}  {ticker}  {event_type}')
-        else:
-            lines.append('  (none)')
-        lines.append('')
+        if inc_company:
+            lines.append('-' * 70)
+            lines.append('COMPANY EVENTS (Earnings & Ex-Dividend)')
+            lines.append('-' * 70)
+            if company_events:
+                for d, ticker, event_type in company_events:
+                    lines.append(f'  {d.strftime("%Y-%m-%d")}  {ticker}  {event_type}')
+            else:
+                lines.append('  (none)')
+            lines.append('')
 
         # Options expirations section
-        lines.append('-' * 70)
-        lines.append('OPTIONS EXPIRATIONS')
-        lines.append('-' * 70)
-        if options_events:
-            for expiry, ticker, strategy, strike, contracts in options_events:
-                lines.append(f'  {expiry.strftime("%Y-%m-%d")}  {ticker}  {strike:.2f} {strategy} x{contracts}')
-        else:
-            lines.append('  (none)')
-        lines.append('')
+        if inc_options:
+            lines.append('-' * 70)
+            lines.append('OPTIONS EXPIRATIONS')
+            lines.append('-' * 70)
+            if options_events:
+                for expiry, ticker, strategy, strike, contracts in options_events:
+                    lines.append(f'  {expiry.strftime("%Y-%m-%d")}  {ticker}  {strike:.2f} {strategy} x{contracts}')
+            else:
+                lines.append('  (none)')
+            lines.append('')
         lines.append('=' * 70)
         lines.append('END OF EXPORT')
         lines.append('=' * 70)

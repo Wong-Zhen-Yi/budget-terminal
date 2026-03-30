@@ -11,6 +11,7 @@ from .workers.data import DataWorker
 from .workers.fundamentals import FundamentalsWorker
 from .workers.market_metrics import MarketCapWorker, MonthReturnWorker
 from .workers.news import NewsSummarizerWorker, _extract_words, _sentiment_label, _sentiment_score
-from .workers.polygon import P9PolygonWorker, _get_fiscal_year, _safe_get_year
+from .workers.politics import PoliticsWorker, PoliticsExportWorker
+from .workers.polygon import _get_fiscal_year, _safe_get_year
 
 __all__ = [name for name in globals() if name != "__all__"]

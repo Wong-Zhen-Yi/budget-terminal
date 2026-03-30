@@ -119,47 +119,15 @@ class PreMarketWorker(QObject):
 
     def _fetch_spy_momentum(self) -> dict:
         try:
-            return self._fetch_spy_stooq()
-        except Exception as ex:
-            logger.warning(f'Stooq SPY fetch failed, falling back to yfinance: {ex}')
-        try:
             return self._fetch_spy_yfinance()
         except Exception as ex:
-            logger.warning(f'yfinance SPY fetch also failed: {ex}')
+            logger.warning(f'SPY momentum fetch failed: {ex}')
             return {}
-
-    def _fetch_spy_stooq(self) -> dict:
-        """Fetch ~2 years of daily SPY data from Stooq CSV API."""
-        end = datetime.date.today()
-        start = end - datetime.timedelta(days=730)
-        url = (
-            f'https://stooq.com/q/d/l/'
-            f'?s=spy.us&d1={start:%Y%m%d}&d2={end:%Y%m%d}&i=d'
-        )
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        from io import StringIO
-        df = pd.read_csv(StringIO(resp.text), parse_dates=['Date'])
-        if df.empty or 'Close' not in df.columns:
-            raise ValueError('Empty or invalid stooq response')
-        df = df.sort_values('Date').reset_index(drop=True)
-        closes = df['Close'].astype(float)
-        ma125 = closes.rolling(125).mean()
-        dates = [d.to_pydatetime() for d in df['Date']]
-        last_close = float(closes.iloc[-1])
-        last_ma = float(ma125.iloc[-1]) if not pd.isna(ma125.iloc[-1]) else None
-        return {
-            'dates': dates,
-            'closes': closes.tolist(),
-            'ma125': ma125.tolist(),
-            'last_close': last_close,
-            'last_ma': last_ma,
-        }
 
     def _fetch_spy_yfinance(self) -> dict:
         """Fallback: fetch SPY data via yfinance."""
         with YF_LOCK:
-            df = yf.download('SPY', period='9mo', interval='1d', progress=False)
+            df = yf.download('SPY', period='2y', interval='1d', progress=False)
         if df is None or df.empty:
             return {}
         closes = df['Close'].squeeze().dropna()

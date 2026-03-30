@@ -17,6 +17,9 @@ class SectorsMixin:
     _P8_MAX_GRID_COLUMNS = 5
     _P8_MIN_GRID_COLUMNS = 2
     _P8_DETAIL_TABLE_ROW_HEIGHT = 32
+    _P8_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
+    _P8_MKTCAP_FASTINFO_MAX_WORKERS = 8
+    _P8_MKTCAP_INFO_MAX_WORKERS = 3
     _P8_SECTOR_AFTER = {'Crypto': 'Utilities', 'Metals': 'Crypto'}
 
     def init_page8(self) -> None:
@@ -369,10 +372,79 @@ class SectorsMixin:
         threading.Thread(target=self._p8_fetch_all_sectors, daemon=True).start()
         return True
 
+    def _p8_mktcap_cache_now(self) -> float:
+        """Return the current timestamp for sectors market-cap freshness checks."""
+        helper = getattr(self, '_p4_mktcap_cache_now', None)
+        if callable(helper):
+            return float(helper())
+        return datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    def _p8_mktcap_cache_ttl_seconds(self) -> float:
+        """Return the reuse window for cached sectors market caps."""
+        helper = getattr(self, '_p4_mktcap_cache_ttl_seconds', None)
+        if callable(helper):
+            return float(helper())
+        return float(getattr(self, '_mktcap_cache_ttl_seconds', self._P8_MKTCAP_CACHE_TTL_SECONDS))
+
+    def _p8_ensure_mktcap_cache_state(self) -> tuple[dict[str, Any], dict[str, float]]:
+        """Ensure the shared market-cap caches exist before sectors reuse them."""
+        if not hasattr(self, '_mktcap_cache') or not isinstance(self._mktcap_cache, dict):
+            self._mktcap_cache = {}
+        if not hasattr(self, '_mktcap_cache_ts') or not isinstance(self._mktcap_cache_ts, dict):
+            self._mktcap_cache_ts = {}
+        return self._mktcap_cache, self._mktcap_cache_ts
+
+    def _p8_has_fresh_mktcap(self, ticker: Any) -> bool:
+        """Return whether one cached market-cap entry is still fresh for sectors."""
+        symbol = str(ticker or '').strip().upper()
+        if not symbol:
+            return False
+        _, cache_ts = self._p8_ensure_mktcap_cache_state()
+        fetched_at = cache_ts.get(symbol)
+        if fetched_at is None:
+            return False
+        return (self._p8_mktcap_cache_now() - float(fetched_at)) < self._p8_mktcap_cache_ttl_seconds()
+
+    def _p8_cached_mktcap(self, ticker: Any) -> Any:
+        """Return the shared cached market-cap value for one ticker if present."""
+        symbol = str(ticker or '').strip().upper()
+        if not symbol:
+            return None
+        cache, _ = self._p8_ensure_mktcap_cache_state()
+        return cache.get(symbol)
+
+    def _p8_market_cap_refresh_candidates(self, tickers: list[str]) -> list[str]:
+        """Return missing or stale tickers that still need sectors market-cap refreshes."""
+        cache, _ = self._p8_ensure_mktcap_cache_state()
+        needed = []
+        for ticker in tickers:
+            symbol = str(ticker or '').strip().upper()
+            if not symbol:
+                continue
+            if (symbol not in cache) or (not self._p8_has_fresh_mktcap(symbol)):
+                needed.append(symbol)
+        return needed
+
+    def _p8_apply_mktcap_cache_updates(self, updates: dict[str, tuple[Any, float]]) -> None:
+        """Merge sector market-cap refresh results into the shared cache."""
+        if not updates:
+            return
+        cache, cache_ts = self._p8_ensure_mktcap_cache_state()
+        for ticker, payload in updates.items():
+            if not isinstance(payload, tuple) or len(payload) != 2:
+                continue
+            mc, fetched_at = payload
+            symbol = str(ticker or '').strip().upper()
+            if not symbol:
+                continue
+            cache[symbol] = mc
+            cache_ts[symbol] = float(fetched_at)
+
     def _p8_fetch_all_sectors(self) -> None:
         """Fetch sector prices in batch and market caps through a smaller fallback path."""
         all_tickers = sorted({ticker for tickers in SECTOR_DATA.values() for ticker in tickers})
         all_results = {ticker: SectorTickerSnapshot() for ticker in all_tickers}
+        mktcap_updates = {}
         try:
             batch = yf.download(all_tickers, period='5d', interval='1d', group_by='ticker', progress=False, auto_adjust=False, threads=True)
             is_multi = isinstance(batch.columns, pd.MultiIndex)
@@ -434,8 +506,15 @@ class SectorsMixin:
                             all_results[ticker].price = price
                             all_results[ticker].change = change
 
-            def fetch_mkt_cap(ticker: Any) -> Any:
-                """Fetch market cap with fast_info first, info fallback second."""
+            refresh_candidates = self._p8_market_cap_refresh_candidates(all_tickers)
+            cache, _ = self._p8_ensure_mktcap_cache_state()
+            for ticker in all_tickers:
+                symbol = str(ticker or '').strip().upper()
+                if symbol in cache:
+                    all_results[ticker].mkt_cap = cache.get(symbol)
+
+            def fetch_fast_mkt_cap(ticker: Any) -> Any:
+                """Fetch market cap from fast_info for one ticker."""
                 try:
                     with YF_LOCK:
                         t_obj = yf.Ticker(ticker)
@@ -445,6 +524,10 @@ class SectorsMixin:
                         return (ticker, float(mc))
                 except Exception:
                     pass
+                return (ticker, None)
+
+            def fetch_info_mkt_cap(ticker: Any) -> Any:
+                """Fetch market cap from full info only when the fast path was unresolved."""
                 try:
                     with YF_LOCK:
                         info = yf.Ticker(ticker).info
@@ -453,17 +536,40 @@ class SectorsMixin:
                 except Exception:
                     return (ticker, None)
 
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                for ticker, mc in executor.map(fetch_mkt_cap, all_tickers):
-                    all_results[ticker].mkt_cap = mc
-            self._invoke_main.emit(lambda results=all_results: self._p8_complete_refresh(results))
+            if refresh_candidates:
+                refresh_ts = self._p8_mktcap_cache_now()
+                unresolved = []
+                max_fast_workers = max(1, min(len(refresh_candidates), self._P8_MKTCAP_FASTINFO_MAX_WORKERS))
+                with ThreadPoolExecutor(max_workers=max_fast_workers) as executor:
+                    for ticker, mc in executor.map(fetch_fast_mkt_cap, refresh_candidates):
+                        cached_mc = cache.get(ticker)
+                        if mc is not None:
+                            all_results[ticker].mkt_cap = mc
+                            mktcap_updates[ticker] = (mc, refresh_ts)
+                        elif cached_mc is not None:
+                            all_results[ticker].mkt_cap = cached_mc
+                            mktcap_updates[ticker] = (cached_mc, refresh_ts)
+                        else:
+                            unresolved.append(ticker)
+
+                if unresolved:
+                    info_ts = self._p8_mktcap_cache_now()
+                    max_info_workers = max(1, min(len(unresolved), self._P8_MKTCAP_INFO_MAX_WORKERS))
+                    with ThreadPoolExecutor(max_workers=max_info_workers) as executor:
+                        for ticker, mc in executor.map(fetch_info_mkt_cap, unresolved):
+                            all_results[ticker].mkt_cap = mc
+                            mktcap_updates[ticker] = (mc, info_ts)
+            self._invoke_main.emit(
+                lambda results=all_results, updates=mktcap_updates: self._p8_complete_refresh(results, updates)
+            )
         except Exception as e:
             logger.error(f'Failed to fetch all sector data: {e}')
             self._invoke_main.emit(self._p8_fail_refresh)
 
-    def _p8_complete_refresh(self, all_results: Any) -> None:
+    def _p8_complete_refresh(self, all_results: Any, mktcap_updates: Any=None) -> None:
         """Apply fetched sector data and clear the active refresh flag."""
         self.p8_fetch_in_progress = False
+        self._p8_apply_mktcap_cache_updates(mktcap_updates if isinstance(mktcap_updates, dict) else {})
         self._p8_all_results = all_results
         self._p8_apply_all_data(all_results)
 

@@ -21,13 +21,14 @@ class DataWorker(QObject):
     _macro_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
     _details_cache_lock = threading.Lock()
 
-    def __init__(self, tickers: Any, chart_configs: Any, request_id: int = 0, cancel_check: Any = None) -> None:
+    def __init__(self, tickers: Any, chart_configs: Any, request_id: int = 0, cancel_check: Any = None, cache_manager: Any = None) -> None:
         super().__init__()
         self.tickers = list(tickers) if isinstance(tickers, (list, tuple)) else []
         self.chart_configs = chart_configs
         self.request_id = int(request_id)
         self.cancel_check = cancel_check
         self._ticker_cache: dict[str, Any] = {}
+        self._cache_manager = cache_manager if cache_manager is not None else CacheManager()
 
     def _is_cancelled(self) -> bool:
         """Return whether the parent request no longer needs this worker result."""
@@ -411,9 +412,22 @@ class DataWorker(QObject):
             buckets[bucket_name] = selected or parsed[-1][0]
         return buckets
 
+    @staticmethod
+    def _calculate_rsi(close_series: Any, period: int = 14) -> Any:
+        """Calculate an RSI series from closing prices."""
+        closes = pd.Series(close_series).astype(float)
+        delta = closes.diff()
+        gains = delta.clip(lower=0)
+        losses = -delta.clip(upper=0)
+        avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        rsi = 100 - 100 / (1 + rs)
+        return rsi.bfill().clip(lower=0, upper=100)
+
     def _fetch_chart_payload(self, config: tuple[str, Any, Any]) -> Any:
         symbol, period, interval = config
-        cache = CacheManager()
+        cache = self._cache_manager
         source_label = 'cache'
         raw_df = cache.get_data(symbol, interval)
         df = self._normalize_chart_frame(symbol, raw_df)
@@ -438,6 +452,7 @@ class DataWorker(QObject):
                 dict(OPTION_BUCKET_TEMPLATE),
                 {},
                 None,
+                None,
             )
         logger.info(
             'Dashboard chart %s loaded from %s with %s rows. Columns=%s last_close=%.2f',
@@ -450,6 +465,7 @@ class DataWorker(QObject):
         option_buckets = {key: [] for key in OPTION_BUCKET_TEMPLATE}
         option_expirations = {}
         ma200_series = self._build_daily_ma200(symbol, df, cache)
+        rsi_series = self._calculate_rsi(df['Close'])
         try:
             expirations = cache.get_options_expiries(symbol)
             ticker_obj = None
@@ -457,34 +473,44 @@ class DataWorker(QObject):
                 ticker_obj = self._ticker(symbol)
                 expirations = ticker_obj.options
                 cache.save_options_expiries(symbol, expirations)
-            for bucket_name, expiry in self._select_option_expiry_buckets(expirations).items():
-                if not expiry:
-                    continue
-                option_expirations[bucket_name] = expiry
-                options_df = self._load_options_chain(cache, symbol, expiry, ticker_obj=ticker_obj)
-                if options_df is None or options_df.empty or 'volume' not in options_df.columns:
-                    continue
-                top_options = options_df.sort_values(by='volume', ascending=False).head(10)
-                option_buckets[bucket_name] = top_options.to_dict('records')
+            bucket_map = self._select_option_expiry_buckets(expirations)
+            with ThreadPoolExecutor(max_workers=max(1, len(bucket_map))) as pool:
+                futures = {}
+                for bucket_name, expiry in bucket_map.items():
+                    if not expiry:
+                        continue
+                    option_expirations[bucket_name] = expiry
+                    futures[bucket_name] = pool.submit(self._load_options_chain, cache, symbol, expiry, ticker_obj)
+                for bucket_name, fut in futures.items():
+                    try:
+                        options_df = fut.result()
+                        if options_df is None or options_df.empty or 'volume' not in options_df.columns:
+                            continue
+                        top_options = options_df.sort_values(by='volume', ascending=False).head(10)
+                        option_buckets[bucket_name] = top_options.to_dict('records')
+                    except Exception:
+                        continue
         except Exception as exc:
             logger.info('Dashboard options unavailable for %s: %s', symbol, exc)
-        return symbol, df, option_buckets, option_expirations, ma200_series
+        return symbol, df, option_buckets, option_expirations, ma200_series, rsi_series
 
-    def _collect_chart_data(self, dashboard_chart_config: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    def _collect_chart_data(self, dashboard_chart_config: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         charts = {}
         chart_options = {}
         chart_option_expirations = {}
         chart_ma200 = {}
+        chart_rsi = {}
         if not dashboard_chart_config:
-            return charts, chart_options, chart_option_expirations, chart_ma200
+            return charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi
         result = self._fetch_chart_payload(dashboard_chart_config)
         if result:
-            symbol, df, options_payload, expiration_payload, ma200_series = result
+            symbol, df, options_payload, expiration_payload, ma200_series, rsi_series = result
             charts[symbol] = df
             chart_options[symbol] = options_payload
             chart_option_expirations[symbol] = expiration_payload
             chart_ma200[symbol] = ma200_series
-        return charts, chart_options, chart_option_expirations, chart_ma200
+            chart_rsi[symbol] = rsi_series
+        return charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi
 
     def run(self) -> Any:
         try:
@@ -498,13 +524,13 @@ class DataWorker(QObject):
                 return
             portfolio_info = self._collect_portfolio_quotes(batch_data, all_symbols)
             market_data = self._collect_market_quotes(batch_data, all_symbols)
-            targets, news_list = self._collect_targets_and_news(portfolio_info)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_tn = pool.submit(self._collect_targets_and_news, portfolio_info)
+                fut_chart = pool.submit(self._collect_chart_data, dashboard_chart_config)
+                targets, news_list = fut_tn.result()
+                charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = fut_chart.result()
             if self._is_cancelled():
-                logger.info('Worker %s cancelled after targets/news.', self.request_id)
-                return
-            charts, chart_options, chart_option_expirations, chart_ma200 = self._collect_chart_data(dashboard_chart_config)
-            if self._is_cancelled():
-                logger.info('Worker %s cancelled after chart collection.', self.request_id)
+                logger.info('Worker %s cancelled after parallel fetch.', self.request_id)
                 return
             data = {
                 'request_id': self.request_id,
@@ -517,6 +543,7 @@ class DataWorker(QObject):
                 'chart_options': chart_options,
                 'chart_option_expirations': chart_option_expirations,
                 'chart_ma200': chart_ma200,
+                'chart_rsi': chart_rsi,
             }
             self.finished.emit(data)
         except Exception as exc:

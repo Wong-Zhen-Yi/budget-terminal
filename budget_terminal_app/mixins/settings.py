@@ -542,11 +542,16 @@ class SettingsMixin:
         if reply != QMessageBox.StandardButton.Yes:
             self._set_settings_status('Cache reset cancelled.')
             return
-        cache = CacheManager()
+        cache = self._get_cache_manager()
         cache_path = Path(cache.db_path)
         try:
             existed = cache.clear_all()
             self._mktcap_cache = {}
+            self._mktcap_cache_ts = {}
+            self._mktcap_inflight_tickers = set()
+            self._mktcap_queued_tickers = set()
+            self._option_chain_memory_cache = {}
+            self._options_expiry_memory_cache = {}
             self._return_metrics_cache = {}
             self._return_metrics_fetching = {}
             self.last_data = None

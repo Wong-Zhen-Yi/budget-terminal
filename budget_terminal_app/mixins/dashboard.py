@@ -3,6 +3,8 @@ import math
 from typing import Any
 from ..compat import *
 
+_P1_LEFT_SPLITTER_CONFIG = user_data_path('p1_left_splitter.json')
+_P1_PORT_SECTION_MIN_HEIGHT = 75
 
 P1_AUTO_ANCHOR = 0.85
 P1_DEFAULT_STARTUP_SPAN = 80.0
@@ -144,8 +146,7 @@ class DashboardMixin:
         frame = table.frameWidth() * 2
         scrollbar_pad = 4
         target_height = header_height + (visible_rows * row_height) + frame + scrollbar_pad
-        table.setMinimumHeight(target_height)
-        table.setMaximumHeight(16777215)
+        table.setFixedHeight(target_height)
 
     def _update_main_portfolio_entry(self) -> Any:
         """Persist the current app-wide portfolio fields into the main portfolio slot."""
@@ -203,6 +204,66 @@ class DashboardMixin:
         """Persist the main dashboard splitter position after a user drag."""
         self._dashboard_save_state()
 
+    def _p1_save_left_splitter_sizes(self, *_: Any) -> None:
+        """Persist the dashboard left-column splitter sizes to disk."""
+        if not hasattr(self, 'dashboard_left_splitter'):
+            return
+        sizes = [int(s) for s in self.dashboard_left_splitter.sizes() if int(s) > 0]
+        if len(sizes) == 3:
+            try:
+                _P1_LEFT_SPLITTER_CONFIG.write_text(json.dumps(sizes))
+            except Exception:
+                pass
+
+    def _p1_enforce_left_splitter_min_height(self) -> None:
+        """Clamp the dashboard portfolio section to a compact but non-collapsed height."""
+        if not hasattr(self, 'dashboard_left_splitter'):
+            return
+        if getattr(self, '_p1_splitter_guard', False):
+            return
+        splitter = self.dashboard_left_splitter
+        sizes = [int(size) for size in splitter.sizes()]
+        if len(sizes) != 3:
+            return
+        top_size = sizes[0]
+        if top_size >= _P1_PORT_SECTION_MIN_HEIGHT:
+            return
+        deficit = _P1_PORT_SECTION_MIN_HEIGHT - top_size
+        if deficit <= 0:
+            return
+        adjusted = list(sizes)
+        adjusted[0] = _P1_PORT_SECTION_MIN_HEIGHT
+        for index in sorted((1, 2), key=lambda idx: adjusted[idx], reverse=True):
+            if deficit <= 0:
+                break
+            take = min(deficit, max(0, adjusted[index]))
+            adjusted[index] -= take
+            deficit -= take
+        if deficit > 0:
+            return
+        self._p1_splitter_guard = True
+        try:
+            splitter.setSizes(adjusted)
+        finally:
+            self._p1_splitter_guard = False
+
+    def _p1_on_left_splitter_moved(self, *_: Any) -> None:
+        """Keep the dashboard portfolio section above its intended compact minimum."""
+        self._p1_enforce_left_splitter_min_height()
+        self._p1_save_left_splitter_sizes()
+
+    def _p1_restore_left_splitter_sizes(self) -> None:
+        """Restore saved dashboard left-column splitter sizes from disk."""
+        if not hasattr(self, 'dashboard_left_splitter'):
+            return
+        try:
+            sizes = json.loads(_P1_LEFT_SPLITTER_CONFIG.read_text())
+            if isinstance(sizes, list) and len(sizes) == 3:
+                self.dashboard_left_splitter.setSizes([int(s) for s in sizes])
+                self._p1_enforce_left_splitter_min_height()
+        except Exception:
+            pass
+
     def _dashboard_set_status(self, text: Any, status: Any='muted') -> None:
         """Set dashboard status text."""
         self.set_status_text(self.dashboard_status_label, text, status=str(status))
@@ -252,25 +313,21 @@ class DashboardMixin:
                 self.dashboard_active_indicators.append(name)
         else:
             self.dashboard_active_indicators = [indicator for indicator in self.dashboard_active_indicators if indicator != name]
-        ordered = []
-        for indicator in ('Volume', 'RSI', '200 MA'):
-            if indicator in self.dashboard_active_indicators and indicator not in ordered:
-                ordered.append(indicator)
-        if '200 MA' not in ordered:
-            ordered.append('200 MA')
-        self.dashboard_active_indicators = ordered
+        self.dashboard_active_indicators = [indicator for indicator in ('Volume', 'RSI', '200 MA') if indicator in self.dashboard_active_indicators]
         self._dashboard_update_indicator_button_styles()
         self._dashboard_save_state()
         if self.dashboard_chart_rows:
-            self._dashboard_render_main_chart(self.dashboard_chart_stats, self.dashboard_chart_interval, self.dashboard_rsi_series, self.dashboard_chart_ma200)
+            current_range = self._dashboard_get_current_x_range()
+            self._dashboard_refresh_chart_presentation()
             if self.dashboard_auto_follow:
-                self._dashboard_apply_auto_x_range(self._dashboard_get_current_x_range())
+                self._dashboard_apply_auto_x_range(current_range)
             else:
                 self._dashboard_restore_manual_x_range()
+                self._dashboard_apply_auto_y_range(self._dashboard_get_current_x_range() or current_range or self.dashboard_manual_x_range)
             self._dashboard_show_row_details(len(self.dashboard_chart_rows) - 1)
         else:
             self._dashboard_render_indicator_panels()
-        self._dashboard_update_indicator_panel_labels()
+            self._dashboard_update_indicator_panel_labels()
 
     def _dashboard_set_timeframe(self, label: Any, *_: Any) -> None:
         """Switch the active dashboard timeframe and refresh."""
@@ -293,6 +350,38 @@ class DashboardMixin:
             self.dashboard_symbol_input.setText(symbol)
             self._dashboard_save_state()
             self.refresh_data()
+
+    def _dashboard_on_port_delete_clicked(self) -> None:
+        """Remove the ticker assigned to a reused dashboard delete button."""
+        sender = self.sender()
+        if not isinstance(sender, QPushButton):
+            return
+        ticker = str(sender.property('portfolio_ticker') or '').strip().upper()
+        if ticker:
+            self.remove_ticker(ticker)
+
+    def _dashboard_ensure_portfolio_item(self, row: int, col: int) -> Any:
+        """Return an existing dashboard portfolio cell item or create it once."""
+        item = self.port_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem('')
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.port_table.setItem(row, col, item)
+        return item
+
+    def _dashboard_ensure_portfolio_delete_button(self, row: int) -> Any:
+        """Return an existing per-row delete button or create it once."""
+        widget = self.port_table.cellWidget(row, 5)
+        if isinstance(widget, QPushButton):
+            return widget
+        del_btn = QPushButton('x')
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        del_btn.setFixedWidth(24)
+        del_btn.setFixedHeight(20)
+        del_btn.clicked.connect(self._dashboard_on_port_delete_clicked)
+        self.port_table.setCellWidget(row, 5, del_btn)
+        return del_btn
 
     def _dashboard_load_from_input(self) -> None:
         """Load the dashboard ticker from the input field."""
@@ -435,7 +524,12 @@ class DashboardMixin:
     def _dashboard_set_overlay_text(self, key: Any, plot: Any, text: Any, color: Any) -> None:
         """Render a top-right overlay label inside a plot."""
         if not text:
-            self.dashboard_overlay_items.pop(key, None)
+            item = self.dashboard_overlay_items.pop(key, None)
+            if item is not None:
+                try:
+                    plot.removeItem(item)
+                except Exception:
+                    pass
             return
         item = self.dashboard_overlay_items.get(key)
         if item is None:
@@ -511,6 +605,68 @@ class DashboardMixin:
         self.dashboard_panels.setStretchFactor(1, 2 if show_volume else 0)
         self.dashboard_panels.setStretchFactor(2, 2 if show_rsi else 0)
 
+    def _dashboard_remove_chart_item(self, plot: Any, item: Any) -> None:
+        """Best-effort removal of a persisted dashboard plot item."""
+        if item is None:
+            return
+        try:
+            plot.removeItem(item)
+        except Exception:
+            pass
+
+    def _dashboard_reset_chart_item_refs(self) -> None:
+        """Forget persisted dashboard chart items after a full clear."""
+        self.dashboard_candle_item = None
+        self.dashboard_ma_line_item = None
+        self.dashboard_last_price_line = None
+        self.dashboard_volume_item = None
+        self.dashboard_rsi_line_item = None
+        self.dashboard_rsi_upper_line = None
+        self.dashboard_rsi_lower_line = None
+
+    def _dashboard_build_volume_brushes(self) -> list[Any]:
+        """Return themed volume bar brushes for the current dashboard dataset."""
+        brushes = []
+        for row in self.dashboard_chart_rows:
+            open_value = float(getattr(row, 'Open'))
+            close_value = float(getattr(row, 'Close'))
+            brushes.append(self.theme_brush('chart_volume_up' if close_value >= open_value else 'chart_volume_down'))
+        return brushes
+
+    def _dashboard_refresh_chart_presentation(self) -> None:
+        """Refresh chart colors and indicator visibility without rebuilding datasets."""
+        candle_item = getattr(self, 'dashboard_candle_item', None)
+        if candle_item is not None:
+            candle_item.set_colors(
+                self.theme_color('chart_up_candle'),
+                self.theme_color('chart_down_candle'),
+            )
+        ma_line_item = getattr(self, 'dashboard_ma_line_item', None)
+        if ma_line_item is not None:
+            ma_line_item.setPen(self.theme_pen('chart_ma', width=2.0))
+            ma_line_item.setVisible(self.dashboard_chart_ma200 is not None and '200 MA' in self.dashboard_active_indicators)
+        last_price_line = getattr(self, 'dashboard_last_price_line', None)
+        if last_price_line is not None:
+            last_price_line.setPen(self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
+            last_price_line.setValue(float(getattr(self, 'dashboard_chart_stats', {}).get('close', 0.0)))
+        volume_item = getattr(self, 'dashboard_volume_item', None)
+        if volume_item is not None and self.dashboard_chart_rows:
+            try:
+                volume_item.setOpts(brushes=self._dashboard_build_volume_brushes())
+            except Exception:
+                pass
+        rsi_line_item = getattr(self, 'dashboard_rsi_line_item', None)
+        if rsi_line_item is not None:
+            rsi_line_item.setPen(self.theme_pen('chart_rsi', width=2.0))
+        rsi_upper_line = getattr(self, 'dashboard_rsi_upper_line', None)
+        if rsi_upper_line is not None:
+            rsi_upper_line.setPen(self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
+        rsi_lower_line = getattr(self, 'dashboard_rsi_lower_line', None)
+        if rsi_lower_line is not None:
+            rsi_lower_line.setPen(self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine))
+        self._dashboard_render_indicator_panels()
+        self._dashboard_update_indicator_panel_labels()
+
     def _dashboard_show_row_details(self, row_index: Any) -> None:
         """Update the dashboard OHLC readout for a chart row."""
         if not self.dashboard_chart_rows:
@@ -544,6 +700,7 @@ class DashboardMixin:
         self.dashboard_main_plot.clear()
         self.dashboard_volume_plot.clear()
         self.dashboard_rsi_plot.clear()
+        self._dashboard_reset_chart_item_refs()
         self.dashboard_chart_rows = []
         self.dashboard_chart_df = None
         self.dashboard_chart_stats = {}
@@ -561,10 +718,6 @@ class DashboardMixin:
 
     def _dashboard_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main dashboard candlestick chart and lower indicator panels."""
-        self.dashboard_main_plot.clear()
-        self.dashboard_volume_plot.clear()
-        self.dashboard_rsi_plot.clear()
-        self.dashboard_overlay_items = {}
         points = []
         volume_brushes = []
         volumes = []
@@ -582,30 +735,68 @@ class DashboardMixin:
             up_color=self.theme_color('chart_up_candle'),
             down_color=self.theme_color('chart_down_candle'),
         )
+        self._dashboard_remove_chart_item(self.dashboard_main_plot, getattr(self, 'dashboard_candle_item', None))
+        self.dashboard_candle_item = candle_item
         self.dashboard_main_plot.addItem(candle_item)
-        if ma200_series is not None and '200 MA' in self.dashboard_active_indicators:
+        if ma200_series is not None:
+            ma_line_item = getattr(self, 'dashboard_ma_line_item', None)
+            if ma_line_item is None:
+                ma_line_item = self.dashboard_main_plot.plot([], [], pen=self.theme_pen('chart_ma', width=2.0), antialias=True)
+                self.dashboard_ma_line_item = ma_line_item
             ma_values = [float(value) if not pd.isna(value) else float('nan') for value in ma200_series]
-            if ma_values:
-                self.dashboard_main_plot.plot(list(range(len(ma_values))), ma_values, pen=self.theme_pen('chart_ma', width=2.0), antialias=True)
+            ma_line_item.setData(list(range(len(ma_values))), ma_values)
+        else:
+            self._dashboard_remove_chart_item(self.dashboard_main_plot, getattr(self, 'dashboard_ma_line_item', None))
+            self.dashboard_ma_line_item = None
         last_close = float(stats.get('close', 0.0)) if isinstance(stats, dict) else 0.0
-        last_price_line = pg.InfiniteLine(pos=last_close, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
-        self.dashboard_main_plot.addItem(last_price_line)
+        last_price_line = getattr(self, 'dashboard_last_price_line', None)
+        if last_price_line is None:
+            last_price_line = pg.InfiniteLine(pos=last_close, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
+            self.dashboard_main_plot.addItem(last_price_line)
+            self.dashboard_last_price_line = last_price_line
+        last_price_line.setValue(last_close)
         dates = self.dashboard_chart_df.index.to_list() if self.dashboard_chart_df is not None else []
         self.dashboard_chart_axis.set_dates(dates, interval)
         self.dashboard_volume_axis.set_dates(dates, interval)
         self.dashboard_rsi_axis.set_dates(dates, interval)
         if volumes:
-            volume_item = pg.BarGraphItem(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
-            self.dashboard_volume_plot.addItem(volume_item)
+            volume_item = getattr(self, 'dashboard_volume_item', None)
+            if volume_item is None:
+                volume_item = pg.BarGraphItem(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
+                self.dashboard_volume_plot.addItem(volume_item)
+                self.dashboard_volume_item = volume_item
+            else:
+                volume_item.setOpts(x=list(range(len(volumes))), height=volumes, width=0.7, brushes=volume_brushes)
+        else:
+            self._dashboard_remove_chart_item(self.dashboard_volume_plot, getattr(self, 'dashboard_volume_item', None))
+            self.dashboard_volume_item = None
         if rsi_series is not None:
             x_values = list(range(len(rsi_series)))
             y_values = [float(value) if not pd.isna(value) else float('nan') for value in rsi_series]
-            self.dashboard_rsi_plot.plot(x_values, y_values, pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
-            self.dashboard_rsi_plot.addItem(pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine)))
-            self.dashboard_rsi_plot.addItem(pg.InfiniteLine(pos=30, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine)))
+            rsi_line_item = getattr(self, 'dashboard_rsi_line_item', None)
+            if rsi_line_item is None:
+                rsi_line_item = self.dashboard_rsi_plot.plot([], [], pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
+                self.dashboard_rsi_line_item = rsi_line_item
+            rsi_line_item.setData(x_values, y_values)
+            rsi_upper_line = getattr(self, 'dashboard_rsi_upper_line', None)
+            if rsi_upper_line is None:
+                rsi_upper_line = pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
+                self.dashboard_rsi_plot.addItem(rsi_upper_line)
+                self.dashboard_rsi_upper_line = rsi_upper_line
+            rsi_lower_line = getattr(self, 'dashboard_rsi_lower_line', None)
+            if rsi_lower_line is None:
+                rsi_lower_line = pg.InfiniteLine(pos=30, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine))
+                self.dashboard_rsi_plot.addItem(rsi_lower_line)
+                self.dashboard_rsi_lower_line = rsi_lower_line
             self.dashboard_rsi_plot.setYRange(0, 100, padding=0.02)
-        self._dashboard_update_indicator_panel_labels()
-        self._dashboard_render_indicator_panels()
+        else:
+            self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_line_item', None))
+            self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_upper_line', None))
+            self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_lower_line', None))
+            self.dashboard_rsi_line_item = None
+            self.dashboard_rsi_upper_line = None
+            self.dashboard_rsi_lower_line = None
+        self._dashboard_refresh_chart_presentation()
 
     def add_ticker(self) -> None:
         """Add ticker."""
@@ -689,6 +880,7 @@ class DashboardMixin:
             chart_configs_snapshot,
             request_id=request_id,
             cancel_check=lambda req=request_id: req != getattr(self, '_dashboard_latest_request_id', 0),
+            cache_manager=self._get_cache_manager(),
         )
         worker.finished.connect(self.update_ui)
         worker.error.connect(self.handle_error)
@@ -737,43 +929,47 @@ class DashboardMixin:
             return (info['price'] - avg_price) * shares if shares else 0
 
         sorted_items = sorted(portfolio.items(), key=lambda item: dollar_gain_key(item[0], item[1]), reverse=True)
-        self.port_table.setRowCount(len(sorted_items))
-        for i, (ticker, info) in enumerate(sorted_items):
-            price = info['price']
-            change_pct = info['change']
-            shares = tracker.get(ticker, {}).get('shares', 0)
-            avg_price = tracker.get(ticker, {}).get('avg_price', 0)
-            market_val = shares * price if shares else 0
-            weight_pct = market_val / total_value * 100 if total_value > 0 and shares else 0
-            dollar_gain = (price - avg_price) * shares if shares else 0
-            is_up = change_pct >= 0
-            sign = '+' if is_up else ''
-            text_color = self.theme_qcolor('accent_positive' if is_up else 'accent_negative')
-            row_bg = self.theme_qcolor('accent_positive_bg' if is_up else 'accent_negative_bg')
-            gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
-            gain_sign = '+' if dollar_gain >= 0 else ''
-            weight_str = f'{weight_pct:.1f}%' if shares else '--'
-            gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares else '--'
-            cols = [ticker, f'${price:.2f}', f'{sign}{change_pct:.2f}%', weight_str, gain_str]
-            for col, val in enumerate(cols):
-                item = QTableWidgetItem(val)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                item.setBackground(row_bg)
-                if col == 2:
-                    item.setForeground(text_color)
-                elif col == 4 and shares:
-                    item.setForeground(gain_color)
-                self.port_table.setItem(i, col, item)
-            del_btn = QPushButton('x')
-            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            del_btn.setFixedWidth(24)
-            del_btn.setFixedHeight(20)
-            self.set_theme_variant(del_btn, 'danger')
-            del_btn.clicked.connect(lambda checked, sym=ticker: self.remove_ticker(sym))
-            if showing_all:
-                del_btn.setVisible(False)
-            self.port_table.setCellWidget(i, 5, del_btn)
+        default_text_color = self.theme_qcolor('text_primary')
+        self.port_table.setUpdatesEnabled(False)
+        try:
+            self.port_table.setRowCount(len(sorted_items))
+            for i, (ticker, info) in enumerate(sorted_items):
+                price = info['price']
+                change_pct = info['change']
+                shares = tracker.get(ticker, {}).get('shares', 0)
+                avg_price = tracker.get(ticker, {}).get('avg_price', 0)
+                market_val = shares * price if shares else 0
+                weight_pct = market_val / total_value * 100 if total_value > 0 and shares else 0
+                dollar_gain = (price - avg_price) * shares if shares else 0
+                is_up = change_pct >= 0
+                sign = '+' if is_up else ''
+                text_color = self.theme_qcolor('accent_positive' if is_up else 'accent_negative')
+                row_bg = self.theme_qcolor('accent_positive_bg' if is_up else 'accent_negative_bg')
+                gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
+                gain_sign = '+' if dollar_gain >= 0 else ''
+                weight_str = f'{weight_pct:.1f}%' if shares else '--'
+                gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares else '--'
+                cols = [ticker, f'${price:.2f}', f'{sign}{change_pct:.2f}%', weight_str, gain_str]
+                for col, val in enumerate(cols):
+                    item = self._dashboard_ensure_portfolio_item(i, col)
+                    item.setText(val)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    item.setBackground(row_bg)
+                    if col == 2:
+                        item.setForeground(text_color)
+                    elif col == 4:
+                        item.setForeground(gain_color if shares else default_text_color)
+                    else:
+                        item.setForeground(default_text_color)
+                del_btn = self._dashboard_ensure_portfolio_delete_button(i)
+                self.set_theme_variant(del_btn, 'danger')
+                del_btn.setProperty('portfolio_ticker', ticker)
+                if showing_all:
+                    del_btn.setVisible(False)
+                else:
+                    del_btn.setVisible(True)
+        finally:
+            self.port_table.setUpdatesEnabled(True)
         self._dashboard_fit_portfolio_table_height()
 
     def _dashboard_populate_option_tables(self, symbol: Any, data: Any) -> None:
@@ -956,27 +1152,31 @@ class DashboardMixin:
                 color = self.theme_color('accent_positive' if change >= 0 else 'accent_negative')
                 self.index_labels[idx].setStyleSheet(f'color: {color}; font-weight: bold; background: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px; padding: 4px 8px;')
         main_targets = [item for item in data.get('targets', []) if item.get('ticker') in self.tickers]
-        self.target_table.setRowCount(len(main_targets))
-        for i, item in enumerate(main_targets):
-            ticker_item = QTableWidgetItem(item['ticker'])
-            ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.target_table.setItem(i, 0, ticker_item)
-            current = item['current']
-            current_item = QTableWidgetItem(f'${current:.2f}' if isinstance(current, (int, float)) else str(current))
-            current_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.target_table.setItem(i, 1, current_item)
-            target = item['target']
-            target_item = QTableWidgetItem(f'${target:.2f}' if isinstance(target, (int, float)) else str(target))
-            target_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.target_table.setItem(i, 2, target_item)
-            try:
-                upside = (float(target) - float(current)) / float(current) * 100
-                upside_item = QTableWidgetItem(f'{upside:+.1f}%')
-                upside_item.setForeground(self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative'))
-            except (TypeError, ValueError, ZeroDivisionError):
-                upside_item = QTableWidgetItem('N/A')
-            upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.target_table.setItem(i, 3, upside_item)
+        self.target_table.setUpdatesEnabled(False)
+        try:
+            self.target_table.setRowCount(len(main_targets))
+            for i, item in enumerate(main_targets):
+                ticker_item = QTableWidgetItem(item['ticker'])
+                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 0, ticker_item)
+                current = item['current']
+                current_item = QTableWidgetItem(f'${current:.2f}' if isinstance(current, (int, float)) else str(current))
+                current_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 1, current_item)
+                target = item['target']
+                target_item = QTableWidgetItem(f'${target:.2f}' if isinstance(target, (int, float)) else str(target))
+                target_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 2, target_item)
+                try:
+                    upside = (float(target) - float(current)) / float(current) * 100
+                    upside_item = QTableWidgetItem(f'{upside:+.1f}%')
+                    upside_item.setForeground(self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative'))
+                except (TypeError, ValueError, ZeroDivisionError):
+                    upside_item = QTableWidgetItem('N/A')
+                upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 3, upside_item)
+        finally:
+            self.target_table.setUpdatesEnabled(True)
         portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') != 'macro' and article.get('ticker') in self.tickers])
         self._populate_news_table(self.news_table, portfolio_news)
         self.update_page3(data)
@@ -1011,7 +1211,9 @@ class DashboardMixin:
         previous_range = self._dashboard_get_current_x_range()
         self.dashboard_chart_rows = list(df.itertuples())
         self.dashboard_chart_ma200 = data.get('chart_ma200', {}).get(symbol)
-        self.dashboard_rsi_series = self._p10_calculate_rsi(df['Close'])
+        self.dashboard_rsi_series = data.get('chart_rsi', {}).get(symbol)
+        if self.dashboard_rsi_series is None:
+            self.dashboard_rsi_series = self._p10_calculate_rsi(df['Close'])
         self.dashboard_symbol_label.setText(symbol)
         self._dashboard_render_main_chart(self.dashboard_chart_stats, self.dashboard_chart_interval, self.dashboard_rsi_series, self.dashboard_chart_ma200)
         if self.dashboard_auto_follow:
@@ -1042,6 +1244,6 @@ class DashboardMixin:
             self._dashboard_update_timeframe_button_styles()
             self._dashboard_update_indicator_button_styles()
             if self.dashboard_chart_rows:
-                self._dashboard_render_main_chart(self.dashboard_chart_stats, self.dashboard_chart_interval, self.dashboard_rsi_series, self.dashboard_chart_ma200)
+                self._dashboard_refresh_chart_presentation()
         if getattr(self, 'last_data', None):
             self.repopulate_portfolio()

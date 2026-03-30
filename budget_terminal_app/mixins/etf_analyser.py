@@ -301,6 +301,11 @@ class EtfAnalyserMixin:
         )
         vbox.addWidget(self._p13_aum_status_lbl)
 
+        aum_note = QLabel('Note: Vanguard ETFs may show total fund AUM across all share classes, not ETF-only.')
+        aum_note.setWordWrap(True)
+        aum_note.setStyleSheet('color: #887744; border: none; font-size: 10px; font-style: italic;')
+        vbox.addWidget(aum_note)
+
         self._p13_aum_table = QTableWidget(0, 2)
         self._p13_aum_table.setHorizontalHeaderLabels(['Ticker', 'AUM'])
         hh = self._p13_aum_table.horizontalHeader()
