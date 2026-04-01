@@ -495,6 +495,7 @@ class WindowBootstrapMixin:
         self.networth_data = load_networth_data()
         self.theme_settings = load_theme_settings()
         self.chart_page_state = load_chart_page_settings()
+        self.stocks_page_state = load_stocks_page_settings()
         self.init_theme_system(apply=False)
         self.dashboard_chart_rows = []
         self.dashboard_chart_ma200 = None

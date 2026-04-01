@@ -33,6 +33,7 @@ class ThemeSupportMixin:
             "_apply_sectors_theme",
             "_apply_settings_theme",
             "_apply_charts_page_theme",
+            "_apply_stocks_theme",
             "_apply_fundamentals_theme",
             "_apply_options_chain_theme",
             "_apply_politics_theme",

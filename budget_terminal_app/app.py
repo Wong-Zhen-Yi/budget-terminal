@@ -20,6 +20,7 @@ from .mixins.portfolio_setup import PortfolioSetupMixin
 from .mixins.sectors import SectorsMixin
 from .mixins.settings import SettingsMixin
 from .mixins.charts_page import ChartsPageMixin
+from .mixins.stocks_page import StocksPageMixin
 from .mixins.multi_charts import MultiChartsMixin
 from .mixins.simple_charts import SimpleChartsMixin
 from .mixins.theme_support import ThemeSupportMixin
@@ -27,5 +28,5 @@ from .mixins.window_bootstrap import WindowBootstrapMixin
 from .mixins.window_lifecycle import WindowLifecycleMixin
 from .mixins.window_setup import WindowSetupMixin
 
-class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, PoliticsMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, MultiChartsMixin, QMainWindow):
+class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, PoliticsMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, StocksPageMixin, MultiChartsMixin, QMainWindow):
     _invoke_main = pyqtSignal(object)

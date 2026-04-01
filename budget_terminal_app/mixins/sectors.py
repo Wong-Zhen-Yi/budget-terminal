@@ -688,6 +688,7 @@ class SectorsMixin:
             self.p10_symbol_input.setText(symbol)
         if hasattr(self, 'p10_symbol'):
             self.p10_symbol = symbol
-        self.switch_page(6)
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
+        self.switch_page(page_index if page_index >= 0 else 8)
         if hasattr(self, '_p10_load_from_input'):
             self._p10_load_from_input()

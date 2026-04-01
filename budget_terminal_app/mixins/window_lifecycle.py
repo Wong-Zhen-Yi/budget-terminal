@@ -26,33 +26,38 @@ class WindowLifecycleMixin:
         self._register_page(3, self.btn_page7)
         self._register_page(4, self.btn_page3, on_show=lambda: self.p3_crawler_timer.start(40) if hasattr(self, 'p3_crawler_timer') else None, on_hide=lambda: self.p3_crawler_timer.stop() if hasattr(self, 'p3_crawler_timer') else None)
         self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
-        self._register_page(6, self.btn_page10, on_show=self._p10_on_show)
-        self._register_page(7, self.btn_page11, on_show=self._mc_on_show)
-        self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
-        self._register_page(9, self.btn_page5)
-        self._register_page(10, self.btn_page13)
-        self._register_page(11, self.btn_page14, on_show=self._p14_refresh)
-        self._register_page(12, self.btn_page15, on_show=self._p15_refresh)
-        self._register_page(13, self.btn_page9)
+        self._register_page(6, self.btn_page12, on_show=self._stocks_on_show)
+        self._register_page(7, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
+        self._register_page(8, self.btn_page10, on_show=self._p10_on_show)
+        self._register_page(9, self.btn_page11, on_show=self._mc_on_show)
+        self._register_page(10, self.btn_page5)
+        self._register_page(11, self.btn_page13)
+        self._register_page(12, self.btn_page14, on_show=self._p14_refresh)
+        self._register_page(13, self.btn_page15, on_show=self._p15_refresh)
+        self._register_page(14, self.btn_page9)
         self._refresh_main_tab_picker_items()
+
+    def _is_current_page(self, page: Any) -> bool:
+        """Return whether the provided stacked page is currently visible."""
+        return hasattr(self, 'stacked_widget') and page is not None and self.stacked_widget.currentWidget() is page
 
     def resizeEvent(self, event: Any) -> None:
         """Handle resizeEvent."""
         super().resizeEvent(event)
         if hasattr(self, '_dashboard_fit_portfolio_table_height'):
-            if not hasattr(self, 'stacked_widget') or self.stacked_widget.currentIndex() == 0:
+            if not hasattr(self, 'stacked_widget') or self._is_current_page(getattr(self, 'page1', None)):
                 self._dashboard_fit_portfolio_table_height()
         if hasattr(self, '_p4_apply_portfolio_table_widths') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 1:
+            if self._is_current_page(getattr(self, 'page4', None)):
                 self._p4_apply_portfolio_table_widths()
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 9:
+            if self._is_current_page(getattr(self, 'page2', None)):
                 self._p2_relayout_charts()
         if hasattr(self, '_p8_relayout_cards') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 5:
+            if self._is_current_page(getattr(self, 'page8', None)):
                 self._p8_relayout_cards()
         if hasattr(self, '_p7_apply_detail_table_widths') and hasattr(self, 'stacked_widget'):
-            if self.stacked_widget.currentIndex() == 3:
+            if self._is_current_page(getattr(self, 'page7', None)):
                 self._p7_apply_detail_table_widths()
 
     def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None) -> None:

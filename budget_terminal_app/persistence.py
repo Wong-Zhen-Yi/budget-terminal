@@ -9,6 +9,15 @@ USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
+DEFAULT_STOCKS_PAGE_SETTINGS = {
+    'symbol': 'SPY',
+    'auto': True,
+    'mfi_enabled': False,
+    'main_splitter_sizes': [3, 3, 5],
+    'left_splitter_sizes': [4, 2, 3],
+    'middle_splitter_sizes': [2, 3],
+}
+DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
 MAX_PORTFOLIOS = 5
@@ -455,6 +464,8 @@ def _default_user_data_document() -> Any:
         'portfolios': portfolio_state['portfolios'],
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
+        'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
@@ -475,6 +486,8 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'portfolios': portfolio_state['portfolios'],
         'chart_page': _normalize_chart_page_settings(saved.get('chart_page', default['chart_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
+        'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
+        'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
@@ -683,6 +696,14 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         '',
+        '## Stocks Page Settings',
+        '',
+        _json_block(payload.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
+        '',
+        '## Multi Charts Settings',
+        '',
+        _json_block(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
+        '',
         '## Theme Settings',
         '',
         _json_block(payload.get('theme', DEFAULT_THEME_SETTINGS)),
@@ -746,6 +767,8 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         },
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
+        'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
@@ -767,7 +790,8 @@ def load_app_config() -> Any:
         'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
-        'multi_charts': dict(document.get('multi_charts', {})),
+        'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
+        'multi_charts': dict(document.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
         'time_12h': bool(document.get('time_12h', False)),
     }
@@ -805,13 +829,10 @@ def save_app_config(data: Any) -> None:
         current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
     if 'dashboard_chart' in saved:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
+    if 'stocks_page' in saved:
+        current['stocks_page'] = _normalize_stocks_page_settings(saved.get('stocks_page'))
     if 'multi_charts' in saved:
-        raw_multi = saved.get('multi_charts', {})
-        raw_multi = raw_multi if isinstance(raw_multi, dict) else {}
-        current['multi_charts'] = {
-            'custom_symbols': _normalize_unique_symbol_list(raw_multi.get('custom_symbols', [])),
-            'order': _normalize_unique_symbol_list(raw_multi.get('order', [])),
-        }
+        current['multi_charts'] = _normalize_multi_charts_settings(saved.get('multi_charts'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
     if 'time_12h' in saved:
@@ -858,6 +879,72 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
     auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
     return {'symbol': symbol, 'timeframe_label': timeframe_label, 'watchlist': watchlist, 'indicators': indicators, 'auto': auto_enabled}
+
+
+def _normalize_stocks_page_settings(settings: Any) -> Any:
+    """Normalize persisted state for the Stocks page."""
+    saved = settings if isinstance(settings, dict) else {}
+    symbol = str(saved.get('symbol', DEFAULT_STOCKS_PAGE_SETTINGS['symbol']) or DEFAULT_STOCKS_PAGE_SETTINGS['symbol']).upper().strip()
+    auto_value = saved.get('auto', DEFAULT_STOCKS_PAGE_SETTINGS['auto'])
+    auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_STOCKS_PAGE_SETTINGS['auto']
+    mfi_value = saved.get('mfi_enabled', DEFAULT_STOCKS_PAGE_SETTINGS['mfi_enabled'])
+    mfi_enabled = bool(mfi_value) if isinstance(mfi_value, bool | int) else DEFAULT_STOCKS_PAGE_SETTINGS['mfi_enabled']
+    raw_main_splitter = saved.get('main_splitter_sizes', DEFAULT_STOCKS_PAGE_SETTINGS['main_splitter_sizes'])
+    main_splitter_sizes = []
+    if isinstance(raw_main_splitter, list):
+        for value in raw_main_splitter[:3]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                main_splitter_sizes.append(size)
+    if len(main_splitter_sizes) != 3:
+        main_splitter_sizes = list(DEFAULT_STOCKS_PAGE_SETTINGS['main_splitter_sizes'])
+
+    raw_left_splitter = saved.get('left_splitter_sizes', DEFAULT_STOCKS_PAGE_SETTINGS['left_splitter_sizes'])
+    left_splitter_sizes = []
+    if isinstance(raw_left_splitter, list):
+        for value in raw_left_splitter[:3]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                left_splitter_sizes.append(size)
+    if len(left_splitter_sizes) != 3:
+        left_splitter_sizes = list(DEFAULT_STOCKS_PAGE_SETTINGS['left_splitter_sizes'])
+
+    raw_middle_splitter = saved.get('middle_splitter_sizes', DEFAULT_STOCKS_PAGE_SETTINGS['middle_splitter_sizes'])
+    middle_splitter_sizes = []
+    if isinstance(raw_middle_splitter, list):
+        for value in raw_middle_splitter[:2]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                middle_splitter_sizes.append(size)
+    if len(middle_splitter_sizes) != 2:
+        middle_splitter_sizes = list(DEFAULT_STOCKS_PAGE_SETTINGS['middle_splitter_sizes'])
+
+    return {
+        'symbol': symbol or DEFAULT_STOCKS_PAGE_SETTINGS['symbol'],
+        'auto': auto_enabled,
+        'mfi_enabled': mfi_enabled,
+        'main_splitter_sizes': main_splitter_sizes,
+        'left_splitter_sizes': left_splitter_sizes,
+        'middle_splitter_sizes': middle_splitter_sizes,
+    }
+
+
+def _normalize_multi_charts_settings(settings: Any) -> Any:
+    """Normalize persisted state for the Multi Charts page."""
+    saved = settings if isinstance(settings, dict) else {}
+    return {
+        'custom_symbols': _normalize_unique_symbol_list(saved.get('custom_symbols', DEFAULT_MULTI_CHARTS_SETTINGS['custom_symbols'])),
+        'order': _normalize_unique_symbol_list(saved.get('order', DEFAULT_MULTI_CHARTS_SETTINGS['order'])),
+    }
 
 
 def _normalize_dashboard_chart_settings(settings: Any) -> Any:
@@ -994,26 +1081,31 @@ def save_dashboard_chart_settings(settings: Any) -> Any:
     return state
 
 
+def load_stocks_page_settings() -> Any:
+    """Load persisted state for the Stocks page."""
+    config = load_app_config()
+    return _normalize_stocks_page_settings(config.get('stocks_page', {}))
+
+
+def save_stocks_page_settings(settings: Any) -> Any:
+    """Persist state for the Stocks page."""
+    current = load_app_config()
+    state = _normalize_stocks_page_settings(settings)
+    current['stocks_page'] = state
+    save_app_config(current)
+    return state
+
+
 def load_multi_charts_settings() -> Any:
     """Load persisted state for the Multi Charts page."""
     config = load_app_config()
-    saved = config.get('multi_charts', {})
-    if not isinstance(saved, dict):
-        saved = {}
-    return {
-        'custom_symbols': _normalize_unique_symbol_list(saved.get('custom_symbols', [])),
-        'order': _normalize_unique_symbol_list(saved.get('order', [])),
-    }
+    return _normalize_multi_charts_settings(config.get('multi_charts', {}))
 
 
 def save_multi_charts_settings(settings: Any) -> None:
     """Persist state for the Multi Charts page."""
     current = load_app_config()
-    payload = settings if isinstance(settings, dict) else {}
-    current['multi_charts'] = {
-        'custom_symbols': _normalize_unique_symbol_list(payload.get('custom_symbols', [])),
-        'order': _normalize_unique_symbol_list(payload.get('order', [])),
-    }
+    current['multi_charts'] = _normalize_multi_charts_settings(settings)
     save_app_config(current)
 
 

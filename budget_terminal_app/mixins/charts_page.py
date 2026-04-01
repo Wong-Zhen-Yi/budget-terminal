@@ -16,9 +16,50 @@ P10_TIMEFRAME_OPTIONS = [
 P10_AUTO_ANCHOR = 0.85
 P10_DEFAULT_STARTUP_SPAN = 80.0
 P10_MIN_REUSABLE_SPAN = 10.0
+P10_CACHE_PERIOD_DAY_MAP = {
+    'd': 1.0,
+    'wk': 7.0,
+    'mo': 30.0,
+    'y': 365.0,
+}
 
 
 class ChartsPageMixin:
+
+    def _chart_required_span_days(self, period: Any) -> float | None:
+        """Convert one yfinance period string into approximate calendar days."""
+        text = str(period or '').strip().lower()
+        if not text:
+            return None
+        if text == 'max':
+            return None
+        for suffix, multiplier in P10_CACHE_PERIOD_DAY_MAP.items():
+            if text.endswith(suffix):
+                number_text = text[:-len(suffix)].strip()
+                try:
+                    return float(number_text) * multiplier
+                except Exception:
+                    return None
+        return None
+
+    def _chart_cache_covers_period(self, df: Any, period: Any) -> bool:
+        """Return whether one cached OHLCV frame is long enough for the requested period."""
+        if df is None or getattr(df, 'empty', True):
+            return False
+        required_days = self._chart_required_span_days(period)
+        if required_days is None:
+            return True
+        try:
+            index = pd.DatetimeIndex(pd.to_datetime(df.index))
+        except Exception:
+            return False
+        if len(index) < 2:
+            return False
+        if getattr(index, 'tz', None) is not None:
+            index = index.tz_localize(None)
+        coverage_days = max(0.0, (index.max() - index.min()).total_seconds() / 86400.0)
+        min_acceptable_days = max(required_days - 45.0, required_days * 0.85)
+        return coverage_days >= min_acceptable_days
 
     def _p10_normalize_datetime_index(self, values: Any) -> Any:
         """Normalize chart timestamps for safe asof merges across pandas resolutions."""
@@ -547,12 +588,11 @@ class ChartsPageMixin:
                 self._invoke_main.emit(lambda err=str(exc), req=request_id: self._p10_handle_chart_error(req, err))
         threading.Thread(target=_run, daemon=True).start()
 
-    def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any) -> Any:
-        """Fetch a single chart dataset plus summary stats."""
-        period, interval = self._p10_timeframe_map.get(timeframe_label, self._p10_timeframe_map['1 Day'])
+    def _chart_fetch_payload(self, symbol: Any, *, period: Any, interval: Any, timeframe_label: Any, include_rsi: bool=True, include_ma200: bool=True) -> Any:
+        """Fetch and normalize a single-chart dataset for any page."""
         cache = self._get_cache_manager()
         df = cache.get_data(symbol, interval)
-        if df is None or df.empty:
+        if (df is None or df.empty) or (interval in ('1d', '1wk', '1mo') and (not self._chart_cache_covers_period(df, period))):
             df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
             if df is not None and not df.empty and interval in ('1d', '1wk', '1mo'):
                 cache.save_data(symbol, interval, df)
@@ -578,7 +618,8 @@ class ChartsPageMixin:
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
         if df.empty:
             raise ValueError(f'Incomplete chart data returned for {symbol}.')
-        ma200_series = self._p10_fetch_daily_ma200(symbol, df)
+        ma200_series = self._p10_fetch_daily_ma200(symbol, df) if include_ma200 else None
+        rsi_series = self._p10_calculate_rsi(df['Close']) if include_rsi else None
         latest = df.iloc[-1]
         prev_close = float(df['Close'].iloc[-2]) if len(df) > 1 else float(latest['Close'])
         last_close = float(latest['Close'])
@@ -595,12 +636,25 @@ class ChartsPageMixin:
                 'high': float(latest['High']),
                 'low': float(latest['Low']),
                 'close': last_close,
+                'volume': float(latest.get('Volume', 0.0) or 0.0),
                 'change_value': change_value,
                 'change_pct': change_pct,
             },
-            'rsi': self._p10_calculate_rsi(df['Close']),
+            'rsi': rsi_series,
             'ma200': ma200_series,
         }
+
+    def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any) -> Any:
+        """Fetch a single chart dataset plus summary stats."""
+        period, interval = self._p10_timeframe_map.get(timeframe_label, self._p10_timeframe_map['1 Day'])
+        return self._chart_fetch_payload(
+            symbol,
+            period=period,
+            interval=interval,
+            timeframe_label=timeframe_label,
+            include_rsi=True,
+            include_ma200=True,
+        )
 
     def _p10_calculate_rsi(self, close_series: Any, period: Any=14) -> Any:
         """Calculate an RSI series from closing prices."""

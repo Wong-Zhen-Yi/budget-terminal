@@ -50,6 +50,8 @@ class WindowSetupMixin:
         self.btn_page10.setCheckable(True)
         self.btn_page11 = QPushButton('Multi Charts')
         self.btn_page11.setCheckable(True)
+        self.btn_page12 = QPushButton('Stocks')
+        self.btn_page12.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
             self.btn_page4,
@@ -57,9 +59,10 @@ class WindowSetupMixin:
             self.btn_page7,
             self.btn_page3,
             self.btn_page8,
+            self.btn_page12,
+            self.btn_page2,
             self.btn_page10,
             self.btn_page11,
-            self.btn_page2,
             self.btn_page5,
             self.btn_page13,
             self.btn_page14,
@@ -483,17 +486,20 @@ class WindowSetupMixin:
         self.page8 = QWidget()
         self.stacked_widget.addWidget(self.page8)
         self.init_page8()
+        self.page12 = QWidget()
+        self.stacked_widget.addWidget(self.page12)
+        self.init_page12()
+        self.page2 = QWidget()
+        self.stacked_widget.addWidget(self.page2)
+        page2_layout = QVBoxLayout(self.page2)
+        page2_layout.setContentsMargins(10, 10, 10, 10)
+        self.init_page2(page2_layout)
         self.page10 = QWidget()
         self.stacked_widget.addWidget(self.page10)
         self.init_page10()
         self.page11 = QWidget()
         self.stacked_widget.addWidget(self.page11)
         self.init_page11()
-        self.page2 = QWidget()
-        self.stacked_widget.addWidget(self.page2)
-        page2_layout = QVBoxLayout(self.page2)
-        page2_layout.setContentsMargins(10, 10, 10, 10)
-        self.init_page2(page2_layout)
         self.page5 = QWidget()
         self.stacked_widget.addWidget(self.page5)
         self.init_page5()
