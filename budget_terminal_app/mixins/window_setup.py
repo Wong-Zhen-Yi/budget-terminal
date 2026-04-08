@@ -44,6 +44,10 @@ class WindowSetupMixin:
         self.btn_page8.setCheckable(True)
         self.btn_page15 = QPushButton('Politics')
         self.btn_page15.setCheckable(True)
+        self.btn_page16 = QPushButton('YouTube')
+        self.btn_page16.setCheckable(True)
+        self.btn_page17 = QPushButton('Notes')
+        self.btn_page17.setCheckable(True)
         self.btn_page9 = QPushButton('Settings')
         self.btn_page9.setCheckable(True)
         self.btn_page10 = QPushButton('Charts')
@@ -67,6 +71,8 @@ class WindowSetupMixin:
             self.btn_page13,
             self.btn_page14,
             self.btn_page15,
+            self.btn_page16,
+            self.btn_page17,
             self.btn_page9,
         ]
         refresh_btn = QPushButton('Refresh')
@@ -512,6 +518,12 @@ class WindowSetupMixin:
         self.page15 = QWidget()
         self.stacked_widget.addWidget(self.page15)
         self.init_page15()
+        self.page16 = QWidget()
+        self.stacked_widget.addWidget(self.page16)
+        self.init_page16()
+        self.page17 = QWidget()
+        self.stacked_widget.addWidget(self.page17)
+        self.init_page17()
         self.page9 = QWidget()
         self.stacked_widget.addWidget(self.page9)
         self.init_page9()

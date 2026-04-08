@@ -5,6 +5,21 @@ from ..compat import *
 
 class NewsMixin:
 
+    def _set_news_summary_idle_state(self, total_headlines: int = 0) -> None:
+        """Reset the summary pane to the built-in rule-based state."""
+        if getattr(self, '_p3_summarizing', False):
+            return
+        if total_headlines > 0:
+            self.p3_summary_text.setPlainText(
+                f"Loaded {total_headlines} headlines.\n\n"
+                'The built-in news briefing refreshes automatically after news updates.\n'
+                "Press 'Generate Briefing' to rerun the full digest, or select a headline row for a single-item summary.\n\n"
+                'This summary uses headline wording only and does not inspect article bodies.'
+            )
+        else:
+            self.p3_summary_text.setPlainText('No news loaded yet.')
+        self.p3_summary_status.setText('')
+
     def _sort_articles_by_newest(self, articles: Any) -> Any:
         """Return newest articles first."""
         return sorted(articles, key=lambda article: article.get('_ts', 0), reverse=True)
@@ -28,6 +43,8 @@ class NewsMixin:
     def init_page3(self) -> None:
         """Build the News Hub page UI."""
         self._p3_loaded_news = {'portfolio': [], 'macro': []}
+        self._p3_pending_summary_articles = None
+        self._p3_pending_summary_auto = False
         layout = QVBoxLayout(self.page3)
         layout.setContentsMargins(10, 10, 10, 4)
         layout.setSpacing(6)
@@ -57,7 +74,10 @@ class NewsMixin:
         self.p3_summary_text = QTextEdit()
         self.p3_summary_text.setReadOnly(True)
         self.p3_summary_text.setStyleSheet('font-size: 12px; padding: 6px;')
-        self.p3_summary_text.setPlaceholderText("Click a headline to analyze it, or press 'Generate Briefing' for a full summary.")
+        self.p3_summary_text.setPlaceholderText(
+            "The built-in news briefing refreshes automatically after news updates. "
+            "Select a headline row to summarize one item, or press 'Generate Briefing' to rerun the full digest."
+        )
         summarizer_layout.addWidget(self.p3_summary_text, 1)
         self.p3_summary_status = QLabel('')
         self.set_theme_role(self.p3_summary_status, 'status_muted')
@@ -78,44 +98,10 @@ class NewsMixin:
         panels_row.addWidget(summarizer_box, 1)
         layout.addLayout(panels_row, 1)
 
-        crawler_container = QWidget()
-        crawler_container.setFixedHeight(28)
-        crawler_container.setStyleSheet(f'background-color: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px;')
-        crawler_container.setMinimumWidth(0)
-        crawler_outer = QHBoxLayout(crawler_container)
-        crawler_outer.setContentsMargins(0, 0, 0, 0)
-        self.p3_crawler_scroll = QScrollArea()
-        self.p3_crawler_scroll.setFixedHeight(28)
-        self.p3_crawler_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.p3_crawler_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.p3_crawler_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.p3_crawler_scroll.setStyleSheet(f'background-color: {self.theme_color("panel_background")};')
-        self.p3_crawler_label = QLabel('  Waiting for news...  ')
-        self.p3_crawler_label.setStyleSheet(f'color: {self.theme_color("warning")}; background-color: {self.theme_color("panel_background")}; font-family: monospace; font-weight: bold; font-size: 13px;')
-        self.p3_crawler_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.p3_crawler_label.adjustSize()
-        self.p3_crawler_scroll.setWidget(self.p3_crawler_label)
-        crawler_outer.addWidget(self.p3_crawler_scroll)
-        layout.addWidget(crawler_container)
-        self._crawler_offset = 0
-        self.p3_crawler_timer = QTimer()
-        self.p3_crawler_timer.timeout.connect(self._scroll_crawler)
-
     def _apply_news_theme(self) -> None:
         """Refresh theme-dependent news page widgets."""
         if hasattr(self, 'p3_summary_status'):
             self.set_status_text(self.p3_summary_status, self.p3_summary_status.text(), status=self.p3_summary_status.property('bt_status') or 'muted')
-
-    def _scroll_crawler(self) -> None:
-        """Handle scroll crawler."""
-        label_w = self.p3_crawler_label.sizeHint().width()
-        viewport_w = self.p3_crawler_scroll.viewport().width()
-        if label_w <= 0:
-            return
-        self._crawler_offset += 2
-        if self._crawler_offset > label_w:
-            self._crawler_offset = -viewport_w
-        self.p3_crawler_scroll.horizontalScrollBar().setValue(int(self._crawler_offset))
 
     def _open_news_link_table(self, item: Any, table: Any) -> None:
         """Handle open news link table."""
@@ -152,10 +138,10 @@ class NewsMixin:
         if not articles:
             self.p3_summary_text.setPlainText('No news loaded yet.')
             return
-        self._run_summarizer(articles)
+        self._run_summarizer(articles, auto_trigger=False)
 
     def _p3_export_news(self) -> None:
-        """Export all loaded news to clipboard as plain text for LLM consumption."""
+        """Export all loaded news to clipboard as plain text."""
         portfolio_articles = self._p3_loaded_news.get('portfolio', [])
         macro_articles = self._p3_loaded_news.get('macro', [])
         if not portfolio_articles and not macro_articles:
@@ -209,30 +195,64 @@ class NewsMixin:
         QApplication.clipboard().setText(text)
         self.p3_summary_status.setText(f'Exported {total} articles to clipboard')
 
-    def _run_summarizer(self, articles: Any) -> None:
+    def _run_summarizer(self, articles: Any, auto_trigger: bool=False) -> None:
         """Handle run summarizer."""
         if self._p3_summarizing:
+            self._p3_pending_summary_articles = [dict(article) for article in articles]
+            self._p3_pending_summary_auto = bool(auto_trigger)
             return
+        self._p3_pending_summary_articles = None
+        self._p3_pending_summary_auto = False
         self._p3_summarizing = True
-        label = articles[0]['title'][:55] + '...' if len(articles) == 1 else f'{len(articles)} articles'
-        self.p3_summary_status.setText(f'Analyzing: {label}')
-        self.p3_summary_text.setPlainText('Analyzing headlines...')
+        if len(articles) == 1:
+            label = articles[0]['title'][:55] + '...'
+            body = (
+                'Analyzing the selected headline with the built-in news rules...\n\n'
+                'This summary uses headline wording, source, time, ticker, and category only.'
+            )
+            status_text = f'Analyzing selected headline: {label}'
+        else:
+            label = 'auto briefing refresh' if auto_trigger else 'full briefing'
+            body = (
+                'Analyzing loaded headlines with the built-in news briefing rules...\n\n'
+                'The digest is deterministic and uses headline wording only.'
+            )
+            status_text = 'Refreshing full news briefing...' if auto_trigger else 'Generating full news briefing...'
+        self.p3_summary_status.setText(status_text)
+        self.p3_summary_text.setPlainText(body)
         self._summarizer_worker = NewsSummarizerWorker(articles)
+        self._summarizer_worker.status.connect(self._on_summary_status)
         self._summarizer_worker.finished.connect(self._on_summary_ready)
         self._summarizer_worker.error.connect(self._on_summary_error)
         threading.Thread(target=self._summarizer_worker.run, daemon=True).start()
+
+    def _on_summary_status(self, text: Any) -> None:
+        """Reflect local-model download and generation progress in the UI."""
+        self.p3_summary_status.setText(str(text or '').strip())
 
     def _on_summary_ready(self, text: Any) -> None:
         """Handle summary ready."""
         self._p3_summarizing = False
         self.p3_summary_text.setPlainText(text)
         self.p3_summary_status.setText('')
+        self._run_pending_summary()
 
     def _on_summary_error(self, err: Any) -> None:
         """Handle summary error."""
         self._p3_summarizing = False
         self.p3_summary_text.setPlainText(f'Error: {err}')
-        self.p3_summary_status.setText('Summary failed.')
+        self.p3_summary_status.setText('News briefing failed.')
+        self._run_pending_summary()
+
+    def _run_pending_summary(self) -> None:
+        """Run one queued summary request after the current one finishes."""
+        if self._p3_summarizing or not self._p3_pending_summary_articles:
+            return
+        articles = list(self._p3_pending_summary_articles)
+        auto_trigger = bool(self._p3_pending_summary_auto)
+        self._p3_pending_summary_articles = None
+        self._p3_pending_summary_auto = False
+        self._run_summarizer(articles, auto_trigger=auto_trigger)
 
     def _populate_news_table(self, table: Any, articles: Any) -> None:
         """Handle populate news table."""
@@ -271,10 +291,7 @@ class NewsMixin:
         self._p3_loaded_news = {'portfolio': [dict(a) for a in portfolio_news], 'macro': [dict(a) for a in macro_news]}
         self._populate_news_table(self.p3_portfolio_table, portfolio_news)
         self._populate_news_table(self.p3_macro_table, macro_news)
-        all_headlines = '   |   '.join((a['title'] for a in news if a.get('title')))
-        self.p3_crawler_label.setText('  ' + all_headlines + '  ')
-        self.p3_crawler_label.adjustSize()
-        self._crawler_offset = 0
-        if not self._news_auto_summarized and news:
-            self._news_auto_summarized = True
-            QTimer.singleShot(300, self._summarize_all_news)
+        if news:
+            self._run_summarizer(news, auto_trigger=True)
+        else:
+            self._set_news_summary_idle_state(0)

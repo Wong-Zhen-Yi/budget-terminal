@@ -320,6 +320,17 @@ class PortfolioSetupMixin:
         """Refresh page-4 table widths when the Portfolio tab becomes visible."""
         self._p4_apply_portfolio_table_widths()
 
+    def _p4_on_content_tab_changed(self, index: int) -> None:
+        """Refresh the visible Portfolio sub-tab after a tab switch."""
+        if not hasattr(self, 'p4_content_tabs'):
+            return
+        widget = self.p4_content_tabs.widget(index)
+        if widget is getattr(self, 'p4_positions_page', None):
+            QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
+            return
+        if widget is getattr(self, 'p4_momentum_page', None) and hasattr(self, '_p4_refresh_active_momentum_view'):
+            QTimer.singleShot(0, self._p4_refresh_active_momentum_view)
+
     def _p4_try_call_runtime(self, names: Any, *args: Any) -> bool:
         """Call the first runtime helper that exists."""
         for name in names:
@@ -354,6 +365,8 @@ class PortfolioSetupMixin:
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
             self._p4_apply_table_width_preferences('stock')
+            if hasattr(self, '_p4_refresh_active_momentum_view'):
+                self._p4_refresh_active_momentum_view()
 
     def _p4_rename_active_portfolio(self) -> None:
         """Prompt the user to rename the selected portfolio slot."""
@@ -499,6 +512,9 @@ class PortfolioSetupMixin:
         selector_bar.addWidget(self.p4_set_main_btn)
         selector_bar.addWidget(self.p4_main_portfolio_label)
         layout.addLayout(selector_bar)
+        self.p4_content_tabs = QTabWidget()
+        self.p4_content_tabs.setDocumentMode(True)
+        self.p4_content_tabs.currentChanged.connect(self._p4_on_content_tab_changed)
         self.p4_main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.p4_main_splitter.setHandleWidth(6)
         self.p4_main_splitter.setChildrenCollapsible(False)
@@ -572,6 +588,38 @@ class PortfolioSetupMixin:
             tab_layout.addWidget(chart)
             self.p4_returns_tabs.addTab(tab, tab_label)
         self.p4_returns_tabs.currentChanged.connect(self._on_returns_timeframe_changed)
+        self.p4_momentum_tabs = QTabWidget()
+        self.p4_momentum_tabs.setDocumentMode(True)
+        self.p4_momentum_timeframes = [('1mo', '1 Month'), ('ytd', 'YTD'), ('1y', '1Y')]
+        self.p4_momentum_axes = {}
+        self.p4_momentum_charts = {}
+        for timeframe_key, tab_label in self.p4_momentum_timeframes:
+            axis = DateAxisItem(orientation='bottom')
+            chart = pg.PlotWidget(axisItems={'bottom': axis})
+            chart.getPlotItem().setMenuEnabled(False)
+            chart.getPlotItem().hideButtons()
+            chart.getPlotItem().hideAxis('left')
+            chart.getPlotItem().showAxis('right')
+            chart.setMouseEnabled(x=False, y=False)
+            self.p4_momentum_axes[timeframe_key] = axis
+            self.p4_momentum_charts[timeframe_key] = chart
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.setContentsMargins(4, 4, 4, 4)
+            tab_layout.setSpacing(0)
+            tab_layout.addWidget(chart)
+            self.p4_momentum_tabs.addTab(tab, tab_label)
+        self.p4_momentum_tabs.currentChanged.connect(self._on_momentum_timeframe_changed)
+        self.p4_momentum_summary_label = QLabel('No positive-share positions to project.')
+        self.set_theme_role(self.p4_momentum_summary_label, 'muted')
+        self.p4_momentum_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.p4_momentum_summary_label.setWordWrap(True)
+        momentum_container = QWidget()
+        momentum_layout = QVBoxLayout(momentum_container)
+        momentum_layout.setContentsMargins(8, 8, 8, 8)
+        momentum_layout.setSpacing(6)
+        momentum_layout.addWidget(self.p4_momentum_tabs, 1)
+        momentum_layout.addWidget(self.p4_momentum_summary_label)
         weight_label = QLabel('Portfolio Weight')
         self.set_theme_role(weight_label, 'card_title')
         weight_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -606,7 +654,19 @@ class PortfolioSetupMixin:
         self.p4_main_splitter.setStretchFactor(0, 3)
         self.p4_main_splitter.setStretchFactor(1, 1)
         self.p4_main_splitter.splitterMoved.connect(self._p4_apply_portfolio_table_widths)
-        layout.addWidget(self.p4_main_splitter, 1)
+        self.p4_positions_page = QWidget()
+        positions_layout = QVBoxLayout(self.p4_positions_page)
+        positions_layout.setContentsMargins(0, 0, 0, 0)
+        positions_layout.setSpacing(0)
+        positions_layout.addWidget(self.p4_main_splitter)
+        self.p4_momentum_page = QWidget()
+        momentum_page_layout = QVBoxLayout(self.p4_momentum_page)
+        momentum_page_layout.setContentsMargins(0, 0, 0, 0)
+        momentum_page_layout.setSpacing(0)
+        momentum_page_layout.addWidget(momentum_container)
+        self.p4_content_tabs.addTab(self.p4_positions_page, 'Positions')
+        self.p4_content_tabs.addTab(self.p4_momentum_page, 'Momentum Tracker')
+        layout.addWidget(self.p4_content_tabs, 1)
         QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
         self._p4_refresh_portfolio_selector()
 
@@ -623,6 +683,8 @@ class PortfolioSetupMixin:
                     tracker_data[ticker] = {'shares': 0, 'avg_price': 0}
                 if hasattr(self, '_p4_invalidate_returns_cache'):
                     self._p4_invalidate_returns_cache(self.active_portfolio_id)
+                if hasattr(self, '_p4_invalidate_momentum_cache'):
+                    self._p4_invalidate_momentum_cache(self.active_portfolio_id)
                 self._persist_all_portfolios()
                 self.refresh_data()
 
@@ -706,6 +768,8 @@ class PortfolioSetupMixin:
     def _apply_portfolio_theme(self) -> None:
         """Refresh portfolio-page plot colors after a theme change."""
         for chart in getattr(self, 'p4_returns_charts', {}).values():
+            self.style_plot_widget(chart)
+        for chart in getattr(self, 'p4_momentum_charts', {}).values():
             self.style_plot_widget(chart)
         if hasattr(self, 'p4_weight_chart'):
             self.style_plot_widget(self.p4_weight_chart)

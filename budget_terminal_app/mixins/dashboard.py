@@ -825,6 +825,10 @@ class DashboardMixin:
             self.tickers.remove(t)
             if t in self.tracker_data:
                 del self.tracker_data[t]
+            if hasattr(self, '_p4_invalidate_returns_cache'):
+                self._p4_invalidate_returns_cache(self.main_portfolio_id)
+            if hasattr(self, '_p4_invalidate_momentum_cache'):
+                self._p4_invalidate_momentum_cache(self.main_portfolio_id)
             self._update_main_portfolio_entry()
             self._persist_all_portfolios()
             if self.last_data and 'portfolio' in self.last_data:
@@ -836,6 +840,8 @@ class DashboardMixin:
             else:
                 self.repopulate_portfolio()
                 self.p4_table.setRowCount(len(getattr(self, 'active_tickers', self.tickers)))
+                if self.active_portfolio_id == self.main_portfolio_id and hasattr(self, '_p4_refresh_active_momentum_view'):
+                    self._p4_refresh_active_momentum_view()
             if self.active_portfolio_id == self.main_portfolio_id and getattr(self, 'last_data', None):
                 self.update_page4(self.last_data)
             logger.info('Removed ticker %s', t)

@@ -17,6 +17,8 @@ datas = collect_data_files('budget_terminal_app', includes=['assets/*.png'])
 datas += collect_data_files('tzdata')
 
 hiddenimports = collect_submodules('yfinance')
+hiddenimports += collect_submodules('pandas_market_calendars')
+hiddenimports += collect_submodules('exchange_calendars')
 
 a = Analysis(
     ['budget_terminal.py'],

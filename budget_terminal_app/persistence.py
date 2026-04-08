@@ -1,10 +1,13 @@
 from __future__ import annotations
+import base64
+import html
+import shutil
 from typing import Any
 from .dependencies import *
 from .paths import legacy_documents_user_data_path, user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
-USER_DATA_BACKUP_VERSION = 3
+USER_DATA_BACKUP_VERSION = 7
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
@@ -20,12 +23,29 @@ DEFAULT_STOCKS_PAGE_SETTINGS = {
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
+DEFAULT_GROK_SETTINGS = {
+    'provider': 'xai',
+    'xai_model': 'grok-4.20-reasoning',
+    'openai_model': 'gpt-5-mini',
+    'web_search': False,
+    'x_search': False,
+}
+DEFAULT_NOTES = []
+NOTE_CATEGORIES = ('General', 'Observations', 'Trade Ideas')
+NOTES_BACKUP_VERSION = 1
 MAX_PORTFOLIOS = 5
 MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
 SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'],)
+CHAT_PROVIDER_CHOICES = ('xai', 'openai')
+GROK_MODEL_CHOICES = ('grok-4.20-reasoning', 'grok-4', 'grok-4-latest')
+OPENAI_MODEL_CHOICES = ('gpt-5-mini', 'gpt-5', 'gpt-4.1', 'gpt-4.1-mini')
+GROK_KEYRING_SERVICE = 'BudgetTerminal.Grok'
+GROK_KEYRING_ACCOUNT = 'xai_api_key'
+OPENAI_KEYRING_SERVICE = 'BudgetTerminal.OpenAI'
+OPENAI_KEYRING_ACCOUNT = 'openai_api_key'
 
 
 def _read_json(path: Any, default: Any) -> Any:
@@ -95,6 +115,24 @@ def _normalize_theme_setting(value: Any) -> Any:
     """Clamp persisted theme ids to the currently supported user-selectable set."""
     text = str(value or '').strip()
     return text if text in SUPPORTED_THEME_IDS else DEFAULT_THEME_SETTINGS['selected_theme']
+
+
+def _normalize_grok_model(value: Any) -> Any:
+    """Normalize persisted Grok model ids while still allowing manual custom entries."""
+    text = str(value or '').strip()
+    return text or DEFAULT_GROK_SETTINGS['xai_model']
+
+
+def _normalize_openai_model(value: Any) -> Any:
+    """Normalize persisted OpenAI model ids while still allowing manual custom entries."""
+    text = str(value or '').strip()
+    return text or DEFAULT_GROK_SETTINGS['openai_model']
+
+
+def _normalize_chat_provider(value: Any) -> Any:
+    """Normalize the saved chat provider id."""
+    text = str(value or '').strip().lower()
+    return text if text in CHAT_PROVIDER_CHOICES else DEFAULT_GROK_SETTINGS['provider']
 
 
 def _normalize_unique_symbol_list(values: Any) -> Any:
@@ -428,6 +466,89 @@ def _normalize_options_chain_payload(settings: Any) -> Any:
         rate_value = DEFAULT_OPTIONS_CHAIN_SETTINGS['default_risk_free_rate']
     return {'default_risk_free_rate': min(max(rate_value, 0.0), 1.0)}
 
+
+def _normalize_grok_payload(settings: Any) -> Any:
+    """Normalize persisted non-secret Grok page settings."""
+    saved = settings if isinstance(settings, dict) else {}
+    legacy_model = saved.get('model', DEFAULT_GROK_SETTINGS['xai_model'])
+    return {
+        'provider': _normalize_chat_provider(saved.get('provider', DEFAULT_GROK_SETTINGS['provider'])),
+        'xai_model': _normalize_grok_model(saved.get('xai_model', legacy_model)),
+        'openai_model': _normalize_openai_model(saved.get('openai_model', DEFAULT_GROK_SETTINGS['openai_model'])),
+        'web_search': bool(saved.get('web_search', DEFAULT_GROK_SETTINGS['web_search'])),
+        'x_search': bool(saved.get('x_search', DEFAULT_GROK_SETTINGS['x_search'])),
+    }
+
+
+def _normalize_note_category(value: Any) -> str:
+    """Clamp note categories to the supported fixed set."""
+    text = str(value or '').strip()
+    for category in NOTE_CATEGORIES:
+        if text.casefold() == category.casefold():
+            return category
+    return NOTE_CATEGORIES[0]
+
+
+def _normalize_note_images(images: Any) -> list[dict[str, str]]:
+    """Normalize persisted note attachments into a compact list."""
+    normalized = []
+    if not isinstance(images, list):
+        return normalized
+    for image in images:
+        entry = image if isinstance(image, dict) else {'path': image}
+        path_text = str(entry.get('path', '') or '').strip().replace('\\', '/')
+        if not path_text:
+            continue
+        image_id = str(entry.get('id', '') or '').strip() or path_text
+        name = str(entry.get('name', '') or Path(path_text).name).strip() or Path(path_text).name
+        normalized.append({'id': image_id, 'name': name, 'path': path_text})
+    return normalized
+
+
+def _normalize_notes_payload(notes: Any) -> list[dict[str, Any]]:
+    """Normalize persisted notes into the canonical list shape."""
+    normalized = []
+    if not isinstance(notes, list):
+        return normalized
+    seen_ids = set()
+    for index, note in enumerate(notes):
+        if not isinstance(note, dict):
+            continue
+        note_id = str(note.get('id', '') or '').strip() or f'note_{index + 1}'
+        if note_id in seen_ids:
+            continue
+        seen_ids.add(note_id)
+        created_at = str(note.get('created_at', '') or '').strip()
+        updated_at = str(note.get('updated_at', '') or '').strip() or created_at
+        normalized.append({
+            'id': note_id,
+            'title': str(note.get('title', '') or ''),
+            'body': str(note.get('body', '') or ''),
+            'category': _normalize_note_category(note.get('category')),
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'images': _normalize_note_images(note.get('images', [])),
+        })
+    return normalized
+
+
+def _notes_image_directory() -> Any:
+    """Return the on-disk directory that stores copied note images."""
+    return user_data_path('notes_images')
+
+
+def _cleanup_orphaned_note_images(notes: Any) -> None:
+    """Remove copied note-image folders that are no longer referenced by saved notes."""
+    root = Path(_notes_image_directory())
+    if not root.exists():
+        return
+    valid_note_ids = {str(note.get('id', '') or '').strip() for note in notes if isinstance(note, dict)}
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        if child.name not in valid_note_ids:
+            shutil.rmtree(child, ignore_errors=True)
+
 def fmt_num(val: Any) -> Any:
     """Format large numbers with B/M/K suffix."""
     if val is None:
@@ -467,17 +588,20 @@ def _default_user_data_document() -> Any:
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
+        'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'grok': DEFAULT_GROK_SETTINGS.copy(),
         'time_12h': False,
     }
 
 
-def _normalize_user_data_document(payload: Any) -> Any:
+def _normalize_user_data_document(payload: Any, *, existing_notes: Any=None) -> Any:
     """Normalize persisted single-file user data into the canonical shape."""
     default = _default_user_data_document()
     saved = payload if isinstance(payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
+    notes_fallback = existing_notes if existing_notes is not None else default['notes']
     return {
         'version': USER_DATA_BACKUP_VERSION,
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
@@ -489,8 +613,10 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
+        'notes': _normalize_notes_payload(saved.get('notes', notes_fallback)),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
+        'grok': _normalize_grok_payload(saved.get('grok', default['grok'])),
         'time_12h': bool(saved.get('time_12h', False)),
     }
 
@@ -530,6 +656,7 @@ def _save_user_data_document(data: Any) -> Any:
     """Persist the normalized single-file user-data document to LocalAppData."""
     normalized = _normalize_user_data_document(data)
     _write_json(USER_DATA_FILE, normalized, indent=2)
+    _cleanup_orphaned_note_images(normalized.get('notes', []))
     return normalized
 
 
@@ -623,9 +750,502 @@ def save_networth_data(data: Any) -> None:
     _save_user_data_document(document)
 
 
-def build_user_data_backup() -> Any:
+def load_notes_data() -> Any:
+    """Load persisted notes."""
+    return _normalize_notes_payload(_load_user_data_document().get('notes', []))
+
+
+def save_notes_data(data: Any) -> Any:
+    """Persist notes and return the normalized saved list."""
+    document = _load_user_data_document()
+    document['notes'] = _normalize_notes_payload(data)
+    saved = _save_user_data_document(document)
+    return list(saved.get('notes', []))
+
+
+def _validate_notes_backup_payload(payload: Any) -> Any:
+    """Validate imported notes-backup data and return the original payload."""
+    if not isinstance(payload, dict):
+        raise ValueError('Notes backup file must contain a JSON object.')
+    if not isinstance(payload.get('notes'), list):
+        raise ValueError('Notes backup file must include a notes list.')
+    return payload
+
+
+def build_notes_backup() -> Any:
+    """Build a standalone notes backup payload with embedded image bytes."""
+    exported_notes = []
+    for note in load_notes_data():
+        images = []
+        for image in _normalize_note_images(note.get('images', [])):
+            relative_path = str(image.get('path', '') or '').strip().replace('\\', '/')
+            if not relative_path:
+                continue
+            image_path = Path(user_data_path(*Path(relative_path).parts))
+            if not image_path.exists() or not image_path.is_file():
+                logger.warning('Skipping missing note image during notes export: %s', image_path)
+                continue
+            try:
+                raw_bytes = image_path.read_bytes()
+            except OSError as exc:
+                logger.warning('Skipping unreadable note image during notes export %s: %s', image_path, exc)
+                continue
+            images.append({
+                'id': str(image.get('id', '') or '').strip(),
+                'name': str(image.get('name', '') or image_path.name).strip() or image_path.name,
+                'file_name': image_path.name,
+                'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
+            })
+        exported_notes.append({
+            'id': str(note.get('id', '') or '').strip(),
+            'title': str(note.get('title', '') or ''),
+            'body': str(note.get('body', '') or ''),
+            'category': _normalize_note_category(note.get('category')),
+            'created_at': str(note.get('created_at', '') or '').strip(),
+            'updated_at': str(note.get('updated_at', '') or '').strip(),
+            'images': images,
+        })
+    return {
+        'version': NOTES_BACKUP_VERSION,
+        'exported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'notes': exported_notes,
+    }
+
+
+def export_notes_backup(path: Any) -> None:
+    """Write a standalone notes backup to disk."""
+    _write_json(path, build_notes_backup(), indent=2)
+
+
+def load_notes_backup(path: Any) -> Any:
+    """Load and validate a standalone notes backup file."""
+    source_path = Path(path)
+    suffix = source_path.suffix.lower()
+    if suffix == '.docx':
+        return _load_notes_backup_docx(source_path)
+    payload = _read_json(source_path, None)
+    if payload is None:
+        raise ValueError('Unable to read notes backup file.')
+    return _validate_notes_backup_payload(payload)
+
+
+def _parse_docx_note_meta(meta_text: Any) -> dict[str, str]:
+    """Parse a DOCX-exported note metadata block."""
+    parsed = {'category': NOTE_CATEGORIES[0], 'created_at': '', 'updated_at': ''}
+    for raw_line in str(meta_text or '').splitlines():
+        line = str(raw_line or '').strip()
+        if not line or ':' not in line:
+            continue
+        label, value = line.split(':', 1)
+        normalized_value = value.strip()
+        label_key = label.strip().lower()
+        if label_key == 'category':
+            parsed['category'] = _normalize_note_category(normalized_value)
+        elif label_key == 'created':
+            parsed['created_at'] = '' if normalized_value == '-' else normalized_value
+        elif label_key == 'edited':
+            parsed['updated_at'] = '' if normalized_value == '-' else normalized_value
+    if not parsed['updated_at']:
+        parsed['updated_at'] = parsed['created_at']
+    return parsed
+
+
+def _docx_paragraph_images(document: Any, paragraph: Any) -> list[dict[str, str]]:
+    """Extract embedded image payloads from a DOCX paragraph."""
+    image_entries = []
+    namespaces = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+    rel_attr = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
+    for image_index, blip in enumerate(paragraph._p.iterfind('.//a:blip', namespaces), start=1):
+        rel_id = str(blip.get(rel_attr, '') or '').strip()
+        if not rel_id:
+            continue
+        image_part = document.part.related_parts.get(rel_id)
+        if image_part is None:
+            continue
+        raw_bytes = getattr(image_part, 'blob', b'') or b''
+        if not raw_bytes:
+            continue
+        part_name = Path(str(getattr(image_part, 'partname', '') or ''))
+        file_name = part_name.name or f'image_{image_index}.bin'
+        image_entries.append({
+            'name': file_name,
+            'file_name': file_name,
+            'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
+        })
+    return image_entries
+
+
+def _finalize_docx_import_note(note: Any, body_lines: Any) -> dict[str, Any]:
+    """Convert parsed DOCX note fragments into backup payload shape."""
+    body_text = '\n'.join(body_lines) if isinstance(body_lines, list) else str(body_lines or '')
+    return {
+        'title': str(note.get('title', '') or '') or 'Untitled note',
+        'body': body_text,
+        'category': _normalize_note_category(note.get('category')),
+        'created_at': str(note.get('created_at', '') or '').strip(),
+        'updated_at': str(note.get('updated_at', '') or '').strip() or str(note.get('created_at', '') or '').strip(),
+        'images': list(note.get('images', [])) if isinstance(note.get('images', []), list) else [],
+    }
+
+
+def _load_notes_backup_docx(path: Any) -> Any:
+    """Load a DOCX notes export and convert it into backup payload shape."""
+    try:
+        from docx import Document
+    except ImportError as exc:
+        raise RuntimeError('DOCX notes import requires python-docx. Install it with: python -m pip install python-docx') from exc
+
+    document = Document(str(path))
+    imported_notes = []
+    current_note = None
+    current_body_lines: list[str] = []
+    current_section = None
+
+    for paragraph in document.paragraphs:
+        style_name = str(getattr(getattr(paragraph, 'style', None), 'name', '') or '')
+        paragraph_text = str(paragraph.text or '')
+        stripped_text = paragraph_text.strip()
+
+        if style_name == 'Title':
+            continue
+
+        if style_name == 'Heading 1':
+            if current_note is not None:
+                imported_notes.append(_finalize_docx_import_note(current_note, current_body_lines))
+            current_note = {
+                'title': stripped_text or 'Untitled note',
+                'category': NOTE_CATEGORIES[0],
+                'created_at': '',
+                'updated_at': '',
+                'images': [],
+            }
+            current_body_lines = []
+            current_section = 'meta'
+            continue
+
+        if current_note is None:
+            continue
+
+        if style_name == 'Heading 2':
+            heading_key = stripped_text.casefold()
+            if heading_key == 'note':
+                current_section = 'body'
+            elif heading_key == 'pictures':
+                current_section = 'pictures'
+            else:
+                current_section = None
+            continue
+
+        if current_section == 'meta':
+            current_note.update(_parse_docx_note_meta(paragraph_text))
+            continue
+
+        if current_section == 'body':
+            if not current_body_lines and stripped_text == 'No body text.':
+                continue
+            current_body_lines.append(paragraph_text)
+            continue
+
+        if current_section == 'pictures':
+            current_note['images'].extend(_docx_paragraph_images(document, paragraph))
+
+    if current_note is not None:
+        imported_notes.append(_finalize_docx_import_note(current_note, current_body_lines))
+
+    if not imported_notes:
+        non_empty_paragraphs = [str(paragraph.text or '').strip() for paragraph in document.paragraphs if str(paragraph.text or '').strip()]
+        if any(text != 'No notes were available at export time.' for text in non_empty_paragraphs):
+            raise ValueError('DOCX file does not match the Budget Terminal notes export format.')
+
+    return _validate_notes_backup_payload({
+        'version': NOTES_BACKUP_VERSION,
+        'imported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'notes': imported_notes,
+    })
+
+
+def apply_notes_backup(payload: Any) -> Any:
+    """Persist a standalone notes backup and return the normalized saved notes list."""
+    validated = _validate_notes_backup_payload(payload)
+    notes_root = Path(_notes_image_directory())
+    notes_root.mkdir(parents=True, exist_ok=True)
+    imported_notes = []
+    seen_note_ids = set()
+    for note_index, raw_note in enumerate(validated.get('notes', [])):
+        if not isinstance(raw_note, dict):
+            continue
+        base_note_id = str(raw_note.get('id', '') or f'note_{note_index + 1}').strip() or f'note_{note_index + 1}'
+        note_id = base_note_id
+        counter = 2
+        while note_id in seen_note_ids:
+            note_id = f'{base_note_id}_{counter}'
+            counter += 1
+        seen_note_ids.add(note_id)
+        note_dir = notes_root / note_id
+        shutil.rmtree(note_dir, ignore_errors=True)
+        images = []
+        raw_images = raw_note.get('images', [])
+        if isinstance(raw_images, list) and raw_images:
+            note_dir.mkdir(parents=True, exist_ok=True)
+            for image_index, raw_image in enumerate(raw_images):
+                if not isinstance(raw_image, dict):
+                    continue
+                encoded = str(raw_image.get('data_base64', '') or '').strip()
+                if not encoded:
+                    continue
+                try:
+                    raw_bytes = base64.b64decode(encoded, validate=True)
+                except Exception:
+                    logger.warning('Skipping invalid note image payload for imported note %s.', note_id)
+                    continue
+                base_name = Path(str(raw_image.get('file_name', '') or raw_image.get('name', '') or f'image_{image_index + 1}.bin')).name
+                if not base_name:
+                    base_name = f'image_{image_index + 1}.bin'
+                target_path = note_dir / base_name
+                file_counter = 2
+                while target_path.exists():
+                    target_path = note_dir / f'{Path(base_name).stem}_{file_counter}{Path(base_name).suffix}'
+                    file_counter += 1
+                try:
+                    target_path.write_bytes(raw_bytes)
+                except OSError as exc:
+                    logger.warning('Skipping note image write failure for %s: %s', target_path, exc)
+                    continue
+                image_id = str(raw_image.get('id', '') or f'{note_id}_image_{image_index + 1}').strip() or f'{note_id}_image_{image_index + 1}'
+                image_name = str(raw_image.get('name', '') or target_path.name).strip() or target_path.name
+                images.append({
+                    'id': image_id,
+                    'name': image_name,
+                    'path': str(Path('notes_images') / note_id / target_path.name).replace('\\', '/'),
+                })
+        if note_dir.exists() and not any(note_dir.iterdir()):
+            shutil.rmtree(note_dir, ignore_errors=True)
+        created_at = str(raw_note.get('created_at', '') or '').strip()
+        updated_at = str(raw_note.get('updated_at', '') or '').strip() or created_at
+        imported_notes.append({
+            'id': note_id,
+            'title': str(raw_note.get('title', '') or ''),
+            'body': str(raw_note.get('body', '') or ''),
+            'category': _normalize_note_category(raw_note.get('category')),
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'images': images,
+        })
+    return save_notes_data(imported_notes)
+
+
+def _parse_note_timestamp(value: Any) -> Any:
+    """Parse a persisted note timestamp into an aware datetime."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _sorted_notes_for_export() -> list[dict[str, Any]]:
+    """Return saved notes ordered newest-first for export outputs."""
+    return sorted(
+        load_notes_data(),
+        key=lambda note: (_parse_note_timestamp(note.get('updated_at')) or _parse_note_timestamp(note.get('created_at')) or datetime.datetime.fromtimestamp(0, datetime.timezone.utc)),
+        reverse=True,
+    )
+
+
+def _note_image_path(image: Any) -> Any:
+    """Resolve a persisted note image reference into a local path."""
+    return Path(user_data_path(*Path(str(image.get('path', '') or '').strip().replace('\\', '/')).parts))
+
+
+def _note_image_export_entries(note: Any) -> list[dict[str, Any]]:
+    """Collect note image export metadata for DOCX/HTML/PDF outputs."""
+    entries = []
+    for image in _normalize_note_images(note.get('images', [])):
+        image_path = _note_image_path(image)
+        if not image_path.exists() or not image_path.is_file():
+            logger.warning('Skipping missing note image during export: %s', image_path)
+            entries.append({'status': 'missing', 'path': image_path})
+            continue
+        try:
+            raw_bytes = image_path.read_bytes()
+        except OSError:
+            logger.exception('Unable to read note image during export: %s', image_path)
+            entries.append({'status': 'missing', 'path': image_path})
+            continue
+        suffix = image_path.suffix.lower()
+        mime_type = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.bmp': 'image/bmp',
+            '.webp': 'image/webp',
+        }.get(suffix, 'application/octet-stream')
+        entries.append({
+            'status': 'ok',
+            'path': image_path,
+            'mime_type': mime_type,
+            'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
+        })
+    return entries
+
+
+def _build_notes_export_html(*, for_pdf: bool=False) -> str:
+    """Render notes as standalone HTML with embedded images."""
+    notes = _sorted_notes_for_export()
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    page_break_rule = 'page-break-before: always;' if for_pdf else 'border-top: 1px solid #d7dde5; margin-top: 28px; padding-top: 28px;'
+    parts = [
+        '<!DOCTYPE html>',
+        '<html lang="en">',
+        '<head>',
+        '<meta charset="utf-8">',
+        '<title>Budget Terminal Notes</title>',
+        '<style>',
+        'body { font-family: Arial, sans-serif; color: #1f2937; margin: 32px; line-height: 1.5; }',
+        'h1 { font-size: 24px; margin: 0 0 10px; }',
+        'h2 { font-size: 18px; margin: 18px 0 8px; }',
+        'h3 { font-size: 14px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; color: #4b5563; }',
+        '.summary { margin-bottom: 24px; color: #4b5563; }',
+        '.note { margin-bottom: 24px; }',
+        f'.note + .note {{ {page_break_rule} }}',
+        '.meta { margin: 10px 0 16px; color: #374151; }',
+        '.body-line { margin: 0 0 8px; white-space: pre-wrap; }',
+        '.image { margin: 12px 0 16px; }',
+        '.image img { max-width: 100%; max-height: 560px; border: 1px solid #d7dde5; }',
+        '.placeholder { margin: 12px 0; color: #6b7280; font-style: italic; }',
+        '</style>',
+        '</head>',
+        '<body>',
+        '<h1>Budget Terminal Notes</h1>',
+        f'<div class="summary"><strong>Exported at:</strong> {html.escape(timestamp)}<br><strong>Note count:</strong> {len(notes)}</div>',
+    ]
+    if not notes:
+        parts.append('<p>No notes were available at export time.</p>')
+    for note in notes:
+        parts.append('<section class="note">')
+        parts.append(f'<h2>{html.escape(str(note.get("title", "") or "Untitled note"))}</h2>')
+        parts.append(
+            '<div class="meta">'
+            f'<strong>Category:</strong> {html.escape(str(note.get("category", NOTE_CATEGORIES[0]) or NOTE_CATEGORIES[0]))}<br>'
+            f'<strong>Created:</strong> {html.escape(str(note.get("created_at", "") or "-"))}<br>'
+            f'<strong>Edited:</strong> {html.escape(str(note.get("updated_at", "") or "-"))}'
+            '</div>'
+        )
+        parts.append('<h3>Note</h3>')
+        body_text = str(note.get('body', '') or '')
+        if body_text.strip():
+            for line in body_text.splitlines():
+                parts.append(f'<div class="body-line">{html.escape(line) if line.strip() else "&nbsp;"}</div>')
+        else:
+            parts.append('<div class="body-line">No body text.</div>')
+        image_entries = _note_image_export_entries(note)
+        if image_entries:
+            parts.append('<h3>Pictures</h3>')
+        for image_entry in image_entries:
+            if image_entry.get('status') != 'ok':
+                parts.append('<div class="placeholder">Picture could not be embedded.</div>')
+                continue
+            parts.append(
+                '<div class="image">'
+                f'<img src="data:{html.escape(str(image_entry.get("mime_type", "image/png")))};base64,{image_entry.get("data_base64", "")}" alt="Embedded note picture">'
+                '</div>'
+            )
+        parts.append('</section>')
+    parts.extend(['</body>', '</html>'])
+    return '\n'.join(parts)
+
+
+def export_notes_docx(path: Any) -> None:
+    """Write all saved notes to a DOCX document."""
+    try:
+        from docx import Document
+        from docx.shared import Inches
+    except ImportError as exc:
+        raise RuntimeError('Notes export requires python-docx. Install it with: python -m pip install python-docx') from exc
+
+    notes = _sorted_notes_for_export()
+
+    document = Document()
+    styles = document.styles
+    if 'Normal' in styles:
+        styles['Normal'].font.name = 'Arial'
+        styles['Normal'].font.size = None
+    document.core_properties.title = 'Budget Terminal Notes Export'
+    document.core_properties.subject = 'Exported notes'
+    document.core_properties.comments = 'Generated by Budget Terminal'
+
+    document.add_heading('Budget Terminal Notes', 0)
+    summary = document.add_paragraph()
+    summary.add_run('Exported at: ').bold = True
+    summary.add_run(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    summary.add_run('\n')
+    summary.add_run('Note count: ').bold = True
+    summary.add_run(str(len(notes)))
+
+    if not notes:
+        document.add_paragraph('No notes were available at export time.')
+        document.save(path)
+        return
+
+    for index, note in enumerate(notes):
+        if index > 0:
+            document.add_page_break()
+        document.add_heading(str(note.get('title', '') or 'Untitled note'), level=1)
+
+        meta = document.add_paragraph()
+        meta.add_run('Category: ').bold = True
+        meta.add_run(str(note.get('category', NOTE_CATEGORIES[0]) or NOTE_CATEGORIES[0]))
+        meta.add_run('\n')
+        meta.add_run('Created: ').bold = True
+        meta.add_run(str(note.get('created_at', '') or '-'))
+        meta.add_run('\n')
+        meta.add_run('Edited: ').bold = True
+        meta.add_run(str(note.get('updated_at', '') or '-'))
+
+        body_text = str(note.get('body', '') or '')
+        document.add_heading('Note', level=2)
+        if body_text.strip():
+            for line in body_text.splitlines():
+                document.add_paragraph(line if line.strip() else '')
+        else:
+            document.add_paragraph('No body text.')
+
+        image_entries = _note_image_export_entries(note)
+        if image_entries:
+            document.add_heading('Pictures', level=2)
+        for image_entry in image_entries:
+            if image_entry.get('status') != 'ok':
+                document.add_paragraph('Picture could not be embedded.')
+                continue
+            try:
+                image_path = Path(image_entry.get('path'))
+                picture = document.add_picture(str(image_path), width=Inches(5.8))
+                inline = picture._inline
+                inline.graphic.graphicData.pic.nvPicPr.cNvPr.set('name', 'Embedded Picture')
+            except Exception:
+                logger.exception('Unable to embed note image in DOCX export: %s', image_path)
+                document.add_paragraph('Picture could not be embedded.')
+
+    document.save(path)
+
+
+def export_notes_html(path: Any) -> None:
+    """Write all saved notes to a standalone HTML document."""
+    Path(path).write_text(_build_notes_export_html(for_pdf=False), encoding='utf-8')
+
+
+def build_user_data_backup(*, include_notes: bool=True) -> Any:
     """Build a single-file backup payload for all persisted user data."""
     backup = _load_user_data_document()
+    if not include_notes:
+        backup = dict(backup)
+        backup.pop('notes', None)
     backup['version'] = USER_DATA_BACKUP_VERSION
     backup['exported_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return backup
@@ -636,6 +1256,28 @@ def export_user_data_backup(path: Any) -> None:
     _write_json(path, build_user_data_backup(), indent=2)
 
 
+def export_user_data_bundle(parent_directory: Any) -> dict[str, str]:
+    """Write separate user-data JSON and notes DOCX exports into a timestamped folder."""
+    target_root = Path(parent_directory)
+    target_root.mkdir(parents=True, exist_ok=True)
+    base_name = f"budget_terminal_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    bundle_dir = target_root / base_name
+    suffix = 2
+    while bundle_dir.exists():
+        bundle_dir = target_root / f'{base_name}_{suffix}'
+        suffix += 1
+    bundle_dir.mkdir(parents=True, exist_ok=False)
+    user_data_path = bundle_dir / 'user_data.json'
+    notes_backup_path = bundle_dir / 'notes.docx'
+    _write_json(user_data_path, build_user_data_backup(include_notes=False), indent=2)
+    export_notes_docx(notes_backup_path)
+    return {
+        'folder': str(bundle_dir),
+        'user_data_path': str(user_data_path),
+        'notes_path': str(notes_backup_path),
+    }
+
+
 def _json_block(data: Any) -> Any:
     """Render a JSON code block for human and AI-readable exports."""
     return f"```json\n{json.dumps(data, indent=2)}\n```"
@@ -644,6 +1286,8 @@ def _json_block(data: Any) -> Any:
 def build_ai_user_data_export() -> str:
     """Build a Markdown export optimized for human and AI analysis."""
     payload = build_user_data_backup()
+    display_payload = dict(payload)
+    display_payload.pop('grok', None)
     lines = [
         '# Budget Terminal User Data',
         '',
@@ -688,6 +1332,10 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('net_worth', {'cash': [], 'debt': []})),
         '',
+        '## Notes',
+        '',
+        _json_block(payload.get('notes', [])),
+        '',
         '## Charts Page Settings',
         '',
         _json_block(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
@@ -714,7 +1362,7 @@ def build_ai_user_data_export() -> str:
         '',
         '## Full Normalized Payload',
         '',
-        _json_block(payload),
+        _json_block(display_payload),
         '',
     ])
     return '\n'.join(lines)
@@ -725,7 +1373,7 @@ def export_ai_user_data(path: Any) -> None:
     Path(path).write_text(build_ai_user_data_export(), encoding='utf-8')
 
 
-def _validate_backup_payload(payload: Any) -> Any:
+def _validate_backup_payload(payload: Any, *, preserve_existing_notes: bool=False) -> Any:
     """Validate imported backup data and return a normalized payload."""
     if not isinstance(payload, dict):
         raise ValueError('Backup file must contain a JSON object.')
@@ -739,7 +1387,8 @@ def _validate_backup_payload(payload: Any) -> Any:
             raise ValueError('Backup net worth data must be a JSON object.')
         if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('pension_insurance', []), list) or not isinstance(networth_payload.get('debt', []), list):
             raise ValueError('Backup net worth data must include cash, pension_insurance, and debt lists.')
-    return _normalize_user_data_document(payload)
+    existing_notes = load_notes_data() if preserve_existing_notes and 'notes' not in payload else None
+    return _normalize_user_data_document(payload, existing_notes=existing_notes)
 
 
 def load_user_data_backup(path: Any) -> Any:
@@ -747,12 +1396,12 @@ def load_user_data_backup(path: Any) -> Any:
     payload = _read_json(path, None)
     if payload is None:
         raise ValueError('Unable to read backup file.')
-    return _validate_backup_payload(payload)
+    return _validate_backup_payload(payload, preserve_existing_notes=True)
 
 
 def apply_user_data_backup(payload: Any) -> Any:
     """Persist validated backup data and return the normalized state."""
-    normalized = _validate_backup_payload(payload)
+    normalized = _validate_backup_payload(payload, preserve_existing_notes=True)
     return _save_user_data_document(normalized)
 
 
@@ -770,8 +1419,10 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
+        'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'grok': DEFAULT_GROK_SETTINGS.copy(),
         'time_12h': False,
     }
     return apply_user_data_backup(normalized)
@@ -793,6 +1444,7 @@ def load_app_config() -> Any:
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
         'multi_charts': dict(document.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        'grok': dict(document.get('grok', DEFAULT_GROK_SETTINGS)),
         'time_12h': bool(document.get('time_12h', False)),
     }
 
@@ -835,6 +1487,8 @@ def save_app_config(data: Any) -> None:
         current['multi_charts'] = _normalize_multi_charts_settings(saved.get('multi_charts'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
+    if 'grok' in saved:
+        current['grok'] = _normalize_grok_payload(saved.get('grok'))
     if 'time_12h' in saved:
         current['time_12h'] = bool(saved['time_12h'])
     _save_user_data_document(current)
@@ -1137,6 +1791,141 @@ def save_options_chain_settings(settings: Any) -> Any:
     current['options_chain'] = state
     save_app_config(current)
     return state
+
+
+def load_grok_settings() -> Any:
+    """Load persisted non-secret settings for the Grok page."""
+    config = load_app_config()
+    return _normalize_grok_payload(config.get('grok', {}))
+
+
+def save_grok_settings(settings: Any) -> Any:
+    """Persist non-secret settings for the Grok page."""
+    current = load_app_config()
+    state = _normalize_grok_payload(settings)
+    current['grok'] = state
+    save_app_config(current)
+    return state
+
+
+def _load_keyring_backend() -> tuple[Any, str | None]:
+    """Return the keyring module when a supported secure backend is available."""
+    try:
+        import keyring
+    except Exception as exc:
+        return (None, f'keyring is unavailable: {exc}')
+    try:
+        backend = keyring.get_keyring()
+    except Exception as exc:
+        return (None, f'Unable to access the OS credential store: {exc}')
+    try:
+        priority_value = float(getattr(backend, 'priority', 0))
+    except Exception:
+        priority_value = None
+    if priority_value is not None and priority_value <= 0:
+        return (None, f'No supported OS credential backend is available ({backend.__class__.__name__}).')
+    return (keyring, None)
+
+
+def provider_api_key_storage_status(provider_name: str) -> Any:
+    """Describe how API keys for a provider will be handled on the current machine."""
+    keyring, error_message = _load_keyring_backend()
+    if keyring is None:
+        return {
+            'available': False,
+            'mode': 'session_only',
+            'message': f'{error_message} Keys will only be kept for the current app session.',
+        }
+    return {
+        'available': True,
+        'mode': 'secure',
+        'message': f'{provider_name} API keys are stored in your OS credential vault and are not included in Budget Terminal user-data exports.',
+    }
+
+
+def grok_api_key_storage_status() -> Any:
+    """Describe how the Grok/xAI API key will be handled on the current machine."""
+    return provider_api_key_storage_status('xAI')
+
+
+def _load_saved_api_key(service_name: str, account_name: str, label: str) -> Any:
+    """Load a saved API key from secure storage when available."""
+    keyring, error_message = _load_keyring_backend()
+    if keyring is None:
+        return None
+    try:
+        value = keyring.get_password(service_name, account_name)
+    except Exception as exc:
+        logger.warning('Unable to load the %s API key from secure storage: %s', label, exc)
+        return None
+    clean = str(value or '').strip()
+    return clean or None
+
+
+def load_grok_api_key() -> Any:
+    """Load the saved Grok/xAI API key from secure storage when available."""
+    return _load_saved_api_key(GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
+
+
+def _save_api_key(value: Any, service_name: str, account_name: str, label: str) -> None:
+    """Save an API key into secure OS storage."""
+    keyring, error_message = _load_keyring_backend()
+    if keyring is None:
+        raise RuntimeError(error_message or 'Secure key storage is unavailable.')
+    clean = str(value or '').strip()
+    if not clean:
+        raise ValueError(f'Enter a {label} API key before saving.')
+    try:
+        keyring.set_password(service_name, account_name, clean)
+    except Exception as exc:
+        raise RuntimeError(f'Unable to save the {label} API key to secure storage: {exc}') from exc
+
+
+def save_grok_api_key(value: Any) -> None:
+    """Save the Grok/xAI API key into secure OS storage."""
+    _save_api_key(value, GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
+
+
+def _delete_saved_api_key(service_name: str, account_name: str, label: str) -> None:
+    """Delete a saved API key from secure storage when present."""
+    keyring, error_message = _load_keyring_backend()
+    if keyring is None:
+        raise RuntimeError(error_message or 'Secure key storage is unavailable.')
+    try:
+        keyring.delete_password(service_name, account_name)
+    except Exception as exc:
+        exc_name = exc.__class__.__name__
+        message = str(exc or '').strip().lower()
+        if exc_name in ('PasswordDeleteError', 'KeyringError') and (
+            'not found' in message or 'no such password' in message or 'cannot delete' in message
+        ):
+            return
+        raise RuntimeError(f'Unable to remove the {label} API key from secure storage: {exc}') from exc
+
+
+def delete_grok_api_key() -> None:
+    """Delete the saved Grok/xAI API key from secure storage when present."""
+    _delete_saved_api_key(GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
+
+
+def openai_api_key_storage_status() -> Any:
+    """Describe how the OpenAI API key will be handled on the current machine."""
+    return provider_api_key_storage_status('OpenAI')
+
+
+def load_openai_api_key() -> Any:
+    """Load the saved OpenAI API key from secure storage when available."""
+    return _load_saved_api_key(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
+
+
+def save_openai_api_key(value: Any) -> None:
+    """Save the OpenAI API key into secure OS storage."""
+    _save_api_key(value, OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
+
+
+def delete_openai_api_key() -> None:
+    """Delete the saved OpenAI API key from secure storage when present."""
+    _delete_saved_api_key(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
 
 
 def load_time_format() -> bool:

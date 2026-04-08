@@ -4,6 +4,7 @@ from typing import Any
 from ..compat import *
 
 _P7_SPLITTER_CONFIG = user_data_path('p7_splitter.json')
+_P7_SPLITTER_PANE_COUNT = 5
 
 class CalendarPageMixin:
     def _p7_calendar_display_flags(self) -> Any:
@@ -11,7 +12,8 @@ class CalendarPageMixin:
         show_econ = self.p7_export_economic_cb.isChecked() if hasattr(self, 'p7_export_economic_cb') else True
         show_company = self.p7_export_company_cb.isChecked() if hasattr(self, 'p7_export_company_cb') else True
         show_options = self.p7_export_options_cb.isChecked() if hasattr(self, 'p7_export_options_cb') else True
-        return show_econ, show_company, show_options
+        show_market_holidays = self.p7_export_market_holidays_cb.isChecked() if hasattr(self, 'p7_export_market_holidays_cb') else True
+        return show_econ, show_company, show_options, show_market_holidays
 
     def _p7_on_calendar_filter_changed(self, *_: Any) -> None:
         """Re-render the calendar immediately when a category toggle changes."""
@@ -60,6 +62,8 @@ class CalendarPageMixin:
             self._p7_apply_equal_table_widths(self.p7_company_events_table)
         if hasattr(self, 'p7_economic_events_table'):
             self._p7_apply_equal_table_widths(self.p7_economic_events_table)
+        if hasattr(self, 'p7_market_holidays_table'):
+            self._p7_apply_equal_table_widths(self.p7_market_holidays_table)
         if hasattr(self, 'p7_options_exp_table'):
             self._p7_apply_equal_table_widths(self.p7_options_exp_table)
 
@@ -68,7 +72,7 @@ class CalendarPageMixin:
         if not hasattr(self, 'p7_details_splitter'):
             return
         sizes = [int(s) for s in self.p7_details_splitter.sizes() if int(s) > 0]
-        if len(sizes) == 4:
+        if len(sizes) == _P7_SPLITTER_PANE_COUNT:
             try:
                 _P7_SPLITTER_CONFIG.write_text(json.dumps(sizes))
             except Exception:
@@ -80,10 +84,55 @@ class CalendarPageMixin:
             return
         try:
             sizes = json.loads(_P7_SPLITTER_CONFIG.read_text())
-            if isinstance(sizes, list) and len(sizes) == 4:
-                self.p7_details_splitter.setSizes([int(s) for s in sizes])
+            if not isinstance(sizes, list):
+                return
+            clean_sizes = []
+            for value in sizes[:_P7_SPLITTER_PANE_COUNT]:
+                try:
+                    clean_sizes.append(int(value))
+                except Exception:
+                    return
+            if len(clean_sizes) == _P7_SPLITTER_PANE_COUNT:
+                self.p7_details_splitter.setSizes(clean_sizes)
+            elif len(clean_sizes) == 4:
+                legacy_company, legacy_econ, legacy_options, legacy_filters = clean_sizes
+                self.p7_details_splitter.setSizes(
+                    [legacy_company, legacy_econ, legacy_econ, legacy_options, legacy_filters]
+                )
         except Exception:
             pass
+
+    def _p7_populate_detail_table(self, table: Any, rows: Any) -> None:
+        """Populate a standard 4-column calendar detail table."""
+        table.setRowCount(len(rows))
+        for i, (event_date, label, event_name, detail, color) in enumerate(rows):
+            date_str = event_date.strftime('%b %d')
+            for col, text in enumerate([date_str, label, event_name, detail]):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 2:
+                    item.setForeground(QColor(color))
+                table.setItem(i, col, item)
+
+    def _p7_collect_year_market_holidays(self, year: Any) -> Any:
+        """Return holiday and early-close rows for the displayed calendar year."""
+        rows = []
+        for event_month in range(1, 13):
+            for event in _get_market_holiday_events(year, event_month):
+                event_date = event.get('date')
+                if event_date is None:
+                    continue
+                rows.append(
+                    (
+                        event_date,
+                        str(event.get('market', 'US Equities') or 'US Equities'),
+                        str(event.get('event', 'Holiday') or 'Holiday'),
+                        str(event.get('detail', '') or ''),
+                        str(event.get('color', '#26c6da') or '#26c6da'),
+                    )
+                )
+        rows.sort(key=lambda item: (item[0], item[2], item[1]))
+        return rows
 
     def _p7_get_main_portfolio_options(self) -> Any:
         """Return saved options positions for the current main portfolio."""
@@ -261,6 +310,29 @@ class CalendarPageMixin:
         )
         econ_layout.addWidget(self.p7_economic_events_table)
         self.p7_details_splitter.addWidget(econ_widget)
+        market_holidays_widget = QWidget()
+        market_holidays_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        market_holidays_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
+        market_holidays_layout = QVBoxLayout(market_holidays_widget)
+        market_holidays_layout.setContentsMargins(6, 6, 6, 6)
+        market_holidays_layout.setSpacing(2)
+        self.p7_market_holidays_label = QLabel('<b>US Market Holidays & Early Closes</b>')
+        self.p7_market_holidays_label.setStyleSheet('font-size: 15px; color: #8888aa;')
+        market_holidays_layout.addWidget(self.p7_market_holidays_label)
+        self.p7_market_holidays_table = QTableWidget(0, 4)
+        self.p7_market_holidays_table.setHorizontalHeaderLabels(['Date', 'Market', 'Event', 'Details'])
+        self._p7_prepare_detail_table(self.p7_market_holidays_table)
+        self.p7_market_holidays_table.verticalHeader().setVisible(False)
+        self.p7_market_holidays_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.p7_market_holidays_table.verticalHeader().setDefaultSectionSize(24)
+        self.p7_market_holidays_table.setStyleSheet(
+            'QTableWidget { background: #0d0d1f; border: 1px solid #333; '
+            'border-radius: 4px; gridline-color: #24243a; }'
+            'QHeaderView::section { background: #16162b; color: #aaa; '
+            'border: 0; border-bottom: 1px solid #333; padding: 4px 6px; }'
+        )
+        market_holidays_layout.addWidget(self.p7_market_holidays_table)
+        self.p7_details_splitter.addWidget(market_holidays_widget)
         options_widget = QWidget()
         options_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         options_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
@@ -309,9 +381,14 @@ class CalendarPageMixin:
         self.p7_export_options_cb.setStyleSheet(cb_style)
         self.p7_export_options_cb.toggled.connect(self._p7_on_calendar_filter_changed)
         export_opts_layout.addWidget(self.p7_export_options_cb)
+        self.p7_export_market_holidays_cb = QCheckBox('Market Holidays')
+        self.p7_export_market_holidays_cb.setChecked(True)
+        self.p7_export_market_holidays_cb.setStyleSheet(cb_style)
+        self.p7_export_market_holidays_cb.toggled.connect(self._p7_on_calendar_filter_changed)
+        export_opts_layout.addWidget(self.p7_export_market_holidays_cb)
         export_opts_layout.addStretch()
         self.p7_details_splitter.addWidget(export_opts_widget)
-        for i in range(4):
+        for i in range(_P7_SPLITTER_PANE_COUNT):
             self.p7_details_splitter.setStretchFactor(i, 1)
         self._p7_restore_splitter_sizes()
         self.p7_details_splitter.splitterMoved.connect(self._p7_save_splitter_sizes)
@@ -321,6 +398,7 @@ class CalendarPageMixin:
         self._p7_month = today.month
         self._p7_events = {}
         self._p7_fetching = False
+        self._p7_force_economic_refresh = False
         self._p7_render_month()
         self._p7_apply_detail_table_widths()
 
@@ -340,6 +418,7 @@ class CalendarPageMixin:
 
     def _p7_fetch_events(self) -> None:
         """Handle p7 fetch events."""
+        self._p7_force_economic_refresh = True
         self._launch_worker(CalendarWorker(self.tickers[:]), self._p7_on_events_ready, '_p7_fetching')
 
     def _p7_on_events_ready(self, results: Any) -> None:
@@ -353,11 +432,36 @@ class CalendarPageMixin:
         import calendar
         today = self._p7_get_reference_today()
         year, month = (self._p7_year, self._p7_month)
-        show_econ, show_company, show_options = self._p7_calendar_display_flags()
+        show_econ, show_company, show_options, show_market_holidays = self._p7_calendar_display_flags()
+        economic_years = {year}
+        for m_offset in range(3):
+            em = month + m_offset
+            ey = year
+            if em > 12:
+                em -= 12
+                ey += 1
+            economic_years.add(ey)
+        if show_econ and getattr(self, '_p7_force_economic_refresh', False):
+            for econ_year in sorted(economic_years):
+                _get_economic_events_for_year(econ_year, force_refresh=True)
+            self._p7_force_economic_refresh = False
         self.p7_month_label.setText(f'{calendar.month_name[month]} {year}')
         _ECON_COLORS = {'FOMC Decision': '#e040fb', 'CPI Release': '#ff5252', 'NFP Jobs Report': '#ffab40', 'PCE Inflation': '#7c4dff', 'GDP Report': '#69f0ae'}
         econ_events = _get_economic_events(year, month) if show_econ else []
+        market_holiday_events = _get_market_holiday_events(year, month) if show_market_holidays else []
         date_events = {}
+        if show_market_holidays:
+            for event in market_holiday_events:
+                event_date = event.get('date')
+                if event_date is None or event_date.year != year or event_date.month != month:
+                    continue
+                date_events.setdefault(event_date.day, []).append(
+                    (
+                        str(event.get('cell_label', 'Holiday') or 'Holiday'),
+                        '',
+                        str(event.get('color', '#26c6da') or '#26c6da'),
+                    )
+                )
         if show_econ:
             for d, name, _imp in econ_events:
                 color = _ECON_COLORS.get(name, '#aaa')
@@ -415,6 +519,11 @@ class CalendarPageMixin:
                 cell.setStyleSheet(f'QLabel {{ background: {bg}; border: 1px solid {border}; border-radius: 4px; padding: 3px; font-size: 10px; min-height: 70px; }}')
         economic_events = []
         company_events = []
+        holiday_events = self._p7_collect_year_market_holidays(year) if show_market_holidays else []
+        if hasattr(self, 'p7_market_holidays_label'):
+            self.p7_market_holidays_label.setText(
+                f'<b>US Market Holidays & Early Closes</b>  <span style="color: #9aa4ad;">{year}</span>'
+            )
         for m_offset in range(3):
             em = month + m_offset
             ey = year
@@ -436,20 +545,14 @@ class CalendarPageMixin:
                 company_events.append((d, ticker, 'Ex-Dividend', f'in {days_away}d', '#4fc3f7'))
         economic_events.sort(key=lambda x: x[0])
         company_events.sort(key=lambda x: x[0])
-        for table, rows in ((self.p7_company_events_table, company_events), (self.p7_economic_events_table, economic_events)):
-            table.setRowCount(len(rows))
-            for i, (d, ticker, evt, detail, color) in enumerate(rows):
-                date_str = d.strftime('%b %d')
-                for col, text in enumerate([date_str, ticker, evt, detail]):
-                    item = QTableWidgetItem(text)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if col == 2:
-                        item.setForeground(QColor(color))
-                    table.setItem(i, col, item)
+        self._p7_populate_detail_table(self.p7_company_events_table, company_events)
+        self._p7_populate_detail_table(self.p7_economic_events_table, economic_events)
+        self._p7_populate_detail_table(self.p7_market_holidays_table, holiday_events)
         self._p7_refresh_options_expirations()
         self._p7_compact_detail_tables(
             self.p7_company_events_table,
             self.p7_economic_events_table,
+            self.p7_market_holidays_table,
             self.p7_options_exp_table,
         )
         self._p7_apply_detail_table_widths()
@@ -459,7 +562,7 @@ class CalendarPageMixin:
         year, month = self._p7_year, self._p7_month
         month_name = _calendar_mod.month_name[month]
         today = self._p7_get_reference_today()
-        inc_econ, inc_company, inc_options = self._p7_calendar_display_flags()
+        inc_econ, inc_company, inc_options, inc_market_holidays = self._p7_calendar_display_flags()
 
         # --- Collect economic events ---
         econ_events = []
@@ -467,6 +570,23 @@ class CalendarPageMixin:
             for d, name, imp in _get_economic_events(year, month):
                 econ_events.append((d, name, imp))
             econ_events.sort(key=lambda x: x[0])
+
+        # --- Collect market holidays and early closes ---
+        market_holiday_events = []
+        if inc_market_holidays:
+            for event in _get_market_holiday_events(year, month):
+                event_date = event.get('date')
+                if event_date is None:
+                    continue
+                market_holiday_events.append(
+                    (
+                        event_date,
+                        str(event.get('market', 'US Equities') or 'US Equities'),
+                        str(event.get('event', 'Holiday') or 'Holiday'),
+                        str(event.get('detail', '') or ''),
+                    )
+                )
+            market_holiday_events.sort(key=lambda x: (x[0], x[2], x[1]))
 
         # --- Collect company events (earnings, ex-div) ---
         company_events = []
@@ -528,6 +648,9 @@ class CalendarPageMixin:
         lines.append('TITLE FORMATS:')
         if inc_econ:
             lines.append('  Economic events  -> "[ECON] <Event Name>"')
+        if inc_market_holidays:
+            lines.append('  Market holidays  -> "[MARKET] <Holiday Name>"')
+            lines.append('  Early closes     -> "[MARKET] <Holiday Name> Early Close"')
         if inc_company:
             lines.append('  Earnings         -> "[EARNINGS] <TICKER>"')
             lines.append('  Ex-Dividend      -> "[EX-DIV] <TICKER>"')
@@ -537,6 +660,8 @@ class CalendarPageMixin:
         lines.append('IMPORTANT:')
         lines.append('  - Do NOT create duplicate events if they already exist on the calendar.')
         lines.append('  - Skip any events with dates that have already passed.')
+        if inc_market_holidays:
+            lines.append('  - Early closes should be timed events at 1:00 PM Eastern Time, not all-day events.')
         lines.append(f'  - Today\'s date is {today.strftime("%Y-%m-%d")}.')
         lines.append('')
 
@@ -548,6 +673,21 @@ class CalendarPageMixin:
             if econ_events:
                 for d, name, imp in econ_events:
                     lines.append(f'  {d.strftime("%Y-%m-%d")}  {name}  (Importance: {imp})')
+            else:
+                lines.append('  (none)')
+            lines.append('')
+
+        # Market holidays section
+        if inc_market_holidays:
+            lines.append('-' * 70)
+            lines.append('MARKET HOLIDAYS & EARLY CLOSES')
+            lines.append('-' * 70)
+            if market_holiday_events:
+                for event_date, market, event_name, detail in market_holiday_events:
+                    if event_date is None:
+                        continue
+                    suffix = '  (timed event)' if event_name == 'Early Close' else ''
+                    lines.append(f'  {event_date.strftime("%Y-%m-%d")}  {market}  {event_name}  {detail}{suffix}')
             else:
                 lines.append('  (none)')
             lines.append('')

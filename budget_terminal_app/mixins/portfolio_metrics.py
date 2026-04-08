@@ -26,6 +26,24 @@ class PortfolioMetricsMixin:
             if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
         }
 
+    def _p4_momentum_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
+        """Build the cache key for one portfolio momentum timeframe pair."""
+        return (str(portfolio_id or self.active_portfolio_id), str(timeframe_key))
+
+    def _p4_invalidate_momentum_cache(self, portfolio_id: Any = None) -> None:
+        """Drop cached momentum metrics for one portfolio slot."""
+        pid = str(portfolio_id or self.active_portfolio_id)
+        self._momentum_metrics_cache = {
+            key: value
+            for key, value in self._momentum_metrics_cache.items()
+            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+        }
+        self._momentum_metrics_fetching = {
+            key: value
+            for key, value in self._momentum_metrics_fetching.items()
+            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+        }
+
     def _p4_active_tickers(self) -> Any:
         """Return tickers for the currently selected portfolio tab."""
         return getattr(self, 'active_tickers', self._get_portfolio_entry(self.active_portfolio_id).get('portfolio', []))
@@ -120,6 +138,7 @@ class PortfolioMetricsMixin:
         current_year = datetime.date.today().year
         configs = {
             'dip_finder': {'period': '1mo', 'interval': '1d', 'sort_reverse': True},
+            '1mo': {'period': '1mo', 'interval': '1d', 'sort_reverse': True},
             'ytd': {'start': f'{current_year}-01-01', 'interval': '1d', 'sort_reverse': True},
             '1y': {'period': '1y', 'interval': '1d', 'sort_reverse': True},
         }
@@ -145,6 +164,9 @@ class PortfolioMetricsMixin:
         self._persist_all_portfolios()
         if self.last_data:
             self._recalc_tracker_row(row, ticker, self.last_data.get('portfolio', {}))
+        if col == P4_PORTFOLIO_COL_SHARES:
+            self._p4_invalidate_momentum_cache()
+            self._p4_refresh_active_momentum_view()
 
     def _p4_build_tracker_metrics_map(self, portfolio: Any) -> Any:
         """Precompute derived tracker metrics for the active portfolio."""
@@ -303,6 +325,7 @@ class PortfolioMetricsMixin:
         tracker_data = self._p4_active_tracker_data()
         tracker_data.pop(ticker, None)
         self._p4_invalidate_returns_cache()
+        self._p4_invalidate_momentum_cache()
         self._persist_all_portfolios()
         if self.last_data and self.active_portfolio_id == self.main_portfolio_id and 'portfolio' in self.last_data:
             self.last_data['portfolio'].pop(ticker, None)
@@ -312,6 +335,7 @@ class PortfolioMetricsMixin:
             self.p4_table.blockSignals(True)
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
+            self._p4_refresh_active_momentum_view()
 
     def _update_returns_chart(self, timeframe_key: Any, results: Any) -> None:
         """Handle update returns chart."""
@@ -372,6 +396,185 @@ class PortfolioMetricsMixin:
         pw.showAxis('left')
         pw.setYRange(0, max_value + label_offset + max(max_value * 0.15, 0.5))
         pw.setXRange(-0.6, len(tickers) - 0.4)
+
+    def _p4_empty_momentum_payload(self, reason: str, *, included: Any=None, excluded: Any=None) -> dict[str, Any]:
+        """Build a normalized empty momentum payload."""
+        return {
+            'dates': [],
+            'returns': [],
+            'start_value': None,
+            'end_value': None,
+            'included_tickers': list(included or []),
+            'excluded_tickers': list(excluded or []),
+            'start_date': None,
+            'reason': str(reason or '').strip(),
+        }
+
+    def _p4_momentum_ema_period(self, timeframe_key: Any) -> int:
+        """Return the EMA period used for one momentum timeframe."""
+        return {
+            '1mo': 10,
+            'ytd': 20,
+            '1y': 50,
+        }.get(str(timeframe_key or '').strip().lower(), 20)
+
+    def _p4_set_momentum_summary(self, timeframe_key: Any, payload: Any, *, ema_last: Any=None) -> None:
+        """Update the momentum summary label for the active timeframe."""
+        if not hasattr(self, 'p4_momentum_summary_label'):
+            return
+        if not isinstance(payload, dict):
+            payload = self._p4_empty_momentum_payload('No momentum data available')
+        reason = str(payload.get('reason', '') or '').strip()
+        returns = payload.get('returns', [])
+        included = list(payload.get('included_tickers', []) or [])
+        excluded = list(payload.get('excluded_tickers', []) or [])
+        if reason or not returns:
+            self.p4_momentum_summary_label.setText(reason or 'No momentum data available')
+            return
+        total_return = float(returns[-1]) if returns else 0.0
+        sign = '+' if total_return >= 0 else ''
+        start_date = str(payload.get('start_date') or '--')
+        parts = [
+            f'Since {start_date}',
+            f'Portfolio {sign}{total_return:.1f}%',
+            f'{len(included)} holding{"s" if len(included) != 1 else ""}',
+        ]
+        if ema_last is not None:
+            relation = 'Above' if total_return >= float(ema_last) else 'Below'
+            parts.append(f'{relation} {self._p4_momentum_ema_period(timeframe_key)}-day EMA')
+        if excluded:
+            parts.append(f'{len(excluded)} excluded')
+        self.p4_momentum_summary_label.setText(' | '.join(parts))
+
+    def _update_momentum_chart(self, timeframe_key: Any, payload: Any) -> None:
+        """Render one timeframe of portfolio momentum."""
+        pw = getattr(self, 'p4_momentum_charts', {}).get(timeframe_key)
+        axis = getattr(self, 'p4_momentum_axes', {}).get(timeframe_key)
+        if pw is None:
+            return
+        pw.clear()
+        if axis is not None:
+            axis.set_dates([], '1d')
+        if not isinstance(payload, dict):
+            payload = self._p4_empty_momentum_payload('No momentum data available')
+        dates = list(payload.get('dates', []) or [])
+        returns = [float(value) for value in list(payload.get('returns', []) or [])]
+        if len(dates) != len(returns) or len(returns) < 2:
+            self._p4_set_momentum_summary(timeframe_key, payload)
+            return
+        xs = list(range(len(dates)))
+        if axis is not None:
+            axis.set_dates(dates, '1d')
+        returns_series = pd.Series(returns, dtype='float64')
+        ema_period = self._p4_momentum_ema_period(timeframe_key)
+        ema_values = returns_series.ewm(span=ema_period, adjust=False).mean().tolist()
+        line_color = self.theme_color('accent')
+        pw.plot(xs, returns, pen=pg.mkPen(line_color, width=2), antialias=True)
+        pw.plot(
+            xs,
+            ema_values,
+            pen=pg.mkPen(self.theme_color('warning'), width=2, style=Qt.PenStyle.DashLine),
+            antialias=True,
+        )
+        pw.addItem(
+            pg.InfiniteLine(
+                pos=0,
+                angle=0,
+                pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine),
+            )
+        )
+        last_value = float(returns[-1])
+        last_color = self.theme_color('accent_positive' if last_value >= 0 else 'accent_negative')
+        last_sign = '+' if last_value >= 0 else ''
+        anchor = (1.0, 0.0 if last_value >= 0 else 1.0)
+        last_label = pg.TextItem(text=f'{last_sign}{last_value:.1f}%', color=last_color, anchor=anchor)
+        last_label.setPos(xs[-1], last_value)
+        pw.addItem(last_label)
+        plot_item = pw.getPlotItem()
+        plot_item.hideAxis('left')
+        plot_item.showAxis('right')
+        plot_item.showAxis('bottom')
+        try:
+            plot_item.getAxis('right').setLabel('Return %')
+        except Exception:
+            pass
+        min_value = min(min(returns), min(ema_values), 0.0)
+        max_value = max(max(returns), max(ema_values), 0.0)
+        y_pad = max((max_value - min_value) * 0.15, 1.0)
+        pw.setYRange(min_value - y_pad, max_value + y_pad)
+        pw.setXRange(-0.4, len(xs) - 0.6)
+        self._p4_set_momentum_summary(timeframe_key, payload, ema_last=ema_values[-1] if ema_values else None)
+
+    def _p4_active_momentum_shares_map(self) -> dict[str, float]:
+        """Return normalized current-share counts for the active portfolio."""
+        shares_map = {}
+        for ticker, tracker_entry in (self._p4_active_tracker_data() or {}).items():
+            symbol = str(ticker or '').strip().upper()
+            if not symbol:
+                continue
+            try:
+                shares_map[symbol] = float((tracker_entry or {}).get('shares', 0) or 0)
+            except (AttributeError, TypeError, ValueError):
+                shares_map[symbol] = 0.0
+        return shares_map
+
+    def _fetch_momentum_for_timeframe(self, timeframe_key: Any) -> None:
+        """Fetch portfolio momentum for a specific timeframe."""
+        portfolio_id = str(self.active_portfolio_id)
+        cache_key = self._p4_momentum_cache_key(timeframe_key, portfolio_id)
+        if self._momentum_metrics_fetching.get(cache_key, False):
+            return
+        tickers = list(self._p4_active_tickers())
+        shares_map = self._p4_active_momentum_shares_map()
+        if not tickers:
+            payload = self._p4_empty_momentum_payload('No portfolio holdings available')
+            self._momentum_metrics_cache[cache_key] = payload
+            self._momentum_metrics_fetching[cache_key] = False
+            if portfolio_id == str(self.active_portfolio_id) and timeframe_key == self._active_momentum_timeframe:
+                self._update_momentum_chart(timeframe_key, payload)
+            return
+        config = self._get_return_timeframe_config(timeframe_key)
+        self._momentum_metrics_fetching[cache_key] = True
+        worker = PortfolioMomentumWorker(
+            tickers,
+            shares_map,
+            period=config.get('period', '1mo'),
+            interval=config.get('interval', '1d'),
+            start=config.get('start'),
+        )
+        worker.finished.connect(
+            lambda payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, payload)
+        )
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def _on_momentum_ready(self, timeframe_key: Any, portfolio_id: Any, payload: Any) -> None:
+        """Handle portfolio momentum data becoming ready."""
+        cache_key = self._p4_momentum_cache_key(timeframe_key, portfolio_id)
+        self._momentum_metrics_fetching[cache_key] = False
+        self._momentum_metrics_cache[cache_key] = payload
+        if str(portfolio_id) == str(self.active_portfolio_id) and timeframe_key == self._active_momentum_timeframe:
+            self._update_momentum_chart(timeframe_key, payload)
+
+    def _on_momentum_timeframe_changed(self, index: int) -> None:
+        """Handle momentum timeframe tab changes."""
+        if index < 0 or index >= len(getattr(self, 'p4_momentum_timeframes', ())):
+            return
+        timeframe_key = self.p4_momentum_timeframes[index][0]
+        self._active_momentum_timeframe = timeframe_key
+        cache_key = self._p4_momentum_cache_key(timeframe_key)
+        if cache_key in self._momentum_metrics_cache:
+            self._update_momentum_chart(timeframe_key, self._momentum_metrics_cache.get(cache_key, {}))
+            return
+        self._fetch_momentum_for_timeframe(timeframe_key)
+
+    def _p4_refresh_active_momentum_view(self) -> None:
+        """Refresh the visible momentum chart from cache or fetch it."""
+        timeframe_key = str(getattr(self, '_active_momentum_timeframe', '1mo') or '1mo')
+        cache_key = self._p4_momentum_cache_key(timeframe_key)
+        if cache_key in self._momentum_metrics_cache:
+            self._update_momentum_chart(timeframe_key, self._momentum_metrics_cache.get(cache_key, {}))
+            return
+        self._fetch_momentum_for_timeframe(timeframe_key)
 
     def _launch_worker(self, worker_obj: Any, finished_slot: Any, flag_attr: Any) -> Any:
         """Guard-and-launch helper for background workers."""
@@ -606,4 +809,17 @@ class PortfolioMetricsMixin:
             )
         else:
             self._fetch_returns_for_timeframe(self._active_return_timeframe)
+        active_momentum_cache_key = self._p4_momentum_cache_key(self._active_momentum_timeframe)
+        if not tickers:
+            payload = self._p4_empty_momentum_payload('No portfolio holdings available')
+            self._momentum_metrics_cache[active_momentum_cache_key] = payload
+            self._momentum_metrics_fetching[active_momentum_cache_key] = False
+            self._update_momentum_chart(self._active_momentum_timeframe, payload)
+        elif active_momentum_cache_key in self._momentum_metrics_cache:
+            self._update_momentum_chart(
+                self._active_momentum_timeframe,
+                self._momentum_metrics_cache.get(active_momentum_cache_key, {}),
+            )
+        else:
+            self._fetch_momentum_for_timeframe(self._active_momentum_timeframe)
         self._fetch_market_caps(sorted_tickers)

@@ -3,28 +3,39 @@ setlocal
 
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    py -3 -m venv .venv
+set "VENV_DIR=.venv"
+
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+    echo.
+    echo Missing build environment: %VENV_DIR%
+    echo Create it and install the build dependencies first:
+    echo   python -m venv %VENV_DIR%
+    echo   %VENV_DIR%\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+    exit /b 1
 )
 
-call ".venv\Scripts\activate.bat"
-if errorlevel 1 exit /b 1
-
-python -m pip install --upgrade pip
+call "%VENV_DIR%\Scripts\activate.bat"
 if errorlevel 1 exit /b 1
 
 python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 exit /b 1
 
 for /f "delims=" %%i in ('python -c "from budget_terminal_app import __version__; print(__version__)"') do set "APP_VERSION=%%i"
-set "APP_EXE=BudgetTerminal-v%APP_VERSION%.exe"
-set "APP_ZIP=BudgetTerminal-v%APP_VERSION%-windows.zip"
+set "APP_BASE=BudgetTerminal-v%APP_VERSION%"
+set "APP_EXE=%APP_BASE%.exe"
+set "APP_ZIP=%APP_BASE%-windows.zip"
 
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 
 pyinstaller --noconfirm budget_terminal.spec
 if errorlevel 1 exit /b 1
+
+if not exist "dist\%APP_EXE%" (
+    echo.
+    echo Expected build output was not found: dist\%APP_EXE%
+    exit /b 1
+)
 
 if not exist "release" mkdir "release"
 

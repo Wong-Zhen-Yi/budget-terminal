@@ -24,7 +24,7 @@ class SettingsMixin:
         title_col.setSpacing(6)
         title = QLabel('Settings')
         self.set_theme_role(title, 'page_title')
-        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. Copy AI-Readable Data sends the current app state to the clipboard, Export User Data creates a JSON backup, import restores it, and clear removes saved user data while keeping dashboard chart slots.')
+        description = QLabel('Manage saved portfolio, tracker, personal finance, and options data. Export User Data creates a backup folder with separate user-data JSON and notes DOCX files, Import User Data restores the user-data JSON, and clear removes saved user data while keeping dashboard chart slots.')
         description.setWordWrap(True)
         self.set_theme_role(description, 'muted')
         title_col.addWidget(title)
@@ -73,21 +73,21 @@ class SettingsMixin:
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setContentsMargins(14, 16, 14, 14)
         actions_layout.setSpacing(12)
-        actions_intro = QLabel('Backup and restore your save application state. Copy AI-Readable Data sends the current app state to the clipboard. Export User Data creates a JSON backup file. Clear removes user data but keeps dashboard chart slots intact.')
+        actions_intro = QLabel('Backup and restore your saved application state. Export User Data creates a folder containing separate user_data.json and notes.docx files. Import User Data restores the exported user_data.json file, and Import Notes restores notes backups. Clear removes user data but keeps dashboard chart slots intact.')
         actions_intro.setWordWrap(True)
         self.set_theme_role(actions_intro, 'muted')
-        export_btn = QPushButton('Export User Data')
+        export_btn = QPushButton('Export User Data and Notes')
         self.set_theme_variant(export_btn, 'accent')
         export_btn.setMinimumHeight(32)
         export_btn.clicked.connect(self._on_export_user_data)
-        export_ai_btn = QPushButton('Copy AI-Readable Data')
-        self.set_theme_variant(export_ai_btn, 'accent')
-        export_ai_btn.setMinimumHeight(32)
-        export_ai_btn.clicked.connect(self._on_export_ai_user_data)
         import_btn = QPushButton('Import User Data')
         self.set_theme_variant(import_btn, 'accent')
         import_btn.setMinimumHeight(32)
         import_btn.clicked.connect(self._on_import_user_data)
+        import_notes_btn = QPushButton('Import Notes')
+        self.set_theme_variant(import_notes_btn, 'accent')
+        import_notes_btn.setMinimumHeight(32)
+        import_notes_btn.clicked.connect(self._on_import_notes_from_settings)
         clear_btn = QPushButton('Clear All User Data')
         self.set_theme_variant(clear_btn, 'danger')
         clear_btn.setMinimumHeight(32)
@@ -98,8 +98,8 @@ class SettingsMixin:
         reset_cache_btn.clicked.connect(self._on_reset_cache)
         actions_layout.addWidget(actions_intro)
         actions_layout.addWidget(export_btn)
-        actions_layout.addWidget(export_ai_btn)
         actions_layout.addWidget(import_btn)
+        actions_layout.addWidget(import_notes_btn)
         actions_layout.addWidget(clear_btn)
         actions_layout.addWidget(reset_cache_btn)
 
@@ -381,6 +381,8 @@ class SettingsMixin:
         """Apply imported or cleared data to the live UI state."""
         self._return_metrics_cache = {}
         self._return_metrics_fetching = {}
+        self._momentum_metrics_cache = {}
+        self._momentum_metrics_fetching = {}
         if isinstance(payload, dict) and isinstance(payload.get('portfolios'), dict):
             self.all_portfolios_state = save_all_portfolios_state(payload)
             self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
@@ -429,6 +431,7 @@ class SettingsMixin:
         self.dashboard_active_indicators = list(dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
         self.dashboard_auto_follow = bool(dashboard_chart_state.get('auto', True))
         self.networth_data = dict(payload.get('net_worth', {'cash': [], 'debt': []})) if isinstance(payload, dict) else {'cash': [], 'debt': []}
+        self.notes_data = load_notes_data()
         self.last_data = None
         self._sync_after_portfolio_change(refresh_main=False)
         if hasattr(self, 'p10_symbol_input'):
@@ -468,36 +471,36 @@ class SettingsMixin:
         self.p4_table.blockSignals(False)
         self._reload_options_table()
         self._p6_populate_tables()
+        if hasattr(self, '_p17_apply_runtime_notes_data'):
+            self._p17_apply_runtime_notes_data(self.notes_data)
         self.p4_total_label.setText('Total:  $0.00  USD')
         if hasattr(self, '_p4_refresh_portfolio_selector'):
             self._p4_refresh_portfolio_selector()
         self.refresh_data()
 
     def _on_export_user_data(self) -> None:
-        """Export current user data to a single JSON file."""
-        default_name = f"budget_terminal_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        path, _ = QFileDialog.getSaveFileName(self, 'Export User Data', str(Path.home() / default_name), 'JSON Files (*.json)')
-        if not path:
+        """Export current user data and notes into a folder with separate files."""
+        parent_dir = QFileDialog.getExistingDirectory(self, 'Select Export Folder', str(Path.home()))
+        if not parent_dir:
             self._set_settings_status('Export cancelled.')
             return
         try:
-            export_user_data_backup(path)
+            exported = export_user_data_bundle(parent_dir)
         except Exception as exc:
             self._set_settings_status(f'Export failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Export Failed', f'Unable to export user data.\n\n{exc}')
             return
-        self._set_settings_status(f'User data exported to {path}', 'positive')
-        QMessageBox.information(self, 'Export Complete', f'User data exported successfully.\n\n{path}')
-
-    def _on_export_ai_user_data(self) -> None:
-        """Copy current user data as AI-friendly Markdown to the clipboard."""
-        try:
-            QApplication.clipboard().setText(build_ai_user_data_export())
-        except Exception as exc:
-            self._set_settings_status(f'AI copy failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'AI Copy Failed', f'Unable to copy AI-readable user data.\n\n{exc}')
-            return
-        self._set_settings_status('AI-readable user data copied to clipboard', 'positive')
+        export_folder = str(exported.get('folder', '') or parent_dir)
+        self._set_settings_status(f'User data and notes exported to {export_folder}', 'positive')
+        QMessageBox.information(
+            self,
+            'Export Complete',
+            'User data and notes exported successfully.\n\n'
+            f'{export_folder}\n\n'
+            'Files created:\n'
+            '- user_data.json\n'
+            '- notes.docx'
+        )
 
     def _on_import_user_data(self) -> None:
         """Import user data from a previously exported backup file."""
@@ -524,6 +527,16 @@ class SettingsMixin:
             return
         self._set_settings_status(f'Imported user data from {path}', 'positive')
         QMessageBox.information(self, 'Import Complete', 'User data imported successfully.')
+
+    def _on_import_notes_from_settings(self) -> None:
+        """Reuse the Notes-tab import flow from the Settings page."""
+        if not hasattr(self, '_p17_import_notes'):
+            self._set_settings_status('Notes import is unavailable.', 'negative')
+            QMessageBox.critical(self, 'Import Failed', 'The Notes import flow is unavailable in this build.')
+            return
+        self._p17_import_notes()
+        if hasattr(self, 'p17_status_lbl'):
+            self._set_settings_status(self.p17_status_lbl.text())
 
     def _on_clear_user_data(self) -> None:
         """Clear persisted user data after confirmation."""
@@ -565,6 +578,8 @@ class SettingsMixin:
             self._options_expiry_memory_cache = {}
             self._return_metrics_cache = {}
             self._return_metrics_fetching = {}
+            self._momentum_metrics_cache = {}
+            self._momentum_metrics_fetching = {}
             self.last_data = None
             if hasattr(self, '_dashboard_clear_chart'):
                 self._dashboard_clear_chart(getattr(self, 'dashboard_symbol', 'Chart'))

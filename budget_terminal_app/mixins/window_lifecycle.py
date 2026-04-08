@@ -34,7 +34,9 @@ class WindowLifecycleMixin:
         self._register_page(11, self.btn_page13)
         self._register_page(12, self.btn_page14, on_show=self._p14_refresh)
         self._register_page(13, self.btn_page15, on_show=self._p15_refresh)
-        self._register_page(14, self.btn_page9)
+        self._register_page(14, self.btn_page16, on_show=self._p16_on_show)
+        self._register_page(15, self.btn_page17, on_show=self._p17_on_show if hasattr(self, '_p17_on_show') else None)
+        self._register_page(16, self.btn_page9)
         self._refresh_main_tab_picker_items()
 
     def _is_current_page(self, page: Any) -> bool:
@@ -59,6 +61,9 @@ class WindowLifecycleMixin:
         if hasattr(self, '_p7_apply_detail_table_widths') and hasattr(self, 'stacked_widget'):
             if self._is_current_page(getattr(self, 'page7', None)):
                 self._p7_apply_detail_table_widths()
+        if hasattr(self, '_p17_refresh_image_preview') and hasattr(self, 'stacked_widget'):
+            if self._is_current_page(getattr(self, 'page17', None)):
+                self._p17_refresh_image_preview()
 
     def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None) -> None:
         """Register a page in the nav system. Wires the button and stores lifecycle callbacks."""
@@ -254,6 +259,8 @@ class WindowLifecycleMixin:
         else:
             self.time_label.setText(now.strftime('%H:%M:%S'))
         self._refresh_data_collection_label()
+        if hasattr(self, '_p17_refresh_timestamp_labels'):
+            self._p17_refresh_timestamp_labels()
 
     def _set_data_collection_info(self, sources: Any, collected_at: Any=None) -> None:
         """Persist footer metadata about the latest completed data fetch."""
@@ -314,6 +321,10 @@ class WindowLifecycleMixin:
         active_entry['portfolio'] = getattr(self, 'active_tickers', active_entry.get('portfolio', []))
         active_entry['portfolio_tracker'] = getattr(self, 'active_tracker_data', active_entry.get('portfolio_tracker', {}))
         active_entry['options_tracker'] = self.options_data
+        if hasattr(self, '_p17_flush_pending_save'):
+            self._p17_flush_pending_save()
+        if hasattr(self, '_p17_finalize_startup_draft_on_close'):
+            self._p17_finalize_startup_draft_on_close()
         self._persist_all_portfolios(immediate=True)
         if hasattr(self, '_dashboard_save_state'):
             self._dashboard_save_state()

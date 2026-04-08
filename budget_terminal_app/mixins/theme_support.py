@@ -37,6 +37,9 @@ class ThemeSupportMixin:
             "_apply_fundamentals_theme",
             "_apply_options_chain_theme",
             "_apply_politics_theme",
+            "_apply_youtube_theme",
+            "_apply_notes_theme",
+            "_apply_grok_theme",
         ):
             fn = getattr(self, name, None)
             if callable(fn):

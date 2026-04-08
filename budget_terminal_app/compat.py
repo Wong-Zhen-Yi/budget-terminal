@@ -6,12 +6,13 @@ from .persistence import *
 from .widgets.charts import CandlestickItem, DateAxisItem, FmtAxisItem
 from .widgets.bar_chart import BarChartWidget
 from .widgets.pie_chart import PieChartWidget
-from .workers.calendar import CalendarWorker, _get_economic_events
+from .workers.calendar import CalendarWorker, _get_economic_events, _get_economic_events_for_year, _get_market_holiday_events
 from .workers.data import DataWorker
 from .workers.fundamentals import FundamentalsWorker
-from .workers.market_metrics import MarketCapWorker, MonthReturnWorker
+from .workers.market_metrics import MarketCapWorker, MonthReturnWorker, PortfolioMomentumWorker
 from .workers.news import NewsSummarizerWorker, _extract_words, _sentiment_label, _sentiment_score
 from .workers.politics import PoliticsWorker, PoliticsExportWorker
 from .workers.polygon import _get_fiscal_year, _safe_get_year
+from .workers.youtube import YouTubeWorker
 
 __all__ = [name for name in globals() if name != "__all__"]

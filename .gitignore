@@ -167,3 +167,4 @@ budget_terminal_app/mixins/p9_config.json
 !requirements.txt
 screenshots/
 release/*.zip
+models/*.gguf

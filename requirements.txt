@@ -1,3 +1,4 @@
+# Base application dependencies.
 pandas
 yfinance
 PyQt6
@@ -5,3 +6,6 @@ pyqtgraph
 requests
 tzdata
 beautifulsoup4
+yt-dlp
+python-docx
+pandas_market_calendars

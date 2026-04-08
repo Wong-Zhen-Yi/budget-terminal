@@ -427,6 +427,14 @@ class WindowBootstrapMixin:
             key: value for key, value in getattr(self, '_return_metrics_fetching', {}).items()
             if str(key[0]) != str(portfolio_id)
         }
+        self._momentum_metrics_cache = {
+            key: value for key, value in getattr(self, '_momentum_metrics_cache', {}).items()
+            if str(key[0]) != str(portfolio_id)
+        }
+        self._momentum_metrics_fetching = {
+            key: value for key, value in getattr(self, '_momentum_metrics_fetching', {}).items()
+            if str(key[0]) != str(portfolio_id)
+        }
         self._persist_all_portfolios()
         self._sync_after_portfolio_change(refresh_main=deleted_main)
         return True
@@ -471,6 +479,9 @@ class WindowBootstrapMixin:
         self._return_metrics_cache = {}
         self._return_metrics_fetching = {}
         self._active_return_timeframe = 'dip_finder'
+        self._momentum_metrics_cache = {}
+        self._momentum_metrics_fetching = {}
+        self._active_momentum_timeframe = '1mo'
         self._news_auto_summarized = False
         self._data_collection_ts = None
         self._data_collection_sources = []
@@ -493,6 +504,7 @@ class WindowBootstrapMixin:
         self.active_tracker_data = {}
         self.active_options_data = []
         self.networth_data = load_networth_data()
+        self.notes_data = load_notes_data()
         self.theme_settings = load_theme_settings()
         self.chart_page_state = load_chart_page_settings()
         self.stocks_page_state = load_stocks_page_settings()
