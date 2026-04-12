@@ -2,15 +2,35 @@ from __future__ import annotations
 import base64
 import html
 import shutil
+import sys
+from pathlib import Path
 from typing import Any
-from .dependencies import *
-from .paths import legacy_documents_user_data_path, user_data_path
+
+if __package__ in {None, ''}:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+    from budget_terminal_app.dependencies import *
+    from budget_terminal_app.paths import legacy_documents_user_data_path, user_data_path
+else:
+    from .dependencies import *
+    from .paths import legacy_documents_user_data_path, user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = 7
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
-DEFAULT_CHART_PAGE_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'watchlist': [], 'indicators': ['Volume', '200 MA'], 'auto': True}
+DEFAULT_CHART_PAGE_SETTINGS = {
+    'symbol': 'SPY',
+    'timeframe_label': '1 Day',
+    'compare_interval_label': '1 Day',
+    'compare_range_label': '5Y',
+    'watchlist': [],
+    'compare_symbols': [],
+    'compare_presets': [],
+    'indicators': ['Volume', '200 MA'],
+    'auto': True,
+}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
 DEFAULT_STOCKS_PAGE_SETTINGS = {
     'symbol': 'SPY',
@@ -20,16 +40,11 @@ DEFAULT_STOCKS_PAGE_SETTINGS = {
     'left_splitter_sizes': [4, 2, 3],
     'middle_splitter_sizes': [2, 3],
 }
+DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key': '1y'}
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
+DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_GROK_SETTINGS = {
-    'provider': 'xai',
-    'xai_model': 'grok-4.20-reasoning',
-    'openai_model': 'gpt-5-mini',
-    'web_search': False,
-    'x_search': False,
-}
 DEFAULT_NOTES = []
 NOTE_CATEGORIES = ('General', 'Observations', 'Trade Ideas')
 NOTES_BACKUP_VERSION = 1
@@ -39,13 +54,7 @@ PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
 SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'],)
-CHAT_PROVIDER_CHOICES = ('xai', 'openai')
-GROK_MODEL_CHOICES = ('grok-4.20-reasoning', 'grok-4', 'grok-4-latest')
-OPENAI_MODEL_CHOICES = ('gpt-5-mini', 'gpt-5', 'gpt-4.1', 'gpt-4.1-mini')
-GROK_KEYRING_SERVICE = 'BudgetTerminal.Grok'
-GROK_KEYRING_ACCOUNT = 'xai_api_key'
-OPENAI_KEYRING_SERVICE = 'BudgetTerminal.OpenAI'
-OPENAI_KEYRING_ACCOUNT = 'openai_api_key'
+PORTFOLIO_METRICS_LOOKBACK_CHOICES = ('1y', '3y', '5y', 'max')
 
 
 def _read_json(path: Any, default: Any) -> Any:
@@ -117,24 +126,6 @@ def _normalize_theme_setting(value: Any) -> Any:
     return text if text in SUPPORTED_THEME_IDS else DEFAULT_THEME_SETTINGS['selected_theme']
 
 
-def _normalize_grok_model(value: Any) -> Any:
-    """Normalize persisted Grok model ids while still allowing manual custom entries."""
-    text = str(value or '').strip()
-    return text or DEFAULT_GROK_SETTINGS['xai_model']
-
-
-def _normalize_openai_model(value: Any) -> Any:
-    """Normalize persisted OpenAI model ids while still allowing manual custom entries."""
-    text = str(value or '').strip()
-    return text or DEFAULT_GROK_SETTINGS['openai_model']
-
-
-def _normalize_chat_provider(value: Any) -> Any:
-    """Normalize the saved chat provider id."""
-    text = str(value or '').strip().lower()
-    return text if text in CHAT_PROVIDER_CHOICES else DEFAULT_GROK_SETTINGS['provider']
-
-
 def _normalize_unique_symbol_list(values: Any) -> Any:
     """Normalize ticker-like values into an uppercase unique list."""
     normalized = []
@@ -144,6 +135,50 @@ def _normalize_unique_symbol_list(values: Any) -> Any:
         text = str(value or '').upper().strip()
         if text and text not in normalized:
             normalized.append(text)
+    return normalized
+
+
+def _normalize_compare_preset_name(value: Any) -> str:
+    """Normalize one compare preset name without losing display casing."""
+    return str(value or '').strip()
+
+
+def _normalize_compare_presets(values: Any) -> list[dict[str, Any]]:
+    """Normalize named compare presets into a stable persisted shape."""
+    normalized = []
+    seen = set()
+    if not isinstance(values, list):
+        return normalized
+    for entry in values:
+        preset = entry if isinstance(entry, dict) else {}
+        name = _normalize_compare_preset_name(preset.get('name'))
+        if not name:
+            continue
+        name_key = name.casefold()
+        if name_key in seen:
+            continue
+        symbols = _normalize_unique_symbol_list(preset.get('symbols', []))
+        if not symbols:
+            continue
+        interval_label = str(
+            preset.get('interval_label', DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label'])
+            or DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label']
+        ).strip()
+        if interval_label not in {'1 Day', '1 Week'}:
+            interval_label = DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label']
+        range_label = str(
+            preset.get('range_label', DEFAULT_CHART_PAGE_SETTINGS['compare_range_label'])
+            or DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']
+        ).strip().upper()
+        if range_label not in {'5Y', '3Y', '1Y', 'YTD', '3M', '1M'}:
+            range_label = DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']
+        normalized.append({
+            'name': name,
+            'symbols': symbols,
+            'interval_label': interval_label,
+            'range_label': range_label,
+        })
+        seen.add(name_key)
     return normalized
 
 
@@ -467,19 +502,6 @@ def _normalize_options_chain_payload(settings: Any) -> Any:
     return {'default_risk_free_rate': min(max(rate_value, 0.0), 1.0)}
 
 
-def _normalize_grok_payload(settings: Any) -> Any:
-    """Normalize persisted non-secret Grok page settings."""
-    saved = settings if isinstance(settings, dict) else {}
-    legacy_model = saved.get('model', DEFAULT_GROK_SETTINGS['xai_model'])
-    return {
-        'provider': _normalize_chat_provider(saved.get('provider', DEFAULT_GROK_SETTINGS['provider'])),
-        'xai_model': _normalize_grok_model(saved.get('xai_model', legacy_model)),
-        'openai_model': _normalize_openai_model(saved.get('openai_model', DEFAULT_GROK_SETTINGS['openai_model'])),
-        'web_search': bool(saved.get('web_search', DEFAULT_GROK_SETTINGS['web_search'])),
-        'x_search': bool(saved.get('x_search', DEFAULT_GROK_SETTINGS['x_search'])),
-    }
-
-
 def _normalize_note_category(value: Any) -> str:
     """Clamp note categories to the supported fixed set."""
     text = str(value or '').strip()
@@ -586,12 +608,13 @@ def _default_user_data_document() -> Any:
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
+        'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
-        'grok': DEFAULT_GROK_SETTINGS.copy(),
         'time_12h': False,
     }
 
@@ -611,12 +634,13 @@ def _normalize_user_data_document(payload: Any, *, existing_notes: Any=None) -> 
         'chart_page': _normalize_chart_page_settings(saved.get('chart_page', default['chart_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
+        'portfolio_metrics': _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics', default['portfolio_metrics'])),
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
+        'youtube': _normalize_youtube_settings(saved.get('youtube', default['youtube'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'notes': _normalize_notes_payload(saved.get('notes', notes_fallback)),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
-        'grok': _normalize_grok_payload(saved.get('grok', default['grok'])),
         'time_12h': bool(saved.get('time_12h', False)),
     }
 
@@ -1286,8 +1310,6 @@ def _json_block(data: Any) -> Any:
 def build_ai_user_data_export() -> str:
     """Build a Markdown export optimized for human and AI analysis."""
     payload = build_user_data_backup()
-    display_payload = dict(payload)
-    display_payload.pop('grok', None)
     lines = [
         '# Budget Terminal User Data',
         '',
@@ -1348,6 +1370,10 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
         '',
+        '## Portfolio Metrics Settings',
+        '',
+        _json_block(payload.get('portfolio_metrics', DEFAULT_PORTFOLIO_METRICS_SETTINGS)),
+        '',
         '## Multi Charts Settings',
         '',
         _json_block(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
@@ -1362,7 +1388,7 @@ def build_ai_user_data_export() -> str:
         '',
         '## Full Normalized Payload',
         '',
-        _json_block(display_payload),
+        _json_block(payload),
         '',
     ])
     return '\n'.join(lines)
@@ -1417,12 +1443,13 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
+        'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
         'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
-        'grok': DEFAULT_GROK_SETTINGS.copy(),
         'time_12h': False,
     }
     return apply_user_data_backup(normalized)
@@ -1442,9 +1469,10 @@ def load_app_config() -> Any:
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
+        'portfolio_metrics': dict(document.get('portfolio_metrics', DEFAULT_PORTFOLIO_METRICS_SETTINGS)),
         'multi_charts': dict(document.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
+        'youtube': dict(document.get('youtube', DEFAULT_YOUTUBE_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
-        'grok': dict(document.get('grok', DEFAULT_GROK_SETTINGS)),
         'time_12h': bool(document.get('time_12h', False)),
     }
 
@@ -1483,12 +1511,14 @@ def save_app_config(data: Any) -> None:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
     if 'stocks_page' in saved:
         current['stocks_page'] = _normalize_stocks_page_settings(saved.get('stocks_page'))
+    if 'portfolio_metrics' in saved:
+        current['portfolio_metrics'] = _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics'))
     if 'multi_charts' in saved:
         current['multi_charts'] = _normalize_multi_charts_settings(saved.get('multi_charts'))
+    if 'youtube' in saved:
+        current['youtube'] = _normalize_youtube_settings(saved.get('youtube'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
-    if 'grok' in saved:
-        current['grok'] = _normalize_grok_payload(saved.get('grok'))
     if 'time_12h' in saved:
         current['time_12h'] = bool(saved['time_12h'])
     _save_user_data_document(current)
@@ -1525,14 +1555,35 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
     saved = settings if isinstance(settings, dict) else {}
     symbol = str(saved.get('symbol', DEFAULT_CHART_PAGE_SETTINGS['symbol']) or DEFAULT_CHART_PAGE_SETTINGS['symbol']).upper()
     timeframe_label = str(saved.get('timeframe_label', DEFAULT_CHART_PAGE_SETTINGS['timeframe_label']) or DEFAULT_CHART_PAGE_SETTINGS['timeframe_label'])
+    compare_interval_label = str(saved.get('compare_interval_label', DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label']) or DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label']).strip()
+    if compare_interval_label not in {'1 Day', '1 Week'}:
+        compare_interval_label = DEFAULT_CHART_PAGE_SETTINGS['compare_interval_label']
+    compare_range_label = str(saved.get('compare_range_label', DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']) or DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']).strip().upper()
+    if compare_range_label not in {'5Y', '3Y', '1Y', 'YTD', '3M', '1M'}:
+        compare_range_label = DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']
     raw_watchlist = saved.get('watchlist', [])
     if not isinstance(raw_watchlist, list):
         raw_watchlist = []
     watchlist = _normalize_unique_symbol_list(raw_watchlist)
+    raw_compare_symbols = saved.get('compare_symbols', [])
+    if not isinstance(raw_compare_symbols, list):
+        raw_compare_symbols = []
+    compare_symbols = _normalize_unique_symbol_list(raw_compare_symbols)
+    compare_presets = _normalize_compare_presets(saved.get('compare_presets', []))
     indicators = _normalize_indicator_list(saved.get('indicators'), DEFAULT_CHART_PAGE_SETTINGS['indicators'])
     auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
-    return {'symbol': symbol, 'timeframe_label': timeframe_label, 'watchlist': watchlist, 'indicators': indicators, 'auto': auto_enabled}
+    return {
+        'symbol': symbol,
+        'timeframe_label': timeframe_label,
+        'compare_interval_label': compare_interval_label,
+        'compare_range_label': compare_range_label,
+        'watchlist': watchlist,
+        'compare_symbols': compare_symbols,
+        'compare_presets': compare_presets,
+        'indicators': indicators,
+        'auto': auto_enabled,
+    }
 
 
 def _normalize_stocks_page_settings(settings: Any) -> Any:
@@ -1592,12 +1643,48 @@ def _normalize_stocks_page_settings(settings: Any) -> Any:
     }
 
 
+def _normalize_portfolio_metrics_settings(settings: Any) -> Any:
+    """Normalize persisted state for the Portfolio Metrics sub-tab."""
+    saved = settings if isinstance(settings, dict) else {}
+    benchmark_symbol = str(
+        saved.get('benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+        or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']
+    ).upper().strip()
+    lookback_key = str(
+        saved.get('lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+        or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+    ).strip().lower()
+    if lookback_key not in PORTFOLIO_METRICS_LOOKBACK_CHOICES:
+        lookback_key = DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+    return {
+        'benchmark_symbol': benchmark_symbol or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'],
+        'lookback_key': lookback_key,
+    }
+
+
 def _normalize_multi_charts_settings(settings: Any) -> Any:
     """Normalize persisted state for the Multi Charts page."""
     saved = settings if isinstance(settings, dict) else {}
     return {
         'custom_symbols': _normalize_unique_symbol_list(saved.get('custom_symbols', DEFAULT_MULTI_CHARTS_SETTINGS['custom_symbols'])),
         'order': _normalize_unique_symbol_list(saved.get('order', DEFAULT_MULTI_CHARTS_SETTINGS['order'])),
+    }
+
+
+def _normalize_youtube_settings(settings: Any) -> Any:
+    """Normalize persisted state for the YouTube page."""
+    saved = settings if isinstance(settings, dict) else {}
+    try:
+        sort_column = int(saved.get('sort_column', DEFAULT_YOUTUBE_SETTINGS['sort_column']))
+    except (TypeError, ValueError):
+        sort_column = DEFAULT_YOUTUBE_SETTINGS['sort_column']
+    if sort_column < -1 or sort_column > 6:
+        sort_column = DEFAULT_YOUTUBE_SETTINGS['sort_column']
+    descending_value = saved.get('sort_descending', DEFAULT_YOUTUBE_SETTINGS['sort_descending'])
+    sort_descending = bool(descending_value) if isinstance(descending_value, bool | int) else DEFAULT_YOUTUBE_SETTINGS['sort_descending']
+    return {
+        'sort_column': sort_column,
+        'sort_descending': sort_descending,
     }
 
 
@@ -1750,6 +1837,21 @@ def save_stocks_page_settings(settings: Any) -> Any:
     return state
 
 
+def load_portfolio_metrics_settings() -> Any:
+    """Load persisted state for the Portfolio Metrics sub-tab."""
+    config = load_app_config()
+    return _normalize_portfolio_metrics_settings(config.get('portfolio_metrics', {}))
+
+
+def save_portfolio_metrics_settings(settings: Any) -> Any:
+    """Persist state for the Portfolio Metrics sub-tab."""
+    current = load_app_config()
+    state = _normalize_portfolio_metrics_settings(settings)
+    current['portfolio_metrics'] = state
+    save_app_config(current)
+    return state
+
+
 def load_multi_charts_settings() -> Any:
     """Load persisted state for the Multi Charts page."""
     config = load_app_config()
@@ -1761,6 +1863,21 @@ def save_multi_charts_settings(settings: Any) -> None:
     current = load_app_config()
     current['multi_charts'] = _normalize_multi_charts_settings(settings)
     save_app_config(current)
+
+
+def load_youtube_settings() -> Any:
+    """Load persisted state for the YouTube page."""
+    config = load_app_config()
+    return _normalize_youtube_settings(config.get('youtube', {}))
+
+
+def save_youtube_settings(settings: Any) -> Any:
+    """Persist state for the YouTube page."""
+    current = load_app_config()
+    state = _normalize_youtube_settings(settings)
+    current['youtube'] = state
+    save_app_config(current)
+    return state
 
 
 def load_options_chain_settings() -> Any:
@@ -1791,141 +1908,6 @@ def save_options_chain_settings(settings: Any) -> Any:
     current['options_chain'] = state
     save_app_config(current)
     return state
-
-
-def load_grok_settings() -> Any:
-    """Load persisted non-secret settings for the Grok page."""
-    config = load_app_config()
-    return _normalize_grok_payload(config.get('grok', {}))
-
-
-def save_grok_settings(settings: Any) -> Any:
-    """Persist non-secret settings for the Grok page."""
-    current = load_app_config()
-    state = _normalize_grok_payload(settings)
-    current['grok'] = state
-    save_app_config(current)
-    return state
-
-
-def _load_keyring_backend() -> tuple[Any, str | None]:
-    """Return the keyring module when a supported secure backend is available."""
-    try:
-        import keyring
-    except Exception as exc:
-        return (None, f'keyring is unavailable: {exc}')
-    try:
-        backend = keyring.get_keyring()
-    except Exception as exc:
-        return (None, f'Unable to access the OS credential store: {exc}')
-    try:
-        priority_value = float(getattr(backend, 'priority', 0))
-    except Exception:
-        priority_value = None
-    if priority_value is not None and priority_value <= 0:
-        return (None, f'No supported OS credential backend is available ({backend.__class__.__name__}).')
-    return (keyring, None)
-
-
-def provider_api_key_storage_status(provider_name: str) -> Any:
-    """Describe how API keys for a provider will be handled on the current machine."""
-    keyring, error_message = _load_keyring_backend()
-    if keyring is None:
-        return {
-            'available': False,
-            'mode': 'session_only',
-            'message': f'{error_message} Keys will only be kept for the current app session.',
-        }
-    return {
-        'available': True,
-        'mode': 'secure',
-        'message': f'{provider_name} API keys are stored in your OS credential vault and are not included in Budget Terminal user-data exports.',
-    }
-
-
-def grok_api_key_storage_status() -> Any:
-    """Describe how the Grok/xAI API key will be handled on the current machine."""
-    return provider_api_key_storage_status('xAI')
-
-
-def _load_saved_api_key(service_name: str, account_name: str, label: str) -> Any:
-    """Load a saved API key from secure storage when available."""
-    keyring, error_message = _load_keyring_backend()
-    if keyring is None:
-        return None
-    try:
-        value = keyring.get_password(service_name, account_name)
-    except Exception as exc:
-        logger.warning('Unable to load the %s API key from secure storage: %s', label, exc)
-        return None
-    clean = str(value or '').strip()
-    return clean or None
-
-
-def load_grok_api_key() -> Any:
-    """Load the saved Grok/xAI API key from secure storage when available."""
-    return _load_saved_api_key(GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
-
-
-def _save_api_key(value: Any, service_name: str, account_name: str, label: str) -> None:
-    """Save an API key into secure OS storage."""
-    keyring, error_message = _load_keyring_backend()
-    if keyring is None:
-        raise RuntimeError(error_message or 'Secure key storage is unavailable.')
-    clean = str(value or '').strip()
-    if not clean:
-        raise ValueError(f'Enter a {label} API key before saving.')
-    try:
-        keyring.set_password(service_name, account_name, clean)
-    except Exception as exc:
-        raise RuntimeError(f'Unable to save the {label} API key to secure storage: {exc}') from exc
-
-
-def save_grok_api_key(value: Any) -> None:
-    """Save the Grok/xAI API key into secure OS storage."""
-    _save_api_key(value, GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
-
-
-def _delete_saved_api_key(service_name: str, account_name: str, label: str) -> None:
-    """Delete a saved API key from secure storage when present."""
-    keyring, error_message = _load_keyring_backend()
-    if keyring is None:
-        raise RuntimeError(error_message or 'Secure key storage is unavailable.')
-    try:
-        keyring.delete_password(service_name, account_name)
-    except Exception as exc:
-        exc_name = exc.__class__.__name__
-        message = str(exc or '').strip().lower()
-        if exc_name in ('PasswordDeleteError', 'KeyringError') and (
-            'not found' in message or 'no such password' in message or 'cannot delete' in message
-        ):
-            return
-        raise RuntimeError(f'Unable to remove the {label} API key from secure storage: {exc}') from exc
-
-
-def delete_grok_api_key() -> None:
-    """Delete the saved Grok/xAI API key from secure storage when present."""
-    _delete_saved_api_key(GROK_KEYRING_SERVICE, GROK_KEYRING_ACCOUNT, 'xAI')
-
-
-def openai_api_key_storage_status() -> Any:
-    """Describe how the OpenAI API key will be handled on the current machine."""
-    return provider_api_key_storage_status('OpenAI')
-
-
-def load_openai_api_key() -> Any:
-    """Load the saved OpenAI API key from secure storage when available."""
-    return _load_saved_api_key(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
-
-
-def save_openai_api_key(value: Any) -> None:
-    """Save the OpenAI API key into secure OS storage."""
-    _save_api_key(value, OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
-
-
-def delete_openai_api_key() -> None:
-    """Delete the saved OpenAI API key from secure storage when present."""
-    _delete_saved_api_key(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_ACCOUNT, 'OpenAI')
 
 
 def load_time_format() -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime
+import importlib
 import json
 import logging
 import math
@@ -15,17 +16,49 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 from zoneinfo import ZoneInfo
-import pandas as pd
-import pyqtgraph as pg
-import requests
-import yfinance as yf
 from PyQt6.QtCore import QObject, QEvent, QPoint, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPalette, QPicture, QPolygonF, QScreen, QShortcut
 from PyQt6.QtWidgets import QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget
+
+
+class _LazyModuleProxy:
+    """Import heavy third-party modules only when their attributes are first used."""
+
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.Lock()
+
+    def _load(self) -> Any:
+        module = self._module
+        if module is not None:
+            return module
+        with self._lock:
+            module = self._module
+            if module is None:
+                module = importlib.import_module(self._module_name)
+                self._module = module
+        return module
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+    def __dir__(self) -> list[str]:
+        return dir(self._load())
+
+    def __repr__(self) -> str:
+        state = 'loaded' if self._module is not None else 'pending'
+        return f'<lazy-module {self._module_name} ({state})>'
+
+
+pd = _LazyModuleProxy('pandas')
+pg = _LazyModuleProxy('pyqtgraph')
+requests = _LazyModuleProxy('requests')
+yf = _LazyModuleProxy('yfinance')
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger('yfinance').setLevel(logging.WARNING)
 logging.getLogger('peewee').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 YF_LOCK = threading.Lock()
-from .workers.pre_market import PreMarketWorker

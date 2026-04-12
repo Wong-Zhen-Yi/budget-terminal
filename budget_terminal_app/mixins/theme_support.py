@@ -23,24 +23,26 @@ class ThemeSupportMixin:
         """Refresh page-specific theme surfaces after a theme switch."""
         self.current_theme_id = theme_id
         self.current_theme = self.theme_manager.current_theme
-        for name in (
-            "_apply_window_theme",
-            "_apply_dashboard_theme",
-            "_apply_portfolio_theme",
-            "_apply_calendar_theme",
-            "_apply_news_theme",
-            "_apply_networth_theme",
-            "_apply_sectors_theme",
-            "_apply_settings_theme",
-            "_apply_charts_page_theme",
-            "_apply_stocks_theme",
-            "_apply_fundamentals_theme",
-            "_apply_options_chain_theme",
-            "_apply_politics_theme",
-            "_apply_youtube_theme",
-            "_apply_notes_theme",
-            "_apply_grok_theme",
+        for name, page_attr in (
+            ("_apply_window_theme", None),
+            ("_apply_dashboard_theme", None),
+            ("_apply_portfolio_theme", "page4"),
+            ("_apply_calendar_theme", "page7"),
+            ("_apply_news_theme", "page3"),
+            ("_apply_networth_theme", "page6"),
+            ("_apply_sectors_theme", "page8"),
+            ("_apply_settings_theme", "page9"),
+            ("_apply_charts_page_theme", "page10"),
+            ("_apply_stocks_theme", "page12"),
+            ("_apply_etf_theme", "page13"),
+            ("_apply_fundamentals_theme", "page2"),
+            ("_apply_options_chain_theme", "page5"),
+            ("_apply_politics_theme", "page15"),
+            ("_apply_youtube_theme", "page16"),
+            ("_apply_notes_theme", "page17"),
         ):
+            if page_attr and not self._page_initialized(page_attr=page_attr):
+                continue
             fn = getattr(self, name, None)
             if callable(fn):
                 fn()

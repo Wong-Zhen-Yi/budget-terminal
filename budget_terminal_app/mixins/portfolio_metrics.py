@@ -3,8 +3,58 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.workers.market_metrics import MarketCapWorker, MonthReturnWorker, PortfolioAnalyticsWorker, PortfolioMomentumWorker
 
 _P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
+_P4_MOMENTUM_REFRESH_DEBOUNCE_MS = 250
+_P4_METRICS_REFRESH_DEBOUNCE_MS = 350
+_P4_METRICS_CARD_SPECS = (
+    ('beta', 'Portfolio Beta', 'Shows how strongly the portfolio tends to move relative to the benchmark.'),
+    ('alpha', 'Alpha', 'Measures performance above or below what beta alone would imply.'),
+    ('volatility', 'Volatility', 'Annualized day-to-day return variability. Higher values mean a bumpier ride.'),
+    ('max_drawdown', 'Max Drawdown', 'Largest peak-to-trough loss seen during the selected lookback window.'),
+    ('sharpe', 'Sharpe Ratio', 'Excess return earned for each unit of total portfolio volatility.'),
+    ('sortino', 'Sortino Ratio', 'Excess return earned for each unit of downside volatility only.'),
+    ('cagr', 'CAGR', 'Smoothed annual growth rate from the start to the end of the period.'),
+    ('tail_risk', 'Tail Risk', 'Average return during the worst 5% of days, shown as CVaR.'),
+    ('skewness', 'Skewness', 'Indicates whether returns tend to have larger upside or downside surprises.'),
+)
+_P4_METRICS_EXPOSURE_GROUPS = (
+    (
+        'Coverage',
+        (
+            ('holdings_count', 'Holdings', 'Count of positions with positive share balances.'),
+            ('valued_holdings_count', 'Valued Holdings', 'Holdings with a usable current market value for exposure calculations.'),
+            ('unvalued_holdings_count', 'Unpriced Holdings', 'Holdings excluded from exposure calculations because no current value was available.'),
+            ('coverage_pct', 'Coverage', 'Share of positive-share holdings included in the exposure calculation.'),
+            ('invested_value', 'Invested Value', 'Current market value allocated across the priced holdings included in exposure.'),
+        ),
+    ),
+    (
+        'Concentration',
+        (
+            ('largest_position_ticker', 'Largest Position', 'Ticker symbol of the largest holding by current market value.'),
+            ('largest_position_value', 'Largest Value', 'Current market value of the largest holding.'),
+            ('top_position_weight', 'Largest Weight', 'How much of the portfolio is concentrated in the single largest holding.'),
+            ('top_3_weight', 'Top 3 Weight', 'Combined portfolio weight of the three largest positions.'),
+            ('top_5_weight', 'Top 5 Weight', 'Combined portfolio weight of the five largest positions.'),
+        ),
+    ),
+    (
+        'Diversification',
+        (
+            ('effective_holdings', 'Effective Holdings', 'Diversification-adjusted holding count based on portfolio weights.'),
+            ('concentration_score', 'HHI', 'Herfindahl-Hirschman score. Higher values mean less diversification.'),
+        ),
+    ),
+)
+_P4_METRICS_TOP_POSITIONS_ROWS = 5
+_P4_METRICS_LOOKBACK_OPTIONS = (
+    ('1y', '1Y'),
+    ('3y', '3Y'),
+    ('5y', '5Y'),
+    ('max', 'Max'),
+)
 
 
 class PortfolioMetricsMixin:
@@ -55,6 +105,600 @@ class PortfolioMetricsMixin:
             'active_tracker_data',
             self._get_portfolio_entry(self.active_portfolio_id).setdefault('portfolio_tracker', {}),
         )
+
+    def _build_portfolio_metrics_page(self) -> Any:
+        """Build the Portfolio Metrics sub-tab content."""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(8)
+
+        controls_frame = QFrame()
+        self.set_theme_role(controls_frame, 'panel')
+        controls_layout = QVBoxLayout(controls_frame)
+        controls_layout.setContentsMargins(12, 12, 12, 12)
+        controls_layout.setSpacing(8)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(8)
+        controls_title = QLabel('Risk & Return Analytics')
+        self.set_theme_role(controls_title, 'section_title')
+        benchmark_label = QLabel('Benchmark')
+        self.set_theme_role(benchmark_label, 'muted')
+        self.p4_metrics_benchmark_input = QLineEdit()
+        self.p4_metrics_benchmark_input.setPlaceholderText('SPY')
+        self.p4_metrics_benchmark_input.setMinimumWidth(90)
+        self.p4_metrics_benchmark_input.setMaximumWidth(140)
+        self.p4_metrics_benchmark_input.editingFinished.connect(self._p4_on_metrics_benchmark_edited)
+        lookback_label = QLabel('Lookback')
+        self.set_theme_role(lookback_label, 'muted')
+        self.p4_metrics_lookback_combo = QComboBox()
+        self.p4_metrics_lookback_combo.setMinimumWidth(90)
+        for key, label in _P4_METRICS_LOOKBACK_OPTIONS:
+            self.p4_metrics_lookback_combo.addItem(label, key)
+        self.p4_metrics_lookback_combo.currentIndexChanged.connect(self._p4_on_metrics_lookback_changed)
+        self.p4_metrics_refresh_btn = QPushButton('Refresh')
+        self.set_theme_variant(self.p4_metrics_refresh_btn, 'accent')
+        self.p4_metrics_refresh_btn.clicked.connect(self._p4_on_metrics_refresh_clicked)
+        controls_row.addWidget(controls_title)
+        controls_row.addStretch()
+        controls_row.addWidget(benchmark_label)
+        controls_row.addWidget(self.p4_metrics_benchmark_input)
+        controls_row.addWidget(lookback_label)
+        controls_row.addWidget(self.p4_metrics_lookback_combo)
+        controls_row.addWidget(self.p4_metrics_refresh_btn)
+        controls_layout.addLayout(controls_row)
+
+        self.p4_metrics_status_label = QLabel('')
+        self.p4_metrics_status_label.setWordWrap(True)
+        self.p4_metrics_window_label = QLabel('')
+        self.p4_metrics_window_label.setWordWrap(True)
+        self.set_theme_role(self.p4_metrics_window_label, 'muted')
+        controls_layout.addWidget(self.p4_metrics_status_label)
+        controls_layout.addWidget(self.p4_metrics_window_label)
+        page_layout.addWidget(controls_frame)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        metrics_content = QWidget()
+        metrics_content_layout = QVBoxLayout(metrics_content)
+        metrics_content_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_content_layout.setSpacing(8)
+
+        metrics_grid = QGridLayout()
+        metrics_grid.setContentsMargins(0, 0, 0, 0)
+        metrics_grid.setHorizontalSpacing(8)
+        metrics_grid.setVerticalSpacing(8)
+        self.p4_metrics_value_labels = {}
+        for index, (metric_key, title, subtitle) in enumerate(_P4_METRICS_CARD_SPECS):
+            card = QFrame()
+            self.set_theme_role(card, 'panel')
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            card_layout.setSpacing(6)
+            title_label = QLabel(title)
+            self.set_theme_role(title_label, 'card_title')
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setWordWrap(True)
+            self.set_theme_role(subtitle_label, 'muted')
+            value_label = QLabel('--')
+            value_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.set_theme_role(value_label, 'metric')
+            title_label.setToolTip(subtitle)
+            value_label.setToolTip(subtitle)
+            subtitle_label.setToolTip(subtitle)
+            card_layout.addWidget(title_label)
+            card_layout.addWidget(value_label)
+            card_layout.addWidget(subtitle_label)
+            card_layout.addStretch(1)
+            self.p4_metrics_value_labels[metric_key] = value_label
+            metrics_grid.addWidget(card, index // 3, index % 3)
+        metrics_content_layout.addLayout(metrics_grid)
+
+        exposure_frame = QFrame()
+        self.set_theme_role(exposure_frame, 'panel')
+        exposure_layout = QVBoxLayout(exposure_frame)
+        exposure_layout.setContentsMargins(12, 12, 12, 12)
+        exposure_layout.setSpacing(8)
+        exposure_title = QLabel('Exposure Metrics')
+        self.set_theme_role(exposure_title, 'section_title')
+        exposure_layout.addWidget(exposure_title)
+        exposure_grid = QGridLayout()
+        exposure_grid.setContentsMargins(0, 0, 0, 0)
+        exposure_grid.setHorizontalSpacing(8)
+        exposure_grid.setVerticalSpacing(8)
+        self.p4_metrics_exposure_labels = {}
+        coverage_panel, coverage_labels = self._p4_build_exposure_summary_panel(_P4_METRICS_EXPOSURE_GROUPS[0][0], _P4_METRICS_EXPOSURE_GROUPS[0][1])
+        concentration_panel, concentration_labels = self._p4_build_exposure_summary_panel(_P4_METRICS_EXPOSURE_GROUPS[1][0], _P4_METRICS_EXPOSURE_GROUPS[1][1])
+        diversification_panel, diversification_labels = self._p4_build_exposure_summary_panel(_P4_METRICS_EXPOSURE_GROUPS[2][0], _P4_METRICS_EXPOSURE_GROUPS[2][1])
+        self.p4_metrics_exposure_labels.update(coverage_labels)
+        self.p4_metrics_exposure_labels.update(concentration_labels)
+        self.p4_metrics_exposure_labels.update(diversification_labels)
+        top_holdings_panel = self._p4_build_exposure_top_holdings_panel()
+        exposure_grid.addWidget(coverage_panel, 0, 0)
+        exposure_grid.addWidget(concentration_panel, 0, 1)
+        exposure_grid.addWidget(diversification_panel, 1, 0)
+        exposure_grid.addWidget(top_holdings_panel, 1, 1)
+        exposure_grid.setColumnStretch(0, 1)
+        exposure_grid.setColumnStretch(1, 1)
+        exposure_layout.addLayout(exposure_grid)
+        metrics_content_layout.addWidget(exposure_frame)
+        metrics_content_layout.addStretch(1)
+        scroll.setWidget(metrics_content)
+        page_layout.addWidget(scroll, 1)
+
+        self._p4_sync_portfolio_metrics_controls()
+        self._p4_reset_portfolio_metrics_view()
+        return page
+
+    def _p4_build_exposure_summary_panel(self, title: str, row_specs: Any) -> tuple[Any, dict[str, Any]]:
+        """Build one compact grouped exposure panel and return its value labels."""
+        panel = QFrame()
+        self.set_theme_role(panel, 'panel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        title_label = QLabel(title)
+        self.set_theme_role(title_label, 'card_title')
+        layout.addWidget(title_label)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        labels = {}
+        for row_index, (field_key, label_text, tooltip_text) in enumerate(tuple(row_specs or ())):
+            name_label = QLabel(label_text)
+            self.set_theme_role(name_label, 'muted')
+            value_label = QLabel('--')
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.set_theme_role(value_label, 'card_title')
+            name_label.setToolTip(tooltip_text)
+            value_label.setToolTip(tooltip_text)
+            grid.addWidget(name_label, row_index, 0)
+            grid.addWidget(value_label, row_index, 1)
+            labels[field_key] = value_label
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        return panel, labels
+
+    def _p4_build_exposure_top_holdings_panel(self) -> Any:
+        """Build the ranked top-holdings panel for the exposure section."""
+        panel = QFrame()
+        self.set_theme_role(panel, 'panel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        title_label = QLabel('Top Holdings')
+        self.set_theme_role(title_label, 'card_title')
+        layout.addWidget(title_label)
+        hint_label = QLabel('Largest priced positions by current market value.')
+        hint_label.setWordWrap(True)
+        self.set_theme_role(hint_label, 'muted')
+        layout.addWidget(hint_label)
+        self.p4_metrics_top_position_rows = []
+        for index in range(_P4_METRICS_TOP_POSITIONS_ROWS):
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            rank_label = QLabel(f'{index + 1}.')
+            self.set_theme_role(rank_label, 'muted')
+            rank_label.setMinimumWidth(18)
+            ticker_label = QLabel('--')
+            self.set_theme_role(ticker_label, 'card_title')
+            weight_label = QLabel('--')
+            weight_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.set_theme_role(weight_label, 'card_title')
+            value_label = QLabel('')
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.set_theme_role(value_label, 'muted')
+            row_layout.addWidget(rank_label)
+            row_layout.addWidget(ticker_label, 1)
+            row_layout.addWidget(weight_label)
+            row_layout.addWidget(value_label)
+            layout.addLayout(row_layout)
+            self.p4_metrics_top_position_rows.append({
+                'ticker': ticker_label,
+                'weight': weight_label,
+                'value': value_label,
+            })
+        layout.addStretch(1)
+        return panel
+
+    def _p4_sync_portfolio_metrics_controls(self) -> None:
+        """Reflect the persisted Portfolio Metrics state into the widgets."""
+        benchmark_symbol = str(
+            getattr(self, 'p4_metrics_benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+            or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']
+        ).upper().strip()
+        lookback_key = str(
+            getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+            or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+        ).strip().lower()
+        if hasattr(self, 'p4_metrics_benchmark_input'):
+            self.p4_metrics_benchmark_input.blockSignals(True)
+            self.p4_metrics_benchmark_input.setText(benchmark_symbol)
+            self.p4_metrics_benchmark_input.blockSignals(False)
+        if hasattr(self, 'p4_metrics_lookback_combo'):
+            self.p4_metrics_lookback_combo.blockSignals(True)
+            index = self.p4_metrics_lookback_combo.findData(lookback_key)
+            if index >= 0:
+                self.p4_metrics_lookback_combo.setCurrentIndex(index)
+            self.p4_metrics_lookback_combo.blockSignals(False)
+
+    def _p4_normalize_metrics_benchmark_symbol(self, value: Any) -> str:
+        """Normalize a benchmark symbol entered into the metrics tab."""
+        return str(value or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']).upper().strip() or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']
+
+    def _p4_metrics_tab_visible(self) -> bool:
+        """Return whether the Portfolio Metrics sub-tab is currently selected."""
+        return (
+            hasattr(self, 'p4_content_tabs')
+            and hasattr(self, 'p4_metrics_page')
+            and self.p4_content_tabs.currentWidget() is self.p4_metrics_page
+        )
+
+    def _p4_portfolio_metrics_settings_payload(self) -> dict[str, Any]:
+        """Return the normalized persisted settings payload for the metrics tab."""
+        return {
+            'benchmark_symbol': self._p4_normalize_metrics_benchmark_symbol(
+                getattr(self, 'p4_metrics_benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+            ),
+            'lookback_key': str(
+                getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+                or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+            ).strip().lower(),
+        }
+
+    def _p4_persist_portfolio_metrics_settings(self) -> None:
+        """Persist the benchmark and lookback controls for the metrics sub-tab."""
+        self.portfolio_metrics_state = save_portfolio_metrics_settings(self._p4_portfolio_metrics_settings_payload())
+
+    def _p4_portfolio_analytics_shares_signature(self, portfolio_id: Any=None) -> tuple[tuple[str, float], ...]:
+        """Return a stable signature of positive share counts for cache invalidation."""
+        portfolio_id = str(portfolio_id or self.active_portfolio_id)
+        if portfolio_id == str(self.active_portfolio_id):
+            tracker_data = self._p4_active_tracker_data()
+        else:
+            tracker_data = self._get_portfolio_entry(portfolio_id).setdefault('portfolio_tracker', {})
+        signature = []
+        for ticker, tracker_entry in (tracker_data or {}).items():
+            symbol = str(ticker or '').upper().strip()
+            if not symbol:
+                continue
+            try:
+                shares = float((tracker_entry or {}).get('shares', 0) or 0)
+            except (AttributeError, TypeError, ValueError):
+                shares = 0.0
+            if shares > 0:
+                signature.append((symbol, round(shares, 8)))
+        return tuple(sorted(signature))
+
+    def _p4_portfolio_analytics_cache_key(
+        self,
+        *,
+        portfolio_id: Any=None,
+        benchmark_symbol: Any=None,
+        lookback_key: Any=None,
+        shares_signature: Any=None,
+    ) -> Any:
+        """Build the cache key for one portfolio/benchmark/lookback combination."""
+        pid = str(portfolio_id or self.active_portfolio_id)
+        benchmark = self._p4_normalize_metrics_benchmark_symbol(
+            benchmark_symbol if benchmark_symbol is not None else getattr(self, 'p4_metrics_benchmark_symbol', 'SPY')
+        )
+        lookback = str(
+            lookback_key if lookback_key is not None else getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+        ).strip().lower()
+        signature = shares_signature if shares_signature is not None else self._p4_portfolio_analytics_shares_signature(pid)
+        return (pid, benchmark, lookback, signature)
+
+    def _p4_invalidate_portfolio_analytics_cache(self, portfolio_id: Any = None) -> None:
+        """Drop cached portfolio analytics for one portfolio slot."""
+        pid = str(portfolio_id or self.active_portfolio_id)
+        self._portfolio_analytics_cache = {
+            key: value
+            for key, value in getattr(self, '_portfolio_analytics_cache', {}).items()
+            if not (isinstance(key, tuple) and len(key) == 4 and key[0] == pid)
+        }
+        self._portfolio_analytics_fetching = {
+            key: value
+            for key, value in getattr(self, '_portfolio_analytics_fetching', {}).items()
+            if not (isinstance(key, tuple) and len(key) == 4 and key[0] == pid)
+        }
+
+    def _p4_metrics_price_map(self) -> dict[str, float]:
+        """Return the latest known prices for the active portfolio tickers."""
+        prices = {}
+        portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
+        for ticker in self._p4_active_tickers():
+            symbol = str(ticker or '').upper().strip()
+            if not symbol:
+                continue
+            raw_price = (portfolio.get(symbol, {}) if isinstance(portfolio, dict) else {}).get('price', 0)
+            try:
+                prices[symbol] = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+        return prices
+
+    def _p4_schedule_portfolio_metrics_refresh(self) -> None:
+        """Debounce expensive portfolio-metrics refreshes while the tracker is being edited."""
+        if not self._p4_metrics_tab_visible():
+            return
+        timer = getattr(self, '_p4_metrics_refresh_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._p4_flush_portfolio_metrics_refresh)
+            self._p4_metrics_refresh_timer = timer
+        timer.start(_P4_METRICS_REFRESH_DEBOUNCE_MS)
+
+    def _p4_flush_portfolio_metrics_refresh(self) -> None:
+        """Run the deferred portfolio-metrics refresh after tracker edits settle."""
+        self._p4_refresh_portfolio_metrics_view()
+
+    def _p4_set_portfolio_metrics_status(self, text: Any, *, status: str='muted') -> None:
+        """Update the sub-tab status label if it exists."""
+        if hasattr(self, 'p4_metrics_status_label'):
+            self.set_status_text(self.p4_metrics_status_label, text, status=status)
+
+    def _p4_update_stock_positions_label(self, count: Any = None) -> None:
+        """Refresh the Positions sub-tab stock-position count badge."""
+        if not hasattr(self, 'p4_stock_positions_label'):
+            return
+        if count is None:
+            try:
+                count = len(list(self._p4_active_tickers()))
+            except Exception:
+                count = 0
+        try:
+            numeric_count = max(int(count), 0)
+        except (TypeError, ValueError):
+            numeric_count = 0
+        self.p4_stock_positions_label.setText(f'Stock Positions:  {numeric_count}')
+
+    def _p4_metric_display_text(self, metric_key: str, value: Any) -> tuple[str, str]:
+        """Format one analytics metric for display."""
+        if value is None:
+            return ('--', 'muted')
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return ('--', 'muted')
+        if not math.isfinite(numeric):
+            return ('--', 'muted')
+        if metric_key == 'beta':
+            return (f'{numeric:.2f}x', 'accent')
+        if metric_key == 'alpha':
+            return (f'{numeric:+.1f}% / yr', 'positive' if numeric >= 0 else 'negative')
+        if metric_key == 'volatility':
+            return (f'{numeric:.1f}% / yr', 'accent')
+        if metric_key == 'max_drawdown':
+            return (f'{numeric:.1f}%', 'negative' if numeric < 0 else 'positive')
+        if metric_key in ('sharpe', 'sortino'):
+            return (f'{numeric:.2f}', 'positive' if numeric >= 0 else 'negative')
+        if metric_key == 'cagr':
+            return (f'{numeric:+.1f}% / yr', 'positive' if numeric >= 0 else 'negative')
+        if metric_key == 'tail_risk':
+            return (f'{numeric:.2f}% CVaR', 'negative' if numeric < 0 else 'positive')
+        if metric_key == 'skewness':
+            return (f'{numeric:.2f}', 'positive' if numeric >= 0 else 'negative')
+        return (f'{numeric:.2f}', 'accent')
+
+    def _p4_exposure_display_text(self, field_key: str, value: Any) -> str:
+        """Format one exposure metric for display."""
+        if field_key == 'largest_position_ticker':
+            text = str(value or '').upper().strip()
+            return text or '--'
+        if value is None:
+            return '--'
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return '--'
+        if not math.isfinite(numeric):
+            return '--'
+        if field_key in ('holdings_count', 'valued_holdings_count', 'unvalued_holdings_count'):
+            return f'{int(round(numeric))}'
+        if field_key in ('invested_value', 'largest_position_value'):
+            return f'${numeric:,.2f}'
+        if field_key in ('top_position_weight', 'top_3_weight', 'top_5_weight', 'coverage_pct'):
+            return f'{numeric:.1f}%'
+        if field_key == 'concentration_score':
+            return f'{numeric:.3f}'
+        if field_key == 'effective_holdings':
+            return f'{numeric:.1f}'
+        return f'{numeric:.2f}'
+
+    def _p4_apply_top_positions(self, positions: Any) -> None:
+        """Render the ranked top-holdings rows inside the exposure panel."""
+        rows = list(getattr(self, 'p4_metrics_top_position_rows', []))
+        normalized_positions = []
+        for raw_position in positions if isinstance(positions, list) else []:
+            if not isinstance(raw_position, dict):
+                continue
+            ticker = str(raw_position.get('ticker', '') or '').upper().strip()
+            if not ticker:
+                continue
+            normalized_positions.append({
+                'ticker': ticker,
+                'weight_text': self._p4_exposure_display_text('coverage_pct', raw_position.get('weight_pct')),
+                'value_text': self._p4_exposure_display_text('invested_value', raw_position.get('value')),
+            })
+            if len(normalized_positions) >= _P4_METRICS_TOP_POSITIONS_ROWS:
+                break
+        for index, row in enumerate(rows):
+            ticker_label = row.get('ticker')
+            weight_label = row.get('weight')
+            value_label = row.get('value')
+            payload = normalized_positions[index] if index < len(normalized_positions) else None
+            if payload is None:
+                if ticker_label is not None:
+                    ticker_label.setText('--')
+                if weight_label is not None:
+                    weight_label.setText('--')
+                if value_label is not None:
+                    value_label.setText('')
+                continue
+            if ticker_label is not None:
+                ticker_label.setText(payload['ticker'])
+            if weight_label is not None:
+                weight_label.setText(payload['weight_text'])
+            if value_label is not None:
+                value_label.setText(payload['value_text'])
+
+    def _p4_reset_portfolio_metrics_view(self) -> None:
+        """Reset the metrics tab to its placeholder state."""
+        for metric_key in getattr(self, 'p4_metrics_value_labels', {}):
+            label = self.p4_metrics_value_labels[metric_key]
+            label.setText('--')
+            label.setStyleSheet('')
+        for field_key in getattr(self, 'p4_metrics_exposure_labels', {}):
+            self.p4_metrics_exposure_labels[field_key].setText('--')
+        self._p4_apply_top_positions([])
+        if hasattr(self, 'p4_metrics_window_label'):
+            self.p4_metrics_window_label.setText('Current-share risk analytics load when this sub-tab is active.')
+        self._p4_set_portfolio_metrics_status('Load this tab to inspect portfolio risk, drawdown, and benchmark-relative metrics.', status='muted')
+
+    def _p4_apply_portfolio_analytics_payload(self, payload: Any) -> None:
+        """Render one normalized analytics payload into the Portfolio Metrics sub-tab."""
+        if not isinstance(payload, dict):
+            payload = {}
+        metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
+        exposure = payload.get('exposure', {}) if isinstance(payload.get('exposure'), dict) else {}
+        for metric_key, label in getattr(self, 'p4_metrics_value_labels', {}).items():
+            text, status = self._p4_metric_display_text(metric_key, metrics.get(metric_key))
+            label.setText(text)
+            if status == 'positive':
+                color = self.theme_color('accent_positive')
+            elif status == 'negative':
+                color = self.theme_color('accent_negative')
+            elif status == 'accent':
+                color = self.theme_color('accent')
+            else:
+                color = self.theme_color('text_muted')
+            label.setStyleSheet(f'color: {color};')
+        for field_key, label in getattr(self, 'p4_metrics_exposure_labels', {}).items():
+            label.setText(self._p4_exposure_display_text(field_key, exposure.get(field_key)))
+        self._p4_apply_top_positions(exposure.get('top_positions'))
+        start_date = str(payload.get('start_date') or '--')
+        end_date = str(payload.get('end_date') or '--')
+        history_points = int(payload.get('history_points', 0) or 0)
+        included_count = len(list(payload.get('included_tickers', []) or []))
+        benchmark_symbol = str(payload.get('benchmark_symbol') or getattr(self, 'p4_metrics_benchmark_symbol', 'SPY')).upper()
+        lookback_key = str(payload.get('lookback_key') or getattr(self, 'p4_metrics_lookback_key', '1y')).lower()
+        lookback_label = next((label for key, label in _P4_METRICS_LOOKBACK_OPTIONS if key == lookback_key), lookback_key.upper())
+        if hasattr(self, 'p4_metrics_window_label'):
+            self.p4_metrics_window_label.setText(
+                f'{included_count} holding{"s" if included_count != 1 else ""} | {history_points} daily points | '
+                f'{start_date} to {end_date} | Benchmark {benchmark_symbol} | {lookback_label}'
+            )
+        reason = str(payload.get('reason') or '').strip()
+        note = str(payload.get('note') or '').strip()
+        if reason:
+            self._p4_set_portfolio_metrics_status(reason, status='warning')
+        elif note:
+            self._p4_set_portfolio_metrics_status(note, status='warning')
+        else:
+            self._p4_set_portfolio_metrics_status('Portfolio metrics loaded.', status='positive')
+
+    def _fetch_portfolio_analytics(self, *, force: bool=False) -> None:
+        """Fetch portfolio analytics for the active portfolio and selected benchmark."""
+        if not hasattr(self, 'p4_metrics_page'):
+            return
+        benchmark_symbol = self._p4_normalize_metrics_benchmark_symbol(
+            getattr(self, 'p4_metrics_benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+        )
+        lookback_key = str(
+            getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+            or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+        ).strip().lower()
+        cache_key = self._p4_portfolio_analytics_cache_key(
+            portfolio_id=self.active_portfolio_id,
+            benchmark_symbol=benchmark_symbol,
+            lookback_key=lookback_key,
+        )
+        if force:
+            getattr(self, '_portfolio_analytics_cache', {}).pop(cache_key, None)
+        elif cache_key in getattr(self, '_portfolio_analytics_cache', {}):
+            self._p4_apply_portfolio_analytics_payload(self._portfolio_analytics_cache.get(cache_key, {}))
+            return
+        if self._portfolio_analytics_fetching.get(cache_key, False):
+            self._p4_set_portfolio_metrics_status('Refreshing portfolio metrics...', status='info')
+            return
+        shares_map = self._p4_active_momentum_shares_map()
+        worker = PortfolioAnalyticsWorker(
+            list(self._p4_active_tickers()),
+            shares_map,
+            prices_map=self._p4_metrics_price_map(),
+            benchmark_symbol=benchmark_symbol,
+            lookback_key=lookback_key,
+        )
+        self._portfolio_analytics_fetching[cache_key] = True
+        self._p4_set_portfolio_metrics_status(
+            f'Loading {lookback_key.upper()} metrics versus {benchmark_symbol}...',
+            status='info',
+        )
+        worker.finished.connect(
+            lambda payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, payload)
+        )
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def _on_portfolio_analytics_ready(self, cache_key: Any, portfolio_id: Any, payload: Any) -> None:
+        """Handle one portfolio-analytics worker result becoming ready."""
+        self._portfolio_analytics_fetching[cache_key] = False
+        self._portfolio_analytics_cache[cache_key] = payload
+        current_key = self._p4_portfolio_analytics_cache_key(
+            portfolio_id=self.active_portfolio_id,
+            benchmark_symbol=getattr(self, 'p4_metrics_benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']),
+            lookback_key=getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']),
+        )
+        if (
+            self._p4_metrics_tab_visible()
+            and str(portfolio_id) == str(self.active_portfolio_id)
+            and cache_key == current_key
+        ):
+            self._p4_apply_portfolio_analytics_payload(payload)
+
+    def _p4_refresh_portfolio_metrics_view(self, *, force: bool=False) -> None:
+        """Refresh the visible metrics tab from cache or by launching a worker."""
+        if not self._p4_metrics_tab_visible():
+            return
+        self._fetch_portfolio_analytics(force=force)
+
+    def _p4_on_metrics_benchmark_edited(self) -> None:
+        """Persist a benchmark change and refresh the metrics tab."""
+        if not hasattr(self, 'p4_metrics_benchmark_input'):
+            return
+        benchmark_symbol = self._p4_normalize_metrics_benchmark_symbol(self.p4_metrics_benchmark_input.text())
+        changed = benchmark_symbol != getattr(self, 'p4_metrics_benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+        self.p4_metrics_benchmark_symbol = benchmark_symbol
+        self.p4_metrics_benchmark_input.setText(benchmark_symbol)
+        self._p4_persist_portfolio_metrics_settings()
+        if changed:
+            self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
+        self._p4_refresh_portfolio_metrics_view(force=changed)
+
+    def _p4_on_metrics_lookback_changed(self, index: int) -> None:
+        """Persist a lookback change and refresh the metrics tab."""
+        if not hasattr(self, 'p4_metrics_lookback_combo') or index < 0:
+            return
+        lookback_key = str(self.p4_metrics_lookback_combo.currentData() or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']).strip().lower()
+        changed = lookback_key != getattr(self, 'p4_metrics_lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+        self.p4_metrics_lookback_key = lookback_key
+        self._p4_persist_portfolio_metrics_settings()
+        if changed:
+            self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
+        self._p4_refresh_portfolio_metrics_view(force=changed)
+
+    def _p4_on_metrics_refresh_clicked(self) -> None:
+        """Force a fresh fetch for the current benchmark and lookback window."""
+        self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
+        self._p4_refresh_portfolio_metrics_view(force=True)
 
     def _p4_export_for_llm(self) -> None:
         """Export the active portfolio's stock and options data to clipboard for LLM analysis."""
@@ -166,7 +810,23 @@ class PortfolioMetricsMixin:
             self._recalc_tracker_row(row, ticker, self.last_data.get('portfolio', {}))
         if col == P4_PORTFOLIO_COL_SHARES:
             self._p4_invalidate_momentum_cache()
-            self._p4_refresh_active_momentum_view()
+            self._p4_invalidate_portfolio_analytics_cache()
+            self._p4_schedule_momentum_refresh()
+            self._p4_schedule_portfolio_metrics_refresh()
+
+    def _p4_schedule_momentum_refresh(self) -> None:
+        """Debounce expensive momentum refreshes while tracker cells are being edited."""
+        timer = getattr(self, '_p4_momentum_refresh_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._p4_flush_momentum_refresh)
+            self._p4_momentum_refresh_timer = timer
+        timer.start(_P4_MOMENTUM_REFRESH_DEBOUNCE_MS)
+
+    def _p4_flush_momentum_refresh(self) -> None:
+        """Run the deferred momentum refresh after tracker edits settle."""
+        self._p4_refresh_active_momentum_view()
 
     def _p4_build_tracker_metrics_map(self, portfolio: Any) -> Any:
         """Precompute derived tracker metrics for the active portfolio."""
@@ -326,7 +986,10 @@ class PortfolioMetricsMixin:
         tracker_data.pop(ticker, None)
         self._p4_invalidate_returns_cache()
         self._p4_invalidate_momentum_cache()
+        self._p4_invalidate_portfolio_analytics_cache()
         self._persist_all_portfolios()
+        if getattr(self, '_dashboard_showing_all', False) and hasattr(self, '_dashboard_apply_local_portfolio_membership'):
+            self._dashboard_apply_local_portfolio_membership(self.last_data)
         if self.last_data and self.active_portfolio_id == self.main_portfolio_id and 'portfolio' in self.last_data:
             self.last_data['portfolio'].pop(ticker, None)
         if self.last_data:
@@ -335,7 +998,10 @@ class PortfolioMetricsMixin:
             self.p4_table.blockSignals(True)
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
+            self._p4_update_stock_positions_label()
             self._p4_refresh_active_momentum_view()
+            if self._p4_metrics_tab_visible():
+                self._p4_refresh_portfolio_metrics_view(force=True)
 
     def _update_returns_chart(self, timeframe_key: Any, results: Any) -> None:
         """Handle update returns chart."""
@@ -795,6 +1461,7 @@ class PortfolioMetricsMixin:
             self.p4_table.blockSignals(False)
         if hasattr(self, '_p4_apply_table_width_preferences'):
             self._p4_apply_table_width_preferences('stock')
+        self._p4_update_stock_positions_label(len(tickers))
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart(weights)
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
@@ -823,3 +1490,5 @@ class PortfolioMetricsMixin:
         else:
             self._fetch_momentum_for_timeframe(self._active_momentum_timeframe)
         self._fetch_market_caps(sorted_tickers)
+        if self._p4_metrics_tab_visible():
+            self._p4_refresh_portfolio_metrics_view()

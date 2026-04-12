@@ -1,7 +1,6 @@
 from __future__ import annotations
 import re
 from typing import Any
-from bs4 import BeautifulSoup
 from ..dependencies import *
 from ..paths import user_data_path
 
@@ -10,10 +9,13 @@ _ECONOMIC_EVENTS_CACHE_DIR = 'economic_calendar_cache'
 _ECONOMIC_EVENTS_CACHE_TTL_SECONDS = 6 * 60 * 60
 _ECONOMIC_EVENTS_MEMORY_CACHE: dict[int, tuple[float, list[tuple[datetime.date, str, str]]]] = {}
 _ECONOMIC_EVENTS_CACHE_LOCK = threading.Lock()
+_MARKET_HOLIDAY_CACHE_DIR = 'market_holiday_cache'
+_MARKET_HOLIDAY_MEMORY_CACHE: dict[int, list[dict[str, Any]]] = {}
+_MARKET_HOLIDAY_CACHE_LOCK = threading.Lock()
 _HTTP_TIMEOUT_SECONDS = 20
 _FED_FOMC_CALENDAR_URL = 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm'
-_BLS_SCHEDULE_URL = 'https://www.bls.gov/schedule/{year}/'
 _BEA_SCHEDULE_URL = 'https://www.bea.gov/news/schedule/full'
+_DISABLED_ECONOMIC_EVENT_NAMES = {'NFP Jobs Report', 'CPI Release'}
 _HTTP_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -35,11 +37,6 @@ _MONTH_NAME_TO_NUMBER = {
     'November': 11,
     'December': 12,
 }
-_WEEKDAY_DATE_RE = re.compile(
-    r'^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+'
-    r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+'
-    r'(\d{1,2}),\s+(\d{4})$'
-)
 _MONTH_DAY_RE = re.compile(
     r'^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})$'
 )
@@ -85,6 +82,10 @@ def _economic_cache_path_for_year(year: Any) -> Any:
     """Return the on-disk cache path for one economic calendar year."""
     return user_data_path(_ECONOMIC_EVENTS_CACHE_DIR, f'{int(year)}.json')
 
+def _market_holiday_cache_path_for_year(year: Any) -> Any:
+    """Return the on-disk cache path for one market-holiday year."""
+    return user_data_path(_MARKET_HOLIDAY_CACHE_DIR, f'{int(year)}.json')
+
 def _extract_text_lines(raw_text: Any) -> list[str]:
     """Return normalized non-empty text lines from HTML or plain text."""
     lines = []
@@ -124,8 +125,7 @@ def _deserialize_economic_events(raw_events: Any) -> list[tuple[datetime.date, s
         if not name:
             continue
         events.append((event_date, name, importance))
-    events.sort(key=lambda item: (item[0], item[1], item[2]))
-    return events
+    return _filter_disabled_economic_events(events)
 
 def _now_timestamp() -> float:
     """Return the current UTC timestamp in seconds."""
@@ -162,6 +162,81 @@ def _save_economic_events_cache(year: Any, events: list[tuple[datetime.date, str
     except Exception as ex:
         logger.warning('Economic events cache write error for %s: %s', year, ex)
 
+def _serialize_market_holiday_events(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Convert cached market-holiday events into JSON-safe dicts."""
+    payload = []
+    for event in list(events or []):
+        if not isinstance(event, dict):
+            continue
+        event_date = event.get('date')
+        if not isinstance(event_date, datetime.date):
+            continue
+        payload.append(
+            {
+                'date': event_date.isoformat(),
+                'market': str(event.get('market', 'US Equities') or 'US Equities'),
+                'event': str(event.get('event', 'Holiday') or 'Holiday'),
+                'detail': str(event.get('detail', '') or ''),
+                'cell_label': str(event.get('cell_label', '') or ''),
+                'color': str(event.get('color', '#26c6da') or '#26c6da'),
+            }
+        )
+    return payload
+
+def _deserialize_market_holiday_events(raw_events: Any) -> list[dict[str, Any]]:
+    """Convert cached JSON rows into normalized market-holiday dicts."""
+    events = []
+    if not isinstance(raw_events, list):
+        return events
+    for raw_event in raw_events:
+        if not isinstance(raw_event, dict):
+            continue
+        try:
+            event_date = datetime.date.fromisoformat(str(raw_event.get('date', '') or ''))
+        except ValueError:
+            continue
+        events.append(
+            {
+                'date': event_date,
+                'market': str(raw_event.get('market', 'US Equities') or 'US Equities'),
+                'event': str(raw_event.get('event', 'Holiday') or 'Holiday'),
+                'detail': str(raw_event.get('detail', '') or ''),
+                'cell_label': str(raw_event.get('cell_label', '') or ''),
+                'color': str(raw_event.get('color', '#26c6da') or '#26c6da'),
+            }
+        )
+    events.sort(key=lambda item: (item.get('date'), item.get('event', ''), item.get('market', '')))
+    return events
+
+def _load_market_holiday_cache(year: Any) -> list[dict[str, Any]] | None:
+    """Load one year's cached market holidays from disk."""
+    path = _market_holiday_cache_path_for_year(year)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as ex:
+        logger.warning('Market holiday cache read error for %s: %s', year, ex)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _deserialize_market_holiday_events(payload.get('events', []))
+
+def _save_market_holiday_cache(year: Any, events: list[dict[str, Any]]) -> None:
+    """Persist one year's market holidays to disk."""
+    payload = {
+        'year': int(year),
+        'generated_at': _now_timestamp(),
+        'events': _serialize_market_holiday_events(events),
+    }
+    try:
+        _market_holiday_cache_path_for_year(year).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+    except Exception as ex:
+        logger.warning('Market holiday cache write error for %s: %s', year, ex)
+
 def _dedupe_economic_events(events: list[tuple[datetime.date, str, str]]) -> list[tuple[datetime.date, str, str]]:
     """Drop duplicate event tuples while preserving sorted output."""
     deduped = []
@@ -174,11 +249,21 @@ def _dedupe_economic_events(events: list[tuple[datetime.date, str, str]]) -> lis
         deduped.append(item)
     return deduped
 
+def _filter_disabled_economic_events(
+    events: list[tuple[datetime.date, str, str]],
+) -> list[tuple[datetime.date, str, str]]:
+    """Remove economic event categories whose source has been disabled."""
+    filtered = [item for item in events if str(item[1] or '').strip() not in _DISABLED_ECONOMIC_EVENT_NAMES]
+    filtered.sort(key=lambda item: (item[0], item[1], item[2]))
+    return filtered
+
 def _merge_missing_economic_categories(
     fresh_events: list[tuple[datetime.date, str, str]],
     stale_events: list[tuple[datetime.date, str, str]],
 ) -> list[tuple[datetime.date, str, str]]:
     """Keep stale categories when one official source temporarily returns nothing."""
+    fresh_events = _filter_disabled_economic_events(fresh_events)
+    stale_events = _filter_disabled_economic_events(stale_events)
     if not fresh_events:
         return list(stale_events)
     if not stale_events:
@@ -199,6 +284,8 @@ def _http_get_text(url: str) -> str:
 def _fetch_fomc_events_for_year(year: Any) -> list[tuple[datetime.date, str, str]]:
     """Fetch the official FOMC meeting schedule for one year."""
     try:
+        from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(_http_get_text(_FED_FOMC_CALENDAR_URL), 'html.parser')
     except Exception as ex:
         logger.warning('FOMC schedule fetch error for %s: %s', year, ex)
@@ -235,43 +322,10 @@ def _fetch_fomc_events_for_year(year: Any) -> list[tuple[datetime.date, str, str
         index += 2
     return events
 
-def _parse_bls_schedule_events(html_text: str, year: Any) -> list[tuple[datetime.date, str, str]]:
-    """Parse Employment Situation and CPI dates from the official BLS schedule page."""
-    lines = _extract_text_lines(BeautifulSoup(html_text, 'html.parser').get_text('\n'))
-    current_date = None
-    events = []
-    for line in lines:
-        date_match = _WEEKDAY_DATE_RE.match(line)
-        if date_match:
-            month_number = _MONTH_NAME_TO_NUMBER.get(date_match.group(2))
-            current_date = None
-            if month_number is None:
-                continue
-            try:
-                parsed_date = datetime.date(int(date_match.group(4)), month_number, int(date_match.group(3)))
-            except ValueError:
-                continue
-            current_date = parsed_date if parsed_date.year == int(year) else None
-            continue
-        if current_date is None:
-            continue
-        if line.startswith('Employment Situation for'):
-            events.append((current_date, 'NFP Jobs Report', 'high'))
-        elif line.startswith('Consumer Price Index for'):
-            events.append((current_date, 'CPI Release', 'high'))
-    return events
-
-def _fetch_bls_events_for_year(year: Any) -> list[tuple[datetime.date, str, str]]:
-    """Fetch Employment Situation and CPI dates from BLS."""
-    try:
-        html_text = _http_get_text(_BLS_SCHEDULE_URL.format(year=int(year)))
-    except Exception as ex:
-        logger.warning('BLS schedule fetch error for %s: %s', year, ex)
-        return []
-    return _parse_bls_schedule_events(html_text, year)
-
 def _parse_bea_schedule_events(html_text: str, year: Any) -> list[tuple[datetime.date, str, str]]:
     """Parse GDP and Personal Income and Outlays dates from the BEA release schedule."""
+    from bs4 import BeautifulSoup
+
     lines = _extract_text_lines(BeautifulSoup(html_text, 'html.parser').get_text('\n'))
     marker = f'Year {int(year)}'
     start_index = lines.index(marker) + 1 if marker in lines else 0
@@ -309,12 +363,11 @@ def _fetch_bea_events_for_year(year: Any) -> list[tuple[datetime.date, str, str]
     return _parse_bea_schedule_events(html_text, year)
 
 def _fetch_official_economic_events_for_year(year: Any) -> list[tuple[datetime.date, str, str]]:
-    """Fetch one year's official economic events from Fed, BLS, and BEA."""
+    """Fetch one year's official economic events from Fed and BEA."""
     events: list[tuple[datetime.date, str, str]] = []
     events.extend(_fetch_fomc_events_for_year(year))
-    events.extend(_fetch_bls_events_for_year(year))
     events.extend(_fetch_bea_events_for_year(year))
-    return _dedupe_economic_events(events)
+    return _filter_disabled_economic_events(_dedupe_economic_events(events))
 
 def _get_economic_events_for_year(year: Any, *, force_refresh: bool = False) -> list[tuple[datetime.date, str, str]]:
     """Return one year's economic events, using cache with official-source refreshes."""
@@ -323,9 +376,9 @@ def _get_economic_events_for_year(year: Any, *, force_refresh: bool = False) -> 
     with _ECONOMIC_EVENTS_CACHE_LOCK:
         cached = _ECONOMIC_EVENTS_MEMORY_CACHE.get(year_value)
     if (not force_refresh) and cached and (now_ts - float(cached[0])) < _ECONOMIC_EVENTS_CACHE_TTL_SECONDS:
-        return list(cached[1])
+        return _filter_disabled_economic_events(list(cached[1]))
     disk_cache = _load_economic_events_cache(year_value)
-    stale_events = disk_cache[0] if disk_cache is not None else []
+    stale_events = _filter_disabled_economic_events(disk_cache[0] if disk_cache is not None else [])
     stale_fetched_at = float(disk_cache[1]) if disk_cache is not None else 0.0
     if (not force_refresh) and disk_cache and (now_ts - stale_fetched_at) < _ECONOMIC_EVENTS_CACHE_TTL_SECONDS:
         with _ECONOMIC_EVENTS_CACHE_LOCK:
@@ -398,6 +451,31 @@ class CalendarWorker(QObject):
             logger.error(f'CalendarWorker error: {ex}')
             self.finished.emit({})
 
+class MarketHolidayWarmupWorker(QObject):
+    """Warm one or more cached market-holiday years without blocking the UI thread."""
+
+    finished = pyqtSignal(dict)
+
+    def __init__(self, years: Any, force_refresh: bool = False) -> None:
+        super().__init__()
+        cleaned = []
+        for value in list(years or []):
+            try:
+                year_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if year_value not in cleaned:
+                cleaned.append(year_value)
+        self.years = cleaned
+        self.force_refresh = bool(force_refresh)
+
+    def run(self) -> Any:
+        """Warm cache entries for the requested market-holiday years."""
+        results = {}
+        for year in self.years:
+            results[year] = _get_market_holiday_events_for_year(year, force_refresh=self.force_refresh, blocking=True)
+        self.finished.emit(results)
+
 def _get_economic_events(year: Any, month: Any) -> Any:
     """Return one month's official economic events as (date, name, importance) tuples."""
     return [
@@ -456,33 +534,33 @@ def _market_holiday_name_lookup(nyse: Any, start_date: Any, end_date: Any) -> tu
             early_close_names.setdefault(event_date, _format_market_holiday_name(raw_name, event_date, 'Early Close'))
     return holiday_names, early_close_names
 
-def _get_market_holiday_events(year: Any, month: Any) -> Any:
-    """Return US-equity holidays and early closes for a month."""
+def _fetch_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
+    """Fetch one year's US-equity holidays and early closes from the exchange calendar."""
     global _MARKET_CALENDAR_IMPORT_WARNING_SHOWN
     try:
-        import calendar as _cal
         import pandas_market_calendars as mcal
     except ImportError:
         if not _MARKET_CALENDAR_IMPORT_WARNING_SHOWN:
             logger.warning('pandas_market_calendars is unavailable; market holidays disabled')
             _MARKET_CALENDAR_IMPORT_WARNING_SHOWN = True
         return []
-    first_day = datetime.date(int(year), int(month), 1)
-    last_day = datetime.date(int(year), int(month), _cal.monthrange(int(year), int(month))[1])
+    first_day = datetime.date(int(year), 1, 1)
+    last_day = datetime.date(int(year), 12, 31)
     try:
         nyse = mcal.get_calendar('NYSE')
         schedule = nyse.schedule(start_date=first_day.isoformat(), end_date=last_day.isoformat())
         early_closes = nyse.early_closes(schedule=schedule)
     except Exception as ex:
-        logger.warning(f'Market holiday fetch error {year}-{month}: {ex}')
+        logger.warning(f'Market holiday fetch error {year}: {ex}')
         return []
     holiday_names, early_close_names = _market_holiday_name_lookup(nyse, first_day, last_day)
     trading_days = {pd.Timestamp(idx).date() for idx in schedule.index}
     early_close_days = {pd.Timestamp(idx).date() for idx in early_closes.index}
     events = []
-    cal = _cal.Calendar(firstweekday=0)
-    for day in cal.itermonthdates(int(year), int(month)):
-        if day.month != int(month) or day.weekday() >= 5:
+    day = first_day
+    while day <= last_day:
+        if day.weekday() >= 5:
+            day += datetime.timedelta(days=1)
             continue
         if day not in trading_days:
             holiday_name = holiday_names.get(day, 'Special Market Closure')
@@ -496,9 +574,8 @@ def _get_market_holiday_events(year: Any, month: Any) -> Any:
                     'color': '#26c6da',
                 }
             )
+        day += datetime.timedelta(days=1)
     for day in sorted(early_close_days):
-        if day.month != int(month):
-            continue
         holiday_name = early_close_names.get(day, 'Special Early Close')
         events.append(
             {
@@ -512,3 +589,53 @@ def _get_market_holiday_events(year: Any, month: Any) -> Any:
         )
     events.sort(key=lambda item: (item.get('date'), item.get('event', ''), item.get('market', '')))
     return events
+
+def _market_holidays_cached_for_year(year: Any) -> bool:
+    """Return whether one market-holiday year is already available in memory or on disk."""
+    year_value = int(year)
+    with _MARKET_HOLIDAY_CACHE_LOCK:
+        if year_value in _MARKET_HOLIDAY_MEMORY_CACHE:
+            return True
+    return _market_holiday_cache_path_for_year(year_value).exists()
+
+def _get_market_holiday_events_for_year(
+    year: Any,
+    *,
+    force_refresh: bool = False,
+    blocking: bool = True,
+) -> list[dict[str, Any]]:
+    """Return one year's market holidays, optionally avoiding blocking generation on the UI thread."""
+    year_value = int(year)
+    if not force_refresh:
+        with _MARKET_HOLIDAY_CACHE_LOCK:
+            cached = _MARKET_HOLIDAY_MEMORY_CACHE.get(year_value)
+        if cached is not None:
+            return [dict(item) for item in cached]
+        disk_cache = _load_market_holiday_cache(year_value)
+        if disk_cache is not None:
+            with _MARKET_HOLIDAY_CACHE_LOCK:
+                _MARKET_HOLIDAY_MEMORY_CACHE[year_value] = [dict(item) for item in disk_cache]
+            return [dict(item) for item in disk_cache]
+    if not blocking:
+        return []
+    events = _fetch_market_holiday_events_for_year(year_value)
+    with _MARKET_HOLIDAY_CACHE_LOCK:
+        _MARKET_HOLIDAY_MEMORY_CACHE[year_value] = [dict(item) for item in events]
+    _save_market_holiday_cache(year_value, events)
+    return [dict(item) for item in events]
+
+def _get_market_holiday_events(
+    year: Any,
+    month: Any,
+    *,
+    force_refresh: bool = False,
+    blocking: bool = True,
+) -> Any:
+    """Return US-equity holidays and early closes for a month."""
+    return [
+        item
+        for item in _get_market_holiday_events_for_year(year, force_refresh=force_refresh, blocking=blocking)
+        if item.get('date') is not None
+        and item['date'].year == int(year)
+        and item['date'].month == int(month)
+    ]

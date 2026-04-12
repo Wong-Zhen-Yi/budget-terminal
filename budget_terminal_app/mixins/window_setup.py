@@ -2,7 +2,22 @@ from __future__ import annotations
 from typing import Any
 from ..compat import *
 
+
+class _GlobalInputExitFilter(QObject):
+
+    def __init__(self, window: Any) -> None:
+        """Forward global key events into the owning window without duplicating local filters."""
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        """Handle the dedicated app-wide text-input escape shortcuts."""
+        return bool(getattr(self._window, '_handle_global_input_exit_event', lambda *_: False)(obj, event))
+
+
 class WindowSetupMixin:
+    _LAZY_WARMUP_INITIAL_DELAY_MS = 1200
+    _LAZY_WARMUP_STEP_MS = 150
 
     def init_ui(self) -> None:
         """Initialize ui."""
@@ -11,7 +26,8 @@ class WindowSetupMixin:
         root_layout = QVBoxLayout(central_widget)
         self._setup_window_shell(root_layout)
         self._init_dashboard_page()
-        self._init_additional_pages()
+        self._register_lazy_pages()
+        self._initialize_startup_pages()
         self._register_navigation_pages()
         self._start_clock_timer()
 
@@ -30,7 +46,7 @@ class WindowSetupMixin:
         self.btn_page3.setCheckable(True)
         self.btn_page4 = QPushButton('Portfolio')
         self.btn_page4.setCheckable(True)
-        self.btn_page5 = QPushButton('Options Chain')
+        self.btn_page5 = QPushButton('Options')
         self.btn_page5.setCheckable(True)
         self.btn_page13 = QPushButton('ETF')
         self.btn_page13.setCheckable(True)
@@ -66,7 +82,6 @@ class WindowSetupMixin:
             self.btn_page12,
             self.btn_page2,
             self.btn_page10,
-            self.btn_page11,
             self.btn_page5,
             self.btn_page13,
             self.btn_page14,
@@ -134,6 +149,12 @@ class WindowSetupMixin:
         self._tab_picker_list.installEventFilter(self)
         popup_layout.addWidget(self._tab_picker_list)
         self._tab_picker_popup.installEventFilter(self)
+        self._global_input_exit_filter = _GlobalInputExitFilter(self)
+        self._app_keyboard_event_filter_installed = False
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self._global_input_exit_filter)
+            self._app_keyboard_event_filter_installed = True
         self._nav_prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
         self._nav_prev_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._nav_prev_shortcut.activated.connect(lambda: self._handle_main_tab_arrow_shortcut(-1))
@@ -334,7 +355,7 @@ class WindowSetupMixin:
         self.dashboard_export_options_btn.clicked.connect(self._dashboard_export_top_options)
         self.dashboard_refresh_btn = QPushButton('Refresh')
         self.set_theme_variant(self.dashboard_refresh_btn, 'accent')
-        self.dashboard_refresh_btn.clicked.connect(self.refresh_data)
+        self.dashboard_refresh_btn.clicked.connect(lambda checked=False: self.refresh_data(force=True, reason='manual_refresh'))
         self.dashboard_auto_btn = QPushButton('Auto')
         self.dashboard_auto_btn.setCheckable(True)
         self.dashboard_auto_btn.clicked.connect(self._dashboard_toggle_auto_follow)
@@ -475,58 +496,148 @@ class WindowSetupMixin:
         main_layout.addWidget(self.dashboard_main_splitter)
         self._dashboard_apply_main_splitter_sizes()
 
-    def _init_additional_pages(self) -> None:
-        """Handle init additional pages."""
-        self.page4 = QWidget()
-        self.stacked_widget.addWidget(self.page4)
-        self.init_page4()
-        self.page6 = QWidget()
-        self.stacked_widget.addWidget(self.page6)
-        self.init_page6()
-        self.page7 = QWidget()
-        self.stacked_widget.addWidget(self.page7)
-        self.init_page7()
-        self.page3 = QWidget()
-        self.stacked_widget.addWidget(self.page3)
-        self.init_page3()
-        self.page8 = QWidget()
-        self.stacked_widget.addWidget(self.page8)
-        self.init_page8()
-        self.page12 = QWidget()
-        self.stacked_widget.addWidget(self.page12)
-        self.init_page12()
-        self.page2 = QWidget()
-        self.stacked_widget.addWidget(self.page2)
-        page2_layout = QVBoxLayout(self.page2)
-        page2_layout.setContentsMargins(10, 10, 10, 10)
-        self.init_page2(page2_layout)
-        self.page10 = QWidget()
-        self.stacked_widget.addWidget(self.page10)
-        self.init_page10()
-        self.page11 = QWidget()
-        self.stacked_widget.addWidget(self.page11)
-        self.init_page11()
-        self.page5 = QWidget()
-        self.stacked_widget.addWidget(self.page5)
-        self.init_page5()
-        self.page13 = QWidget()
-        self.stacked_widget.addWidget(self.page13)
-        self.init_page13()
-        self.page14 = QWidget()
-        self.stacked_widget.addWidget(self.page14)
-        self.init_page14()
-        self.page15 = QWidget()
-        self.stacked_widget.addWidget(self.page15)
-        self.init_page15()
-        self.page16 = QWidget()
-        self.stacked_widget.addWidget(self.page16)
-        self.init_page16()
-        self.page17 = QWidget()
-        self.stacked_widget.addWidget(self.page17)
-        self.init_page17()
-        self.page9 = QWidget()
-        self.stacked_widget.addWidget(self.page9)
-        self.init_page9()
+    def _lazy_page_specs(self) -> tuple[dict[str, Any], ...]:
+        """Return metadata for pages that can be initialized after first paint."""
+        return (
+            {'index': 1, 'page_attr': 'page4', 'init_method': 'init_page4', 'theme_hook': '_apply_portfolio_theme', 'hydrate_hook': '_hydrate_lazy_page4'},
+            {'index': 2, 'page_attr': 'page6', 'init_method': 'init_page6', 'theme_hook': '_apply_networth_theme'},
+            {'index': 3, 'page_attr': 'page7', 'init_method': 'init_page7', 'theme_hook': '_apply_calendar_theme', 'hydrate_hook': '_hydrate_lazy_page7'},
+            {'index': 4, 'page_attr': 'page3', 'init_method': 'init_page3', 'theme_hook': '_apply_news_theme', 'hydrate_hook': '_hydrate_lazy_page3'},
+            {'index': 5, 'page_attr': 'page8', 'init_method': 'init_page8', 'theme_hook': '_apply_sectors_theme'},
+            {'index': 6, 'page_attr': 'page12', 'init_method': 'init_page12', 'theme_hook': '_apply_stocks_theme'},
+            {'index': 7, 'page_attr': 'page2', 'init_method': 'init_page2', 'theme_hook': '_apply_fundamentals_theme', 'layout_margins': (10, 10, 10, 10)},
+            {'index': 8, 'page_attr': 'page10', 'init_method': 'init_page10', 'theme_hook': '_apply_charts_page_theme'},
+            {'index': 9, 'page_attr': 'page11', 'init_method': 'init_page11'},
+            {'index': 10, 'page_attr': 'page5', 'init_method': 'init_page5', 'theme_hook': '_apply_options_chain_theme'},
+            {'index': 11, 'page_attr': 'page13', 'init_method': 'init_page13', 'theme_hook': '_apply_etf_theme'},
+            {'index': 12, 'page_attr': 'page14', 'init_method': 'init_page14'},
+            {'index': 13, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
+            {'index': 14, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
+            {'index': 15, 'page_attr': 'page17', 'init_method': 'init_page17', 'theme_hook': '_apply_notes_theme'},
+            {'index': 16, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+        )
+
+    def _register_lazy_pages(self) -> None:
+        """Insert placeholders for secondary pages so they can be built on demand."""
+        self._lazy_page_registry = {}
+        for spec in self._lazy_page_specs():
+            placeholder = QWidget()
+            setattr(self, spec['page_attr'], placeholder)
+            self.stacked_widget.addWidget(placeholder)
+            self._lazy_page_registry[int(spec['index'])] = {
+                **spec,
+                'widget': placeholder,
+                'initialized': False,
+            }
+
+    def _initialize_startup_pages(self) -> None:
+        """Build fast, high-traffic pages during startup so they are ready on first open."""
+        for page_index in (5,):
+            if self._page_initialized(index=page_index):
+                continue
+            with self._startup_profiler_step(f'eager_page_{int(page_index)}'):
+                self._build_page_now(page_index)
+
+    def _lazy_page_entry(self, *, index: Any = None, page_attr: str | None = None) -> Any:
+        """Return one lazy-page registry entry by index or page attribute."""
+        registry = getattr(self, '_lazy_page_registry', {})
+        if page_attr:
+            for entry in registry.values():
+                if entry.get('page_attr') == page_attr:
+                    return entry
+            return None
+        try:
+            numeric = int(index)
+        except (TypeError, ValueError):
+            return None
+        return registry.get(numeric)
+
+    def _page_initialized(self, *, index: Any = None, page_attr: str | None = None) -> bool:
+        """Return whether a page has been fully initialized rather than left as a placeholder."""
+        if page_attr == 'page1':
+            return True
+        try:
+            if int(index) == 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        entry = self._lazy_page_entry(index=index, page_attr=page_attr)
+        return bool(entry and entry.get('initialized'))
+
+    def _call_if_page_initialized(
+        self,
+        fn_name: str,
+        *args: Any,
+        index: Any = None,
+        page_attr: str | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Call one helper only when its owning page has been initialized."""
+        if not self._page_initialized(index=index, page_attr=page_attr):
+            return False
+        fn = getattr(self, fn_name, None)
+        if not callable(fn):
+            return False
+        fn(*args, **kwargs)
+        return True
+
+    def _build_page_now(self, index: Any) -> Any:
+        """Replace a lazy placeholder with the real page widget and initialize it once."""
+        entry = self._lazy_page_entry(index=index)
+        if entry is None:
+            return None
+        if entry.get('initialized'):
+            return entry.get('widget')
+        placeholder = entry.get('widget')
+        page_attr = str(entry.get('page_attr', '') or '')
+        page = QWidget()
+        setattr(self, page_attr, page)
+        self.stacked_widget.insertWidget(int(entry['index']), page)
+        init_method = getattr(self, str(entry.get('init_method', '') or ''), None)
+        if not callable(init_method):
+            raise AttributeError(f'Missing initializer for lazy page {page_attr}.')
+        layout_margins = entry.get('layout_margins')
+        if layout_margins is not None:
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(*tuple(layout_margins))
+            init_method(page_layout)
+        else:
+            init_method()
+        if placeholder is not None:
+            self.stacked_widget.removeWidget(placeholder)
+            placeholder.deleteLater()
+        entry['widget'] = page
+        entry['initialized'] = True
+        theme_hook = getattr(self, str(entry.get('theme_hook', '') or ''), None)
+        if callable(theme_hook):
+            theme_hook()
+        hydrate_hook = getattr(self, str(entry.get('hydrate_hook', '') or ''), None)
+        if callable(hydrate_hook):
+            hydrate_hook()
+        if hasattr(self, '_lazy_warmup_queue') and int(entry['index']) in getattr(self, '_lazy_warmup_queue', []):
+            self._lazy_warmup_queue = [value for value in self._lazy_warmup_queue if int(value) != int(entry['index'])]
+        return page
+
+    def _hydrate_lazy_page4(self) -> None:
+        """Populate the Portfolio workspace with the current runtime state after lazy init."""
+        if hasattr(self, '_sync_after_portfolio_change'):
+            self._sync_after_portfolio_change(refresh_main=False)
+
+    def _hydrate_lazy_page3(self) -> None:
+        """Populate the News page from the most recent dashboard payload after lazy init."""
+        if isinstance(getattr(self, 'last_data', None), dict):
+            self.update_page3(self.last_data)
+
+    def _hydrate_lazy_page7(self) -> None:
+        """Refresh calendar-derived tables after lazy init."""
+        if hasattr(self, '_p7_refresh_options_expirations'):
+            self._p7_refresh_options_expirations()
+        if hasattr(self, '_p7_render_month'):
+            self._p7_render_month()
+        if hasattr(self, '_p7_queue_market_holiday_year'):
+            self._p7_queue_market_holiday_year(getattr(self, '_p7_year', None))
+        if hasattr(self, '_p7_fetch_events'):
+            self._p7_fetch_events()
 
     def _apply_window_theme(self) -> None:
         """Apply the active theme to shared shell widgets and dashboard plots."""

@@ -2,12 +2,16 @@ from __future__ import annotations
 from typing import Any
 from ..compat import *
 from budget_terminal_app.paths import user_data_path
+from budget_terminal_app.workers.fundamentals import FundamentalsWorker
 
 class FundamentalsSetupMixin:
     _P2_CONFIG_PATH = user_data_path('fundamentals_config.json')
 
     def init_page2(self, layout: Any) -> None:
         """Build the Deep Dive page UI (called once during init_ui)."""
+        self._p2_request_seq = 0
+        self._p2_active_request_id = 0
+        self._p2_request_contexts = {}
         self.p2_website_url = ''
         self.p2_ir_url = ''
         search_row = QHBoxLayout()
@@ -109,7 +113,7 @@ class FundamentalsSetupMixin:
         self.p2_charts_grid = QGridLayout(self.p2_charts_box)
         self.p2_charts_grid.setContentsMargins(12, 18, 12, 12)
         self.p2_charts_grid.setSpacing(12)
-        simple_chart_titles = ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash & Debt', 'Operating Expenses']
+        simple_chart_titles = ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash & Total Debt', 'Operating Expenses']
         self.p2_simple_charts = []
         self.p2_simple_titles = []
         self.p2_simple_legend_bars = []
@@ -197,7 +201,62 @@ class FundamentalsSetupMixin:
         for col in range(columns):
             self.p2_charts_grid.setColumnStretch(col, 1)
 
-    def analyze_stock_p2(self) -> None:
+    def _p2_status_text_for_payload(self, data: Any, *, restored: bool=False) -> str:
+        """Build the user-facing status text for a fundamentals payload."""
+        payload = data if isinstance(data, dict) else {}
+        ticker = str(payload.get('ticker', '') or self.p2_ticker_input.text() or '').upper().strip()
+        source = 'Alpha Vantage' if payload.get('av_used') else 'yfinance'
+        if restored and ticker:
+            return f'Restored last session for {ticker} | source: {source}'
+        if ticker:
+            return f'{ticker}  |  source: {source}'
+        return f'Source: {source}'
+
+    def _p2_session_snapshot(self) -> dict[str, Any] | None:
+        """Return the current fundamentals workspace snapshot when data is loaded."""
+        if not isinstance(getattr(self, 'p2_current_data', None), dict):
+            return None
+        ticker = str(self.p2_current_data.get('ticker', '') or '').upper().strip()
+        if not ticker:
+            return None
+        return {
+            'ticker': ticker,
+            'period': self._p2_period() if hasattr(self, 'p2_annual_btn') else 'annual',
+            'data': serialize_session_value(self.p2_current_data),
+        }
+
+    def _p2_save_session_snapshot(self, *, immediate: bool=False) -> None:
+        """Persist the latest fundamentals workspace snapshot."""
+        if hasattr(self, '_set_tab_session_snapshot'):
+            self._set_tab_session_snapshot('fundamentals', self._p2_session_snapshot(), immediate=immediate)
+
+    def _p2_restore_session_snapshot(self, snapshot: Any) -> bool:
+        """Restore the fundamentals workspace from a cached session snapshot."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        ticker = str(payload.get('ticker', '') or '').upper().strip()
+        if ticker:
+            self.p2_ticker_input.setText(ticker)
+        restored_data = deserialize_session_value(payload.get('data'))
+        if not isinstance(restored_data, dict):
+            return False
+        self.update_page2(
+            restored_data,
+            update_collection_info=False,
+            status_text=self._p2_status_text_for_payload(restored_data, restored=True),
+        )
+        period = str(payload.get('period', 'annual') or 'annual').strip().lower()
+        if period in {'annual', 'quarterly'}:
+            self._set_p2_period(period)
+        return True
+
+    def _p2_restore_startup_session(self, snapshot: Any) -> None:
+        """Hydrate fundamentals from the last session, then refresh it in the background."""
+        restored = self._p2_restore_session_snapshot(snapshot)
+        ticker = str(getattr(self, 'p2_ticker_input', None).text() if hasattr(self, 'p2_ticker_input') else '').upper().strip()
+        if restored and ticker:
+            self.analyze_stock_p2(update_collection_info=False)
+
+    def analyze_stock_p2(self, *_: Any, update_collection_info: bool=True) -> None:
         """Handle analyze stock p2."""
         ticker = self.p2_ticker_input.text().upper().strip()
         if not ticker:
@@ -213,21 +272,46 @@ class FundamentalsSetupMixin:
                 json.dump(_cfg, _f)
         except Exception:
             pass
+        self._p2_request_seq += 1
+        request_id = self._p2_request_seq
+        self._p2_active_request_id = request_id
+        self._p2_request_contexts[request_id] = {
+            'update_collection_info': bool(update_collection_info),
+        }
         self.p2_analyze_btn.setEnabled(False)
         self.set_status_text(self.p2_status_lbl, f'Loading {ticker}...', status='warning')
         self.p2_fund_worker = FundamentalsWorker(ticker)
         self.p2_fund_thread = QThread()
         self.p2_fund_worker.moveToThread(self.p2_fund_thread)
         self.p2_fund_thread.started.connect(self.p2_fund_worker.run)
-        self.p2_fund_worker.finished.connect(self.update_page2)
+        self.p2_fund_worker.finished.connect(lambda data, req=request_id: self._p2_handle_result(req, data))
         self.p2_fund_worker.finished.connect(self.p2_fund_thread.quit)
-        self.p2_fund_worker.error.connect(self._page2_error)
+        self.p2_fund_worker.error.connect(lambda msg, req=request_id: self._page2_error(req, msg))
         self.p2_fund_worker.error.connect(self.p2_fund_thread.quit)
         self.p2_fund_thread.start()
 
-    def _page2_error(self, msg: Any) -> None:
+    def _p2_handle_result(self, request_id: int, data: Any) -> None:
+        """Apply one fundamentals response only when it is still current."""
+        context = self._p2_request_contexts.pop(request_id, {})
+        if request_id != getattr(self, '_p2_active_request_id', 0):
+            return
+        self.update_page2(
+            data,
+            update_collection_info=bool(context.get('update_collection_info', True)),
+        )
+
+    def _page2_error(self, request_id: Any, msg: Any=None) -> None:
         """Handle page2 error."""
-        self.set_status_text(self.p2_status_lbl, f'Error: {msg}', status='negative')
+        error_text = msg if msg is not None else request_id
+        current_request_id = request_id if msg is not None else getattr(self, '_p2_active_request_id', 0)
+        try:
+            numeric_request_id = int(current_request_id)
+        except (TypeError, ValueError):
+            numeric_request_id = int(getattr(self, '_p2_active_request_id', 0) or 0)
+        self._p2_request_contexts.pop(numeric_request_id, None)
+        if numeric_request_id != getattr(self, '_p2_active_request_id', 0):
+            return
+        self.set_status_text(self.p2_status_lbl, f'Error: {error_text}', status='negative')
         self.p2_analyze_btn.setEnabled(True)
 
     def _open_p2_website(self, *_: Any) -> None:
@@ -257,6 +341,7 @@ class FundamentalsSetupMixin:
         period = self._p2_period()
         self._render_simple_charts(self.p2_current_data, period)
         self._p2_relayout_charts()
+        self._p2_save_session_snapshot()
 
     def _apply_fundamentals_theme(self) -> None:
         """Refresh fundamentals colors when the active theme changes."""

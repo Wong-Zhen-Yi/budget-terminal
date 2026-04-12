@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.workers.market_metrics import MarketCapWorker
 
 
 @dataclass
@@ -18,8 +19,6 @@ class SectorsMixin:
     _P8_MIN_GRID_COLUMNS = 2
     _P8_DETAIL_TABLE_ROW_HEIGHT = 32
     _P8_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
-    _P8_MKTCAP_FASTINFO_MAX_WORKERS = 8
-    _P8_MKTCAP_INFO_MAX_WORKERS = 3
     _P8_SECTOR_AFTER = {'Crypto': 'Utilities', 'Metals': 'Crypto'}
 
     def init_page8(self) -> None:
@@ -27,6 +26,10 @@ class SectorsMixin:
         self._p8_all_results = {}
         self._p8_sector_averages = {}
         self._p8_selected_sector = None
+        self._p8_mktcap_fetching = False
+        self._p8_mktcap_inflight_tickers = set()
+        self._p8_mktcap_queued_tickers = set()
+        self._p8_mktcap_worker = None
         self.p8_last_fetch = 0
         self.p8_fetch_in_progress = False
         self.p8_column_count = 0
@@ -255,6 +258,7 @@ class SectorsMixin:
 
         # Populate detail table
         self._p8_populate_detail_table(sector)
+        self._p8_request_detail_market_caps(SECTOR_DATA.get(sector, []))
 
     def _p8_populate_detail_table(self, sector: str) -> None:
         """Fill the detail panel table with the selected sector's constituents."""
@@ -416,10 +420,14 @@ class SectorsMixin:
     def _p8_market_cap_refresh_candidates(self, tickers: list[str]) -> list[str]:
         """Return missing or stale tickers that still need sectors market-cap refreshes."""
         cache, _ = self._p8_ensure_mktcap_cache_state()
+        inflight = set(getattr(self, '_p8_mktcap_inflight_tickers', set()))
+        queued = set(getattr(self, '_p8_mktcap_queued_tickers', set()))
         needed = []
         for ticker in tickers:
             symbol = str(ticker or '').strip().upper()
             if not symbol:
+                continue
+            if symbol in inflight or symbol in queued:
                 continue
             if (symbol not in cache) or (not self._p8_has_fresh_mktcap(symbol)):
                 needed.append(symbol)
@@ -440,14 +448,63 @@ class SectorsMixin:
             cache[symbol] = mc
             cache_ts[symbol] = float(fetched_at)
 
+    def _p8_request_detail_market_caps(self, tickers: Any = None) -> bool:
+        """Fetch market caps only for the selected-sector detail table."""
+        symbols = list(tickers if isinstance(tickers, (list, tuple, set)) else [])
+        needed = self._p8_market_cap_refresh_candidates(symbols)
+        if not needed:
+            return False
+        if getattr(self, '_p8_mktcap_fetching', False):
+            queued = set(getattr(self, '_p8_mktcap_queued_tickers', set()))
+            queued.update(needed)
+            self._p8_mktcap_queued_tickers = queued
+            return False
+        worker = MarketCapWorker(needed)
+        self._p8_mktcap_fetching = True
+        self._p8_mktcap_inflight_tickers = set(needed)
+        self._p8_mktcap_worker = worker
+        worker.finished.connect(self._p8_on_market_caps_ready)
+        threading.Thread(target=worker.run, daemon=True).start()
+        return True
+
+    def _p8_on_market_caps_ready(self, results: Any) -> None:
+        """Merge fetched market caps and refresh the selected-sector detail table."""
+        self._p8_mktcap_fetching = False
+        request_tickers = set(getattr(self, '_p8_mktcap_inflight_tickers', set()))
+        self._p8_mktcap_inflight_tickers = set()
+        self._p8_mktcap_worker = None
+        updates = {}
+        fetched_at = self._p8_mktcap_cache_now()
+        if isinstance(results, dict):
+            for ticker, mc in results.items():
+                symbol = str(ticker or '').strip().upper()
+                if not symbol:
+                    continue
+                updates[symbol] = (mc, fetched_at)
+                snapshot = self._p8_all_results.get(symbol)
+                if snapshot is not None:
+                    snapshot.mkt_cap = mc
+        self._p8_apply_mktcap_cache_updates(updates)
+        if self._p8_selected_sector:
+            self._p8_populate_detail_table(self._p8_selected_sector)
+        queued = list(getattr(self, '_p8_mktcap_queued_tickers', set()))
+        self._p8_mktcap_queued_tickers = set()
+        if queued:
+            remaining = [ticker for ticker in queued if ticker not in request_tickers]
+            self._p8_request_detail_market_caps(remaining)
+
     def _p8_fetch_all_sectors(self) -> None:
-        """Fetch sector prices in batch and market caps through a smaller fallback path."""
+        """Fetch sector prices in batch and reuse cached market caps where available."""
         all_tickers = sorted({ticker for tickers in SECTOR_DATA.values() for ticker in tickers})
         all_results = {ticker: SectorTickerSnapshot() for ticker in all_tickers}
-        mktcap_updates = {}
         try:
             batch = yf.download(all_tickers, period='5d', interval='1d', group_by='ticker', progress=False, auto_adjust=False, threads=True)
             is_multi = isinstance(batch.columns, pd.MultiIndex)
+            cache, _ = self._p8_ensure_mktcap_cache_state()
+            for ticker in all_tickers:
+                symbol = str(ticker or '').strip().upper()
+                if symbol in cache:
+                    all_results[ticker].mkt_cap = cache.get(symbol)
             for ticker in all_tickers:
                 try:
                     if is_multi and ticker in batch.columns.get_level_values(0):
@@ -505,63 +562,7 @@ class SectorsMixin:
                         if price is not None:
                             all_results[ticker].price = price
                             all_results[ticker].change = change
-
-            refresh_candidates = self._p8_market_cap_refresh_candidates(all_tickers)
-            cache, _ = self._p8_ensure_mktcap_cache_state()
-            for ticker in all_tickers:
-                symbol = str(ticker or '').strip().upper()
-                if symbol in cache:
-                    all_results[ticker].mkt_cap = cache.get(symbol)
-
-            def fetch_fast_mkt_cap(ticker: Any) -> Any:
-                """Fetch market cap from fast_info for one ticker."""
-                try:
-                    with YF_LOCK:
-                        t_obj = yf.Ticker(ticker)
-                        fast_info = getattr(t_obj, 'fast_info', {}) or {}
-                    mc = fast_info.get('marketCap')
-                    if mc:
-                        return (ticker, float(mc))
-                except Exception:
-                    pass
-                return (ticker, None)
-
-            def fetch_info_mkt_cap(ticker: Any) -> Any:
-                """Fetch market cap from full info only when the fast path was unresolved."""
-                try:
-                    with YF_LOCK:
-                        info = yf.Ticker(ticker).info
-                    mc = info.get('marketCap')
-                    return (ticker, float(mc)) if mc else (ticker, None)
-                except Exception:
-                    return (ticker, None)
-
-            if refresh_candidates:
-                refresh_ts = self._p8_mktcap_cache_now()
-                unresolved = []
-                max_fast_workers = max(1, min(len(refresh_candidates), self._P8_MKTCAP_FASTINFO_MAX_WORKERS))
-                with ThreadPoolExecutor(max_workers=max_fast_workers) as executor:
-                    for ticker, mc in executor.map(fetch_fast_mkt_cap, refresh_candidates):
-                        cached_mc = cache.get(ticker)
-                        if mc is not None:
-                            all_results[ticker].mkt_cap = mc
-                            mktcap_updates[ticker] = (mc, refresh_ts)
-                        elif cached_mc is not None:
-                            all_results[ticker].mkt_cap = cached_mc
-                            mktcap_updates[ticker] = (cached_mc, refresh_ts)
-                        else:
-                            unresolved.append(ticker)
-
-                if unresolved:
-                    info_ts = self._p8_mktcap_cache_now()
-                    max_info_workers = max(1, min(len(unresolved), self._P8_MKTCAP_INFO_MAX_WORKERS))
-                    with ThreadPoolExecutor(max_workers=max_info_workers) as executor:
-                        for ticker, mc in executor.map(fetch_info_mkt_cap, unresolved):
-                            all_results[ticker].mkt_cap = mc
-                            mktcap_updates[ticker] = (mc, info_ts)
-            self._invoke_main.emit(
-                lambda results=all_results, updates=mktcap_updates: self._p8_complete_refresh(results, updates)
-            )
+            self._invoke_main.emit(lambda results=all_results: self._p8_complete_refresh(results))
         except Exception as e:
             logger.error(f'Failed to fetch all sector data: {e}')
             self._invoke_main.emit(self._p8_fail_refresh)
@@ -609,6 +610,7 @@ class SectorsMixin:
                 self.p8_heat_cards[self._p8_selected_sector]['frame'],
                 self._p8_selected_sector, selected=True, change=cur_change
             )
+            self._p8_request_detail_market_caps(SECTOR_DATA.get(self._p8_selected_sector, []))
 
         # Auto-select strongest sector if none selected
         if not self._p8_selected_sector and sector_averages:
@@ -684,11 +686,17 @@ class SectorsMixin:
         symbol = str(ticker or '').upper().strip()
         if not symbol:
             return
+        self.p10_symbol = symbol
+        if isinstance(getattr(self, 'chart_page_state', None), dict):
+            self.chart_page_state = {
+                **self.chart_page_state,
+                'symbol': symbol,
+            }
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
+        target_index = page_index if page_index >= 0 else 8
+        page_ready = self._page_initialized(index=target_index)
+        self.switch_page(target_index)
         if hasattr(self, 'p10_symbol_input'):
             self.p10_symbol_input.setText(symbol)
-        if hasattr(self, 'p10_symbol'):
-            self.p10_symbol = symbol
-        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
-        self.switch_page(page_index if page_index >= 0 else 8)
-        if hasattr(self, '_p10_load_from_input'):
+        if page_ready and hasattr(self, '_p10_load_from_input'):
             self._p10_load_from_input()

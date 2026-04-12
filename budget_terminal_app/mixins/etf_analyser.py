@@ -1,7 +1,9 @@
 from __future__ import annotations
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from ..compat import *
-from budget_terminal_app.etf_holdings import EtfHoldingsResult, EtfHoldingsService
+
+if TYPE_CHECKING:
+    from budget_terminal_app.etf_holdings import EtfHoldingsResult
 
 ETF_UNIVERSE = [
     # Broad US market
@@ -37,12 +39,25 @@ _AUM_RANGES = [
     ('$1B+', 1_000_000_000, None),
 ]
 
+_P13_MAX_NAMED_SLICES = 12
+_P13_MIN_REMAINDER_WEIGHT = 0.001
+
 
 class EtfAnalyserMixin:
+    def _p13_build_service(self) -> Any:
+        """Import and construct the ETF holdings service only when the page is initialized."""
+        from budget_terminal_app.etf_holdings import EtfHoldingsService
+
+        return EtfHoldingsService()
+
     def init_page13(self) -> None:
         """Build the ETF analyser page UI."""
+        self._p13_request_seq = 0
+        self._p13_active_request_id = 0
+        self._p13_request_contexts = {}
         self._p13_rows: list[dict[str, Any]] = []
-        self._p13_service = EtfHoldingsService()
+        self._p13_last_result = None
+        self._p13_service = self._p13_build_service()
         self._p13_aum_cache: dict[str, float] = {}
         self._p13_active_aum_range: int = -1
         self._p13_aum_fetch_in_progress: bool = False
@@ -53,8 +68,8 @@ class EtfAnalyserMixin:
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        left_panel = self._p13_build_aum_panel()
-        splitter.addWidget(left_panel)
+        self.p13_left_panel = self._p13_build_aum_panel()
+        splitter.addWidget(self.p13_left_panel)
 
         right_widget = QWidget()
         layout = QVBoxLayout(right_widget)
@@ -67,23 +82,18 @@ class EtfAnalyserMixin:
         outer_layout.addWidget(splitter)
 
         title_row = QHBoxLayout()
-        title_lbl = QLabel('<b>ETF</b>')
-        self.set_theme_role(title_lbl, 'page_title')
-        title_row.addWidget(title_lbl)
+        self.p13_title_lbl = QLabel('<b>ETF</b>')
+        self.set_theme_role(self.p13_title_lbl, 'page_title')
+        title_row.addWidget(self.p13_title_lbl)
         title_row.addStretch()
         layout.addLayout(title_row)
 
-        controls = QFrame()
-        controls.setStyleSheet(
-            f'QFrame {{ background: {self.theme_color("panel_background")}; '
-            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}'
-        )
-        controls_layout = QHBoxLayout(controls)
+        self.p13_controls_frame = QFrame()
+        controls_layout = QHBoxLayout(self.p13_controls_frame)
         controls_layout.setContentsMargins(12, 8, 12, 8)
         controls_layout.setSpacing(10)
 
-        symbol_lbl = QLabel('ETF:')
-        symbol_lbl.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
+        self.p13_symbol_lbl = QLabel('ETF:')
         self.p13_etf_input = QLineEdit()
         self.p13_etf_input.setPlaceholderText('Enter ETF ticker (e.g. SPY, QQQ, VOO)')
         self.p13_etf_input.setMinimumWidth(220)
@@ -91,21 +101,17 @@ class EtfAnalyserMixin:
         self.p13_load_btn = QPushButton('Load Holdings')
         self.set_theme_variant(self.p13_load_btn, 'accent')
         self.p13_load_btn.clicked.connect(self._p13_load_etf)
-        controls_layout.addWidget(symbol_lbl)
+        controls_layout.addWidget(self.p13_symbol_lbl)
         controls_layout.addWidget(self.p13_etf_input)
         self.p13_export_btn = QPushButton('Export')
         self.p13_export_btn.clicked.connect(self._p13_export_clipboard)
         controls_layout.addWidget(self.p13_load_btn)
         controls_layout.addWidget(self.p13_export_btn)
         controls_layout.addStretch()
-        layout.addWidget(controls)
+        layout.addWidget(self.p13_controls_frame)
 
-        summary_frame = QFrame()
-        summary_frame.setStyleSheet(
-            f'QFrame {{ background: {self.theme_color("panel_background")}; '
-            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}'
-        )
-        summary_layout = QGridLayout(summary_frame)
+        self.p13_summary_frame = QFrame()
+        summary_layout = QGridLayout(self.p13_summary_frame)
         summary_layout.setContentsMargins(12, 10, 12, 10)
         summary_layout.setHorizontalSpacing(18)
         summary_layout.setVerticalSpacing(8)
@@ -131,22 +137,30 @@ class EtfAnalyserMixin:
         summary_layout.addWidget(self.p13_expense_lbl, 1, 0)
         summary_layout.addWidget(self.p13_assets_lbl, 1, 1)
         summary_layout.addWidget(self.p13_count_lbl, 1, 2)
-        layout.addWidget(summary_frame)
+        layout.addWidget(self.p13_summary_frame)
 
         self.p13_sectors_lbl = QLabel('')
         self.p13_sectors_lbl.setWordWrap(True)
-        self.p13_sectors_lbl.setStyleSheet(
-            f'color: {self.theme_color("text_secondary")}; '
-            f'background: {self.theme_color("panel_background")}; '
-            f'border: 1px solid {self.theme_color("panel_border")}; '
-            f'border-radius: 6px; padding: 8px 12px;'
-        )
         self.p13_sectors_lbl.setVisible(False)
         layout.addWidget(self.p13_sectors_lbl)
 
         self.p13_status_lbl = QLabel('Enter an ETF ticker to load holdings from supported official issuer sources.')
         self.set_theme_role(self.p13_status_lbl, 'status_muted')
         layout.addWidget(self.p13_status_lbl)
+
+        self.p13_chart_frame = QFrame()
+        chart_layout = QVBoxLayout(self.p13_chart_frame)
+        chart_layout.setContentsMargins(12, 10, 12, 10)
+        chart_layout.setSpacing(8)
+        self.p13_chart_title_lbl = QLabel('Holdings Breakdown')
+        self.set_theme_role(self.p13_chart_title_lbl, 'card_title')
+        chart_layout.addWidget(self.p13_chart_title_lbl)
+        self.p13_holdings_pie = PieChartWidget()
+        self.p13_holdings_pie.setMinimumHeight(240)
+        self.p13_holdings_pie.set_donut(True, hole_ratio=0.58)
+        chart_layout.addWidget(self.p13_holdings_pie, 1)
+        self.p13_chart_frame.setVisible(True)
+        self.p13_chart_frame.setMinimumWidth(360)
 
         self.p13_table = QTableWidget(0, 3)
         self.p13_table.setHorizontalHeaderLabels(['Ticker', 'Name', 'Weight'])
@@ -164,17 +178,126 @@ class EtfAnalyserMixin:
         self.p13_table.setAlternatingRowColors(True)
         self.p13_table.setSortingEnabled(True)
         self.p13_table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
-        layout.addWidget(self.p13_table, 1)
+        self.p13_holdings_row = QHBoxLayout()
+        self.p13_holdings_row.setSpacing(10)
+        self.p13_holdings_row.addWidget(self.p13_table, 3)
+        self.p13_holdings_row.addWidget(self.p13_chart_frame, 2)
+        layout.addLayout(self.p13_holdings_row, 1)
+
+        self._apply_etf_theme()
+        self._p13_show_holdings_chart_placeholder()
 
         # Auto-select $1B+ range on startup
         self._p13_on_aum_filter_clicked(2)
 
-    def _p13_load_etf(self) -> None:
+    def _p13_result_to_snapshot(self, result: Any) -> dict[str, Any] | None:
+        """Convert one ETF result into a JSON-safe session snapshot."""
+        if result is None:
+            return None
+        holdings = []
+        for holding in list(getattr(result, 'holdings', []) or []):
+            holdings.append({
+                'symbol': str(getattr(holding, 'symbol', '') or '').upper().strip(),
+                'name': str(getattr(holding, 'name', '') or '').strip(),
+                'weight': getattr(holding, 'weight', None),
+                'sector': str(getattr(holding, 'sector', '') or '').strip(),
+            })
+        return {
+            'ticker': str(getattr(result, 'ticker', '') or '').upper().strip(),
+            'fund_name': str(getattr(result, 'fund_name', '') or '').strip(),
+            'issuer': str(getattr(result, 'issuer', '') or '').strip(),
+            'as_of_date': str(getattr(result, 'as_of_date', '') or '').strip(),
+            'expense_ratio': str(getattr(result, 'expense_ratio', '--') or '--').strip(),
+            'net_assets': str(getattr(result, 'net_assets', '--') or '--').strip(),
+            'sector_breakdown': serialize_session_value(getattr(result, 'sector_breakdown', {}) or {}),
+            'source_url': str(getattr(result, 'source_url', '') or '').strip(),
+            'is_partial': bool(getattr(result, 'is_partial', False)),
+            'coverage_note': str(getattr(result, 'coverage_note', '') or '').strip(),
+            'holdings': serialize_session_value(holdings),
+        }
+
+    def _p13_snapshot_to_result(self, snapshot: Any) -> Any:
+        """Rebuild one ETF holdings result from cached session data."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        ticker = str(payload.get('ticker', '') or '').upper().strip()
+        if not ticker:
+            return None
+        from budget_terminal_app.etf_holdings import EtfHolding, EtfHoldingsResult
+
+        holdings = []
+        for holding in deserialize_session_value(payload.get('holdings')) or []:
+            if not isinstance(holding, dict):
+                continue
+            holdings.append(EtfHolding(
+                symbol=str(holding.get('symbol', '') or '').upper().strip(),
+                name=str(holding.get('name', '') or '').strip(),
+                weight=holding.get('weight'),
+                sector=str(holding.get('sector', '') or '').strip(),
+            ))
+        return EtfHoldingsResult(
+            ticker=ticker,
+            fund_name=str(payload.get('fund_name', '') or '').strip(),
+            issuer=str(payload.get('issuer', '') or '').strip(),
+            as_of_date=str(payload.get('as_of_date', '') or '').strip(),
+            expense_ratio=str(payload.get('expense_ratio', '--') or '--').strip(),
+            net_assets=str(payload.get('net_assets', '--') or '--').strip(),
+            holdings=holdings,
+            sector_breakdown=deserialize_session_value(payload.get('sector_breakdown')) or {},
+            source_url=str(payload.get('source_url', '') or '').strip(),
+            is_partial=bool(payload.get('is_partial', False)),
+            coverage_note=str(payload.get('coverage_note', '') or '').strip(),
+        )
+
+    def _p13_session_snapshot(self) -> dict[str, Any] | None:
+        """Return the current ETF workspace snapshot when data is loaded."""
+        result = getattr(self, '_p13_last_result', None)
+        payload = self._p13_result_to_snapshot(result)
+        if not isinstance(payload, dict):
+            return None
+        payload['input_ticker'] = str(self.p13_etf_input.text() or payload.get('ticker', '') or '').upper().strip()
+        return payload
+
+    def _p13_save_session_snapshot(self, *, immediate: bool=False) -> None:
+        """Persist the latest ETF workspace snapshot."""
+        if hasattr(self, '_set_tab_session_snapshot'):
+            self._set_tab_session_snapshot('etf', self._p13_session_snapshot(), immediate=immediate)
+
+    def _p13_restore_session_snapshot(self, snapshot: Any) -> bool:
+        """Restore the ETF workspace from cached session data."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        input_ticker = str(payload.get('input_ticker', '') or payload.get('ticker', '') or '').upper().strip()
+        if input_ticker:
+            self.p13_etf_input.setText(input_ticker)
+        result = self._p13_snapshot_to_result(payload)
+        if result is None:
+            return False
+        self._p13_apply_result(
+            result,
+            update_collection_info=False,
+            status_text=f'Restored last session for {result.ticker}.',
+        )
+        return True
+
+    def _p13_restore_startup_session(self, snapshot: Any) -> None:
+        """Hydrate ETF from the last session, then refresh it in the background."""
+        restored = self._p13_restore_session_snapshot(snapshot)
+        ticker = str(self.p13_etf_input.text() or '').upper().strip()
+        if restored and ticker:
+            self._p13_load_etf(update_collection_info=False)
+
+    def _p13_load_etf(self, *_: Any, update_collection_info: bool=True) -> None:
         """Fetch ETF holdings data using supported official issuer sources."""
         ticker = self.p13_etf_input.text().upper().strip()
         if not ticker:
             self.set_status_text(self.p13_status_lbl, 'Enter an ETF ticker first.', status='warning')
             return
+        self._p13_request_seq += 1
+        request_id = self._p13_request_seq
+        self._p13_active_request_id = request_id
+        self._p13_request_contexts[request_id] = {
+            'update_collection_info': bool(update_collection_info),
+        }
+        self._p13_show_holdings_chart_placeholder('Loading', 'Breakdown')
         self.set_status_text(self.p13_status_lbl, f'Loading ETF holdings for {ticker} from official issuer sources...', status='warning')
         self.p13_load_btn.setEnabled(False)
 
@@ -182,15 +305,33 @@ class EtfAnalyserMixin:
             """Fetch fund metadata and holdings off the UI thread."""
             try:
                 result = self._p13_service.load(ticker)
-                self._invoke_main.emit(lambda r=result: self._p13_update_view(r))
+                self._invoke_main.emit(lambda r=result, rid=request_id: self._p13_handle_loaded_result(rid, r))
             except Exception as exc:
                 logger.error(f'ETF analyser load failed for {ticker}: {exc}')
-                self._invoke_main.emit(lambda t=ticker, err=str(exc): self._p13_handle_error(t, err))
+                self._invoke_main.emit(lambda t=ticker, err=str(exc), rid=request_id: self._p13_handle_error(rid, t, err))
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _p13_update_view(self, result: EtfHoldingsResult) -> None:
+    def _p13_handle_loaded_result(self, request_id: int, result: 'EtfHoldingsResult') -> None:
+        """Apply one ETF response only when it is still current."""
+        context = self._p13_request_contexts.pop(request_id, {})
+        if request_id != getattr(self, '_p13_active_request_id', 0):
+            return
+        self._p13_apply_result(
+            result,
+            update_collection_info=bool(context.get('update_collection_info', True)),
+        )
+
+    def _p13_apply_result(
+        self,
+        result: 'EtfHoldingsResult',
+        *,
+        update_collection_info: bool=True,
+        status_text: str | None=None,
+    ) -> None:
         """Render ETF summary and holdings into the page table."""
+        self._p13_last_result = result
+        self._p13_update_holdings_chart(result.holdings)
         rows = [
             {
                 'symbol': holding.symbol,
@@ -247,8 +388,12 @@ class EtfAnalyserMixin:
                 f'No holdings were returned by the official issuer source for {result.ticker}.',
                 status='warning',
             )
-        self._set_data_collection_info([result.issuer or 'official issuer source'])
+        if status_text:
+            self.set_status_text(self.p13_status_lbl, status_text, status='positive')
+        if update_collection_info:
+            self._set_data_collection_info([result.issuer or 'official issuer source'])
         self.p13_load_btn.setEnabled(True)
+        self._p13_save_session_snapshot()
 
     def _p13_export_clipboard(self) -> None:
         """Copy holdings to clipboard in tab-separated format for spreadsheet pasting."""
@@ -263,10 +408,69 @@ class EtfAnalyserMixin:
         QApplication.clipboard().setText('\n'.join(lines))
         self.set_status_text(self.p13_status_lbl, f'Copied {len(self._p13_rows)} holdings to clipboard.', status='positive')
 
-    def _p13_handle_error(self, ticker: str, exc: Any) -> None:
+    def _p13_handle_error(self, request_id: int, ticker: str, exc: Any) -> None:
         """Show a user-facing error for ETF loads."""
+        self._p13_request_contexts.pop(request_id, None)
+        if request_id != getattr(self, '_p13_active_request_id', 0):
+            return
+        self._p13_show_holdings_chart_placeholder('Load ETF', 'Breakdown')
         self.p13_load_btn.setEnabled(True)
         self.set_status_text(self.p13_status_lbl, f'Failed to load {ticker}: {exc}', status='negative')
+
+    def _p13_update_holdings_chart(self, holdings: list[Any]) -> None:
+        """Render a readable donut chart for the ETF holdings basket."""
+        ranked: list[tuple[str, float]] = []
+        loaded_total = 0.0
+        for holding in holdings:
+            weight = getattr(holding, 'weight', None)
+            try:
+                weight_value = float(weight)
+            except (TypeError, ValueError):
+                continue
+            if weight_value <= 0:
+                continue
+            label = str(getattr(holding, 'symbol', '') or getattr(holding, 'name', '') or 'Unknown').strip()
+            ranked.append((label, weight_value))
+            loaded_total += weight_value
+        if not ranked:
+            self._p13_show_holdings_chart_placeholder('No Holdings', 'Breakdown')
+            return
+        ranked.sort(key=lambda item: item[1], reverse=True)
+
+        chart_weights: dict[str, float] = {}
+        for label, weight in ranked[:_P13_MAX_NAMED_SLICES]:
+            chart_weights[label] = chart_weights.get(label, 0.0) + weight
+
+        others_weight = sum(weight for _label, weight in ranked[_P13_MAX_NAMED_SLICES:])
+        uncovered_weight = max(0.0, 1.0 - loaded_total)
+        if uncovered_weight >= _P13_MIN_REMAINDER_WEIGHT:
+            others_weight += uncovered_weight
+        if others_weight > 0:
+            chart_weights['Others'] = chart_weights.get('Others', 0.0) + others_weight
+
+        if not chart_weights:
+            self._p13_show_holdings_chart_placeholder('No Holdings', 'Breakdown')
+            return
+
+        chart_total = sum(chart_weights.values())
+        if others_weight > 0 and chart_total > 0:
+            self.p13_holdings_pie.set_start_angle((others_weight / chart_total) * 180.0)
+        else:
+            self.p13_holdings_pie.set_start_angle(90.0)
+        coverage_pct = min(max(loaded_total, 0.0), 1.0) * 100.0
+        self.p13_holdings_pie.set_data(chart_weights)
+        self.p13_holdings_pie.set_center_text(f'{coverage_pct:.1f}%', 'Coverage')
+        self.p13_chart_frame.setVisible(True)
+
+    def _p13_show_holdings_chart_placeholder(self, text: str='Load ETF', subtext: str='Breakdown') -> None:
+        """Show the ETF donut in its placeholder state instead of hiding it."""
+        if not hasattr(self, 'p13_holdings_pie'):
+            return
+        self.p13_holdings_pie.set_start_angle(90.0)
+        self.p13_holdings_pie.set_data({})
+        self.p13_holdings_pie.set_center_text(text, subtext)
+        if hasattr(self, 'p13_chart_frame'):
+            self.p13_chart_frame.setVisible(True)
 
     # ── AUM left panel ──────────────────────────────────────────────
 
@@ -274,17 +478,12 @@ class EtfAnalyserMixin:
         """Build the left-side 'ETF by AUM' panel."""
         panel = QWidget()
         panel.setMinimumWidth(240)
-        panel.setStyleSheet(
-            f'QWidget {{ background: {self.theme_color("panel_background")}; '
-            f'border-right: 1px solid {self.theme_color("panel_border")}; }}'
-        )
         vbox = QVBoxLayout(panel)
         vbox.setContentsMargins(10, 10, 10, 10)
         vbox.setSpacing(8)
 
-        title = QLabel('<b>ETF by AUM</b>')
-        title.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
-        vbox.addWidget(title)
+        self._p13_aum_title_lbl = QLabel('<b>ETF by AUM</b>')
+        vbox.addWidget(self._p13_aum_title_lbl)
 
         self._p13_aum_buttons: list[QPushButton] = []
         for idx, (label, _lo, _hi) in enumerate(_AUM_RANGES):
@@ -296,15 +495,11 @@ class EtfAnalyserMixin:
 
         self._p13_aum_status_lbl = QLabel('')
         self._p13_aum_status_lbl.setWordWrap(True)
-        self._p13_aum_status_lbl.setStyleSheet(
-            f'color: {self.theme_color("text_secondary")}; border: none; font-size: 11px;'
-        )
         vbox.addWidget(self._p13_aum_status_lbl)
 
-        aum_note = QLabel('Note: Vanguard ETFs may show total fund AUM across all share classes, not ETF-only.')
-        aum_note.setWordWrap(True)
-        aum_note.setStyleSheet('color: #887744; border: none; font-size: 10px; font-style: italic;')
-        vbox.addWidget(aum_note)
+        self._p13_aum_note_lbl = QLabel('Note: Vanguard ETFs may show total fund AUM across all share classes, not ETF-only.')
+        self._p13_aum_note_lbl.setWordWrap(True)
+        vbox.addWidget(self._p13_aum_note_lbl)
 
         self._p13_aum_table = QTableWidget(0, 2)
         self._p13_aum_table.setHorizontalHeaderLabels(['Ticker', 'AUM'])
@@ -399,6 +594,85 @@ class EtfAnalyserMixin:
             self._p13_aum_table.setItem(row, 1, a_item)
         self._p13_aum_table.setSortingEnabled(True)
         self._p13_aum_status_lbl.setText(f'{len(filtered)} ETFs in {_label} range.')
+
+    def _apply_etf_theme(self) -> None:
+        """Refresh ETF page colors and chart styling after a theme change."""
+        panel_style = (
+            f'background: {self.theme_color("panel_background")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px;'
+        )
+        table_style = (
+            f'QTableWidget {{ background-color: {self.theme_color("panel_background")}; '
+            f'color: {self.theme_color("text_primary")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; '
+            f'gridline-color: {self.theme_color("panel_border")}; '
+            f'alternate-background-color: {self.theme_color("background_secondary")}; }} '
+            f'QHeaderView::section {{ background-color: {self.theme_color("panel_background")}; '
+            f'color: {self.theme_color("text_secondary")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; padding: 4px; }}'
+        )
+        input_style = (
+            f'background-color: {self.theme_color("panel_background")}; '
+            f'color: {self.theme_color("text_primary")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; '
+            f'border-radius: 6px; padding: 6px 10px;'
+        )
+        self.p13_left_panel.setStyleSheet(
+            f'background: {self.theme_color("panel_background")}; '
+            f'border-right: 1px solid {self.theme_color("panel_border")};'
+        )
+        self.p13_controls_frame.setStyleSheet(panel_style)
+        self.p13_summary_frame.setStyleSheet(panel_style)
+        self.p13_chart_frame.setStyleSheet(panel_style)
+        self.p13_symbol_lbl.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
+        self.p13_etf_input.setStyleSheet(input_style)
+        for label in (
+            self.p13_name_lbl,
+            self.p13_category_lbl,
+            self.p13_family_lbl,
+            self.p13_expense_lbl,
+            self.p13_assets_lbl,
+            self.p13_count_lbl,
+            self._p13_aum_title_lbl,
+        ):
+            label.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
+        self._p13_aum_status_lbl.setStyleSheet(
+            f'color: {self.theme_color("text_secondary")}; border: none; font-size: 11px;'
+        )
+        self._p13_aum_note_lbl.setStyleSheet(
+            f'color: {self.theme_color("warning")}; border: none; font-size: 10px; font-style: italic;'
+        )
+        self.p13_sectors_lbl.setStyleSheet(
+            f'color: {self.theme_color("text_secondary")}; '
+            f'background: {self.theme_color("panel_background")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; '
+            f'border-radius: 6px; padding: 8px 12px;'
+        )
+        self.set_status_text(
+            self.p13_status_lbl,
+            self.p13_status_lbl.text(),
+            status=self.p13_status_lbl.property('bt_status') or 'muted',
+        )
+        self.p13_table.setStyleSheet(table_style)
+        self._p13_aum_table.setStyleSheet(table_style)
+        for row_index in range(self.p13_table.rowCount()):
+            ticker_item = self.p13_table.item(row_index, 0)
+            name_item = self.p13_table.item(row_index, 1)
+            weight_item = self.p13_table.item(row_index, 2)
+            if ticker_item is not None:
+                ticker_item.setForeground(self.theme_qcolor('text_primary'))
+            if name_item is not None:
+                name_item.setForeground(self.theme_qcolor('text_secondary'))
+            if weight_item is not None:
+                weight_item.setForeground(self.theme_qcolor('accent_positive'))
+        for row_index in range(self._p13_aum_table.rowCount()):
+            ticker_item = self._p13_aum_table.item(row_index, 0)
+            value_item = self._p13_aum_table.item(row_index, 1)
+            if ticker_item is not None:
+                ticker_item.setForeground(self.theme_qcolor('text_primary'))
+            if value_item is not None:
+                value_item.setForeground(self.theme_qcolor('accent_positive'))
+        self.p13_holdings_pie.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
 
     def _p13_on_aum_etf_clicked(self, row: int, _col: int) -> None:
         """Load the clicked ETF's holdings in the main view."""

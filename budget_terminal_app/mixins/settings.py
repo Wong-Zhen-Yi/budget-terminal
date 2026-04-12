@@ -222,17 +222,22 @@ class SettingsMixin:
 
     def _build_settings_creator_image(self) -> Any:
         """Load and scale the Creator's Note image asset."""
+        cached = getattr(self, '_settings_creator_image_scaled_cache', None)
+        if cached is not None and not cached.isNull():
+            return cached
         image_pixmap = self._load_settings_creator_image_pixmap()
         if image_pixmap is None or image_pixmap.isNull():
             raise RuntimeError(
                 "Unable to render the Creator's Note image. Verify budget_terminal_app/assets/qr-code.png exists and is a readable PNG."
             )
-        return image_pixmap.scaled(
+        scaled = image_pixmap.scaled(
             self.SETTINGS_CREATOR_IMAGE_SIZE,
             self.SETTINGS_CREATOR_IMAGE_SIZE,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        self._settings_creator_image_scaled_cache = scaled
+        return scaled
 
     def _refresh_settings_creator_image(self) -> None:
         """Show the Creator's Note image when available, otherwise a clear fallback message."""
@@ -330,7 +335,11 @@ class SettingsMixin:
 
     def _reload_options_table(self) -> None:
         """Rebuild the options positions table from in-memory state."""
-        table = self.p4_opt_table
+        if hasattr(self, '_page_initialized') and not self._page_initialized(page_attr='page4'):
+            return
+        table = getattr(self, 'p4_opt_table', None)
+        if table is None:
+            return
         table.blockSignals(True)
         table.setRowCount(0)
         table.blockSignals(False)
@@ -379,10 +388,18 @@ class SettingsMixin:
 
     def _apply_runtime_user_data(self, payload: Any) -> None:
         """Apply imported or cleared data to the live UI state."""
+        page4_initialized = self._page_initialized(page_attr='page4')
+        page6_initialized = self._page_initialized(page_attr='page6')
+        page10_initialized = self._page_initialized(page_attr='page10')
+        page17_initialized = self._page_initialized(page_attr='page17')
+        if hasattr(self, '_clear_tab_session_cache'):
+            self._clear_tab_session_cache(immediate=True)
         self._return_metrics_cache = {}
         self._return_metrics_fetching = {}
         self._momentum_metrics_cache = {}
         self._momentum_metrics_fetching = {}
+        self._portfolio_analytics_cache = {}
+        self._portfolio_analytics_fetching = {}
         if isinstance(payload, dict) and isinstance(payload.get('portfolios'), dict):
             self.all_portfolios_state = save_all_portfolios_state(payload)
             self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
@@ -419,35 +436,90 @@ class SettingsMixin:
             self._persist_all_portfolios()
         self.chart_page_state = save_chart_page_settings(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)) if isinstance(payload, dict) else save_chart_page_settings(DEFAULT_CHART_PAGE_SETTINGS)
         chart_page_state = dict(self.chart_page_state)
+        self.multi_charts_state = save_multi_charts_settings(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)) if isinstance(payload, dict) else save_multi_charts_settings(DEFAULT_MULTI_CHARTS_SETTINGS)
+        multi_charts_state = dict(self.multi_charts_state)
         self.p10_symbol = str(chart_page_state.get('symbol', 'SPY') or 'SPY').upper()
         self.p10_timeframe_label = str(chart_page_state.get('timeframe_label', '1 Day') or '1 Day')
+        self.p10_compare_interval_label = str(chart_page_state.get('compare_interval_label', '1 Day') or '1 Day')
+        self.p10_compare_range_label = str(chart_page_state.get('compare_range_label', '5Y') or '5Y')
         self.p10_custom_watchlist = list(chart_page_state.get('watchlist', []))
+        self.p10_compare_symbols = list(chart_page_state.get('compare_symbols', []))
+        self.p10_compare_presets = list(chart_page_state.get('compare_presets', []))
         self.p10_active_indicators = list(chart_page_state.get('indicators', ['Volume', '200 MA']))
         self.p10_auto_follow = bool(chart_page_state.get('auto', True))
+        self._mc_custom_symbols = list(multi_charts_state.get('custom_symbols', []))
+        self._mc_saved_order = list(multi_charts_state.get('order', []))
+        if hasattr(self, '_p10_clear_compare_plot_items'):
+            try:
+                self._p10_clear_compare_plot_items()
+            except Exception:
+                pass
+        self._p10_compare_series_cache = {}
+        self._p10_compare_plot_items = {}
+        self._p10_compare_label_items = {}
+        self._p10_compare_render_signature = None
+        self.p10_compare_df = None
+        self.p10_compare_errors = []
+        self._p10_chart_dirty = True
+        self._p10_compare_dirty = True
+        if hasattr(self, '_p10_compare_target_preset_name'):
+            self._p10_compare_target_preset_name = None
         self.dashboard_chart_state = save_dashboard_chart_settings(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)) if isinstance(payload, dict) else save_dashboard_chart_settings(DEFAULT_DASHBOARD_CHART_SETTINGS)
         dashboard_chart_state = dict(self.dashboard_chart_state)
         self.dashboard_symbol = str(dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
         self.dashboard_timeframe_label = str(dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
         self.dashboard_active_indicators = list(dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
         self.dashboard_auto_follow = bool(dashboard_chart_state.get('auto', True))
+        self.portfolio_metrics_state = save_portfolio_metrics_settings(payload.get('portfolio_metrics', DEFAULT_PORTFOLIO_METRICS_SETTINGS)) if isinstance(payload, dict) else save_portfolio_metrics_settings(DEFAULT_PORTFOLIO_METRICS_SETTINGS)
+        portfolio_metrics_state = dict(self.portfolio_metrics_state)
+        self.p4_metrics_benchmark_symbol = str(
+            portfolio_metrics_state.get('benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+            or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']
+        ).upper().strip()
+        self.p4_metrics_lookback_key = str(
+            portfolio_metrics_state.get('lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+            or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+        ).strip().lower()
         self.networth_data = dict(payload.get('net_worth', {'cash': [], 'debt': []})) if isinstance(payload, dict) else {'cash': [], 'debt': []}
         self.notes_data = load_notes_data()
         self.last_data = None
         self._sync_after_portfolio_change(refresh_main=False)
-        if hasattr(self, 'p10_symbol_input'):
+        if page4_initialized and hasattr(self, 'p4_metrics_benchmark_input'):
+            self.p4_metrics_benchmark_input.setText(self.p4_metrics_benchmark_symbol)
+        if page4_initialized and hasattr(self, 'p4_metrics_lookback_combo'):
+            index = self.p4_metrics_lookback_combo.findData(self.p4_metrics_lookback_key)
+            if index >= 0:
+                self.p4_metrics_lookback_combo.setCurrentIndex(index)
+        if (
+            page4_initialized
+            and
+            hasattr(self, 'p4_content_tabs')
+            and self.p4_content_tabs.currentWidget() is getattr(self, 'p4_metrics_page', None)
+            and hasattr(self, '_p4_refresh_portfolio_metrics_view')
+        ):
+            self._p4_refresh_portfolio_metrics_view(force=True)
+        if page10_initialized and hasattr(self, 'p10_symbol_input'):
             self.p10_symbol_input.setText(self.p10_symbol)
-        if hasattr(self, 'p10_symbol_label'):
+        if page10_initialized and hasattr(self, 'p10_symbol_label'):
             self.p10_symbol_label.setText(self.p10_symbol)
-        if hasattr(self, '_p10_update_timeframe_button_styles'):
+        if page10_initialized and hasattr(self, '_p10_update_timeframe_button_styles'):
             self._p10_update_timeframe_button_styles()
-        if hasattr(self, '_p10_update_auto_button_style'):
+        if page10_initialized and hasattr(self, '_p10_update_auto_button_style'):
             self._p10_update_auto_button_style()
-        if hasattr(self, '_p10_update_indicator_button_styles'):
+        if page10_initialized and hasattr(self, '_p10_update_indicator_button_styles'):
             self._p10_update_indicator_button_styles()
-        if hasattr(self, '_p10_rebuild_watchlists'):
+        if page10_initialized and hasattr(self, '_p10_rebuild_watchlists'):
             self._p10_rebuild_watchlists()
-        if hasattr(self, '_p10_render_indicator_panels'):
+        if page10_initialized and hasattr(self, '_p10_refresh_compare_symbol_list'):
+            self._p10_refresh_compare_symbol_list()
+        if page10_initialized and getattr(self, '_mc_initialized', False):
+            self._mc_sync_grid(self._mc_get_active_symbols())
+            if self._p10_active_subtab_key() == 'multicharts':
+                self._mc_on_show()
+        if page10_initialized and hasattr(self, '_p10_render_indicator_panels'):
             self._p10_render_indicator_panels()
+        if page10_initialized and hasattr(self, '_p10_refresh_active_subtab'):
+            self._p10_refresh_active_subtab(force=True)
         if hasattr(self, 'dashboard_symbol_input'):
             self.dashboard_symbol_input.setText(self.dashboard_symbol)
         if hasattr(self, 'dashboard_symbol_label'):
@@ -466,15 +538,18 @@ class SettingsMixin:
         self.port_table.setRowCount(0)
         self.target_table.setRowCount(0)
         self.news_table.setRowCount(0)
-        self.p4_table.blockSignals(True)
-        self.p4_table.setRowCount(0)
-        self.p4_table.blockSignals(False)
-        self._reload_options_table()
-        self._p6_populate_tables()
-        if hasattr(self, '_p17_apply_runtime_notes_data'):
+        if page4_initialized and hasattr(self, 'p4_table'):
+            self.p4_table.blockSignals(True)
+            self.p4_table.setRowCount(0)
+            self.p4_table.blockSignals(False)
+            self._reload_options_table()
+        if page6_initialized and hasattr(self, '_p6_populate_tables'):
+            self._p6_populate_tables()
+        if page17_initialized and hasattr(self, '_p17_apply_runtime_notes_data'):
             self._p17_apply_runtime_notes_data(self.notes_data)
-        self.p4_total_label.setText('Total:  $0.00  USD')
-        if hasattr(self, '_p4_refresh_portfolio_selector'):
+        if page4_initialized and hasattr(self, 'p4_total_label'):
+            self.p4_total_label.setText('Total:  $0.00  USD')
+        if page4_initialized and hasattr(self, '_p4_refresh_portfolio_selector'):
             self._p4_refresh_portfolio_selector()
         self.refresh_data()
 
@@ -534,6 +609,8 @@ class SettingsMixin:
             self._set_settings_status('Notes import is unavailable.', 'negative')
             QMessageBox.critical(self, 'Import Failed', 'The Notes import flow is unavailable in this build.')
             return
+        if hasattr(self, '_ensure_page_initialized'):
+            self._ensure_page_initialized(15)
         self._p17_import_notes()
         if hasattr(self, 'p17_status_lbl'):
             self._set_settings_status(self.p17_status_lbl.text())

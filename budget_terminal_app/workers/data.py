@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 import time
 
 from typing import Any
@@ -17,11 +18,23 @@ class DataWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
     _DETAILS_CACHE_TTL_SECONDS = 900.0
+    _NON_CHART_SNAPSHOT_TTL_SECONDS = 30.0
     _stock_details_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     _macro_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+    _non_chart_snapshot_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
     _details_cache_lock = threading.Lock()
+    _non_chart_snapshot_lock = threading.Lock()
 
-    def __init__(self, tickers: Any, chart_configs: Any, request_id: int = 0, cancel_check: Any = None, cache_manager: Any = None) -> None:
+    def __init__(
+        self,
+        tickers: Any,
+        chart_configs: Any,
+        request_id: int = 0,
+        cancel_check: Any = None,
+        cache_manager: Any = None,
+        refresh_reason: str = 'full',
+        allow_non_chart_reuse: bool = False,
+    ) -> None:
         super().__init__()
         self.tickers = list(tickers) if isinstance(tickers, (list, tuple)) else []
         self.chart_configs = chart_configs
@@ -29,6 +42,8 @@ class DataWorker(QObject):
         self.cancel_check = cancel_check
         self._ticker_cache: dict[str, Any] = {}
         self._cache_manager = cache_manager if cache_manager is not None else CacheManager()
+        self.refresh_reason = str(refresh_reason or 'full')
+        self.allow_non_chart_reuse = bool(allow_non_chart_reuse)
 
     def _is_cancelled(self) -> bool:
         """Return whether the parent request no longer needs this worker result."""
@@ -73,6 +88,36 @@ class DataWorker(QObject):
                     seen.add(text)
                     ordered.append(text)
         return ordered
+
+    def _fetch_ticker_signature(self) -> tuple[str, ...]:
+        """Return a normalized cache signature for the current non-chart ticker universe."""
+        seen = set()
+        normalized = []
+        for symbol in self.tickers:
+            text = str(symbol or '').upper().strip()
+            if text and text not in seen:
+                seen.add(text)
+                normalized.append(text)
+        return tuple(sorted(normalized))
+
+    def _load_cached_non_chart_snapshot(self, signature: tuple[str, ...]) -> tuple[dict[str, Any] | None, float]:
+        """Return a deep-copied cached non-chart snapshot when it is still fresh."""
+        now = time.time()
+        with self._non_chart_snapshot_lock:
+            cached = self._non_chart_snapshot_cache.get(signature)
+            if not cached:
+                return None, 0.0
+            cached_at, payload = cached
+            age_seconds = now - cached_at
+            if age_seconds >= self._NON_CHART_SNAPSHOT_TTL_SECONDS:
+                self._non_chart_snapshot_cache.pop(signature, None)
+                return None, age_seconds
+            return deepcopy(payload), age_seconds
+
+    def _save_cached_non_chart_snapshot(self, signature: tuple[str, ...], payload: dict[str, Any]) -> None:
+        """Store a deep-copied non-chart snapshot for short-lived row-click reuse."""
+        with self._non_chart_snapshot_lock:
+            self._non_chart_snapshot_cache[signature] = (time.time(), deepcopy(payload))
 
     def _download_batch_data(self, symbols: list[str]) -> Any:
         if not symbols:
@@ -173,6 +218,24 @@ class DataWorker(QObject):
             if payload is not None:
                 market_data[display_name] = payload
         return market_data
+
+    def _collect_non_chart_payload(self) -> dict[str, Any] | None:
+        """Fetch the shared non-chart dashboard payload."""
+        all_symbols = self._dedupe_symbols(self.tickers, DEFAULT_BATCH_SYMBOLS)
+        batch_data = self._download_batch_data(all_symbols)
+        if self._is_cancelled():
+            return None
+        portfolio_info = self._collect_portfolio_quotes(batch_data, all_symbols)
+        market_data = self._collect_market_quotes(batch_data, all_symbols)
+        targets, news_list = self._collect_targets_and_news(portfolio_info)
+        if self._is_cancelled():
+            return None
+        return {
+            'portfolio': portfolio_info,
+            'market': market_data,
+            'targets': targets,
+            'news': news_list,
+        }
 
     def _parse_news_item(self, item: Any, ticker: str, category: str) -> dict[str, Any]:
         content = item.get('content') or {}
@@ -515,35 +578,80 @@ class DataWorker(QObject):
     def run(self) -> Any:
         try:
             logger.info('Worker starting. Tickers: %s, Charts: %s', self.tickers, self.chart_configs)
+            total_started = time.perf_counter()
             dashboard_chart_configs = self._normalize_chart_configs()
             dashboard_chart_config = dashboard_chart_configs[0] if dashboard_chart_configs else None
-            all_symbols = self._dedupe_symbols(self.tickers, DEFAULT_BATCH_SYMBOLS)
-            batch_data = self._download_batch_data(all_symbols)
-            if self._is_cancelled():
-                logger.info('Worker %s cancelled after batch download.', self.request_id)
+            fetch_ticker_signature = self._fetch_ticker_signature()
+            non_chart_reused = False
+            cache_age_seconds = 0.0
+            non_chart_started = time.perf_counter()
+            non_chart_payload = None
+            skip_chart_refresh = self.refresh_reason == 'portfolio_membership_change'
+            if self.allow_non_chart_reuse:
+                non_chart_payload, cache_age_seconds = self._load_cached_non_chart_snapshot(fetch_ticker_signature)
+                if non_chart_payload is not None:
+                    non_chart_reused = True
+                    logger.info(
+                        'Worker %s reused dashboard non-chart snapshot for %s (age %.1fs, reason=%s).',
+                        self.request_id,
+                        list(fetch_ticker_signature),
+                        cache_age_seconds,
+                        self.refresh_reason,
+                    )
+            if skip_chart_refresh:
+                if not non_chart_reused:
+                    non_chart_payload = self._collect_non_chart_payload()
+                non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
+                charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = ({}, {}, {}, {}, {})
+                chart_ms = 0.0
+            else:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fut_non_chart = None if non_chart_reused else pool.submit(self._collect_non_chart_payload)
+                    chart_started = time.perf_counter()
+                    fut_chart = pool.submit(self._collect_chart_data, dashboard_chart_config)
+                    if fut_non_chart is not None:
+                        non_chart_payload = fut_non_chart.result()
+                    non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
+                    charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = fut_chart.result()
+                    chart_ms = (time.perf_counter() - chart_started) * 1000.0
+            if non_chart_payload is None and self._is_cancelled():
+                logger.info('Worker %s cancelled during non-chart fetch.', self.request_id)
                 return
-            portfolio_info = self._collect_portfolio_quotes(batch_data, all_symbols)
-            market_data = self._collect_market_quotes(batch_data, all_symbols)
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                fut_tn = pool.submit(self._collect_targets_and_news, portfolio_info)
-                fut_chart = pool.submit(self._collect_chart_data, dashboard_chart_config)
-                targets, news_list = fut_tn.result()
-                charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = fut_chart.result()
+            if not non_chart_reused and non_chart_payload is not None:
+                self._save_cached_non_chart_snapshot(fetch_ticker_signature, non_chart_payload)
+                logger.info(
+                    'Worker %s fetched fresh dashboard non-chart payload for %s in %.1f ms (reason=%s).',
+                    self.request_id,
+                    list(fetch_ticker_signature),
+                    non_chart_ms,
+                    self.refresh_reason,
+                )
             if self._is_cancelled():
                 logger.info('Worker %s cancelled after parallel fetch.', self.request_id)
                 return
             data = {
                 'request_id': self.request_id,
                 'chart_configs': list(dashboard_chart_configs),
-                'portfolio': portfolio_info,
-                'market': market_data,
-                'targets': targets,
-                'news': news_list,
+                'portfolio': dict((non_chart_payload or {}).get('portfolio', {})),
+                'market': dict((non_chart_payload or {}).get('market', {})),
+                'targets': list((non_chart_payload or {}).get('targets', [])),
+                'news': list((non_chart_payload or {}).get('news', [])),
                 'charts': charts,
                 'chart_options': chart_options,
                 'chart_option_expirations': chart_option_expirations,
                 'chart_ma200': chart_ma200,
                 'chart_rsi': chart_rsi,
+                '_dashboard_refresh_meta': {
+                    'refresh_reason': self.refresh_reason,
+                    'non_chart_reused': non_chart_reused,
+                    'fetch_ticker_signature': list(fetch_ticker_signature),
+                    'non_chart_cache_age_seconds': float(cache_age_seconds),
+                    'worker_timings_ms': {
+                        'non_chart': round(non_chart_ms, 1),
+                        'chart': round(chart_ms, 1),
+                        'total': round((time.perf_counter() - total_started) * 1000.0, 1),
+                    },
+                },
             }
             self.finished.emit(data)
         except Exception as exc:

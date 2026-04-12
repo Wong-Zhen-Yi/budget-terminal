@@ -1,7 +1,9 @@
 from __future__ import annotations
 import math
+import time
 from typing import Any
 from ..compat import *
+from budget_terminal_app.workers.data import DataWorker
 
 _P1_LEFT_SPLITTER_CONFIG = user_data_path('p1_left_splitter.json')
 _P1_PORT_SECTION_MIN_HEIGHT = 75
@@ -9,6 +11,7 @@ _P1_PORT_SECTION_MIN_HEIGHT = 75
 P1_AUTO_ANCHOR = 0.85
 P1_DEFAULT_STARTUP_SPAN = 80.0
 P1_MIN_REUSABLE_SPAN = 10.0
+_DASHBOARD_MEMBERSHIP_REFRESH_REASON = 'portfolio_membership_change'
 P1_OPTIONS_EXPORT_BUCKETS = (
     ('0_week', '0 Week'),
     ('2_weeks', '2 Weeks'),
@@ -156,6 +159,98 @@ class DashboardMixin:
         entry['chart_slots'] = self.chart_slots
         entry['portfolio_tracker'] = self.tracker_data
         return entry
+
+    def _dashboard_sync_portfolio_runtime_view(self) -> None:
+        """Align dashboard portfolio runtime data with the currently selected dashboard scope."""
+        if getattr(self, '_dashboard_showing_all', False):
+            self._dashboard_apply_all_portfolios()
+            return
+        if hasattr(self, '_apply_main_portfolio_runtime'):
+            self._apply_main_portfolio_runtime()
+
+    def _dashboard_filtered_membership_snapshot(self, data: Any = None) -> dict[str, Any]:
+        """Filter targets and news to the dashboard's current portfolio scope."""
+        source = data if isinstance(data, dict) else {}
+        visible_tickers = {
+            str(ticker or '').upper().strip()
+            for ticker in getattr(self, 'tickers', [])
+            if str(ticker or '').strip()
+        }
+        snapshot = dict(source)
+        targets = []
+        raw_targets = source.get('targets', [])
+        if isinstance(raw_targets, list):
+            for item in raw_targets:
+                if not isinstance(item, dict):
+                    continue
+                ticker = str(item.get('ticker', '') or '').upper().strip()
+                if ticker in visible_tickers:
+                    targets.append(dict(item))
+        news_items = []
+        raw_news = source.get('news', [])
+        if isinstance(raw_news, list):
+            for article in raw_news:
+                if not isinstance(article, dict):
+                    continue
+                category = str(article.get('category', '') or '').strip().lower()
+                ticker = str(article.get('ticker', '') or '').upper().strip()
+                if category == 'macro' or ticker in visible_tickers:
+                    news_items.append(dict(article))
+        snapshot['targets'] = targets
+        snapshot['news'] = news_items
+        return snapshot
+
+    def _dashboard_apply_local_portfolio_membership(self, data: Any = None) -> dict[str, Any]:
+        """Refresh dashboard-side portfolio tables without touching the chart workspace."""
+        self._dashboard_sync_portfolio_runtime_view()
+        snapshot = self._dashboard_filtered_membership_snapshot(
+            data if data is not None else getattr(self, 'last_data', None)
+        )
+        self.repopulate_portfolio()
+        main_targets = list(snapshot.get('targets', []))
+        self.target_table.setUpdatesEnabled(False)
+        try:
+            self.target_table.setRowCount(len(main_targets))
+            for i, item in enumerate(main_targets):
+                ticker_item = QTableWidgetItem(item['ticker'])
+                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 0, ticker_item)
+                current = item['current']
+                current_item = QTableWidgetItem(
+                    f'${current:.2f}' if isinstance(current, (int, float)) else str(current)
+                )
+                current_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 1, current_item)
+                target = item['target']
+                target_item = QTableWidgetItem(
+                    f'${target:.2f}' if isinstance(target, (int, float)) else str(target)
+                )
+                target_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 2, target_item)
+                try:
+                    upside = (float(target) - float(current)) / float(current) * 100
+                    upside_item = QTableWidgetItem(f'{upside:+.1f}%')
+                    upside_item.setForeground(
+                        self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative')
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    upside_item = QTableWidgetItem('N/A')
+                upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.target_table.setItem(i, 3, upside_item)
+        finally:
+            self.target_table.setUpdatesEnabled(True)
+        portfolio_news = self._sort_articles_by_newest(
+            [
+                article
+                for article in snapshot.get('news', [])
+                if article.get('category') != 'macro' and article.get('ticker') in self.tickers
+            ]
+        )
+        self._populate_news_table(self.news_table, portfolio_news)
+        self._call_if_page_initialized('update_page3', snapshot, page_attr='page3')
+        self._call_if_page_initialized('_p7_fetch_events', page_attr='page7')
+        self._call_if_page_initialized('_p6_update_total', page_attr='page6')
+        return snapshot
 
     def _dashboard_save_state(self) -> Any:
         """Persist the dashboard chart workstation state."""
@@ -350,7 +445,7 @@ class DashboardMixin:
             self.dashboard_symbol = symbol
             self.dashboard_symbol_input.setText(symbol)
             self._dashboard_save_state()
-            self.refresh_data()
+            self.refresh_data(reason='portfolio_row_click')
 
     def _dashboard_on_port_delete_clicked(self) -> None:
         """Remove the ticker assigned to a reused dashboard delete button."""
@@ -810,12 +905,19 @@ class DashboardMixin:
                 self.ticker_input.clear()
                 return
             self.tickers.append(t)
+            if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
+                self._p4_invalidate_portfolio_analytics_cache(self.main_portfolio_id)
             self._update_main_portfolio_entry()
             self._persist_all_portfolios()
             self.ticker_input.clear()
             if self.active_portfolio_id == self.main_portfolio_id and hasattr(self, '_p4_refresh_portfolio_selector'):
                 self._p4_refresh_portfolio_selector()
-            self.refresh_data()
+            self._dashboard_apply_local_portfolio_membership(self.last_data)
+            self._call_if_page_initialized('update_page4', self.last_data or {'portfolio': {}}, page_attr='page4')
+            if self.last_data:
+                self.refresh_data(reason=_DASHBOARD_MEMBERSHIP_REFRESH_REASON)
+            else:
+                self.refresh_data()
 
     def remove_ticker(self, t: Any) -> None:
         """Remove ticker."""
@@ -829,37 +931,38 @@ class DashboardMixin:
                 self._p4_invalidate_returns_cache(self.main_portfolio_id)
             if hasattr(self, '_p4_invalidate_momentum_cache'):
                 self._p4_invalidate_momentum_cache(self.main_portfolio_id)
+            if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
+                self._p4_invalidate_portfolio_analytics_cache(self.main_portfolio_id)
             self._update_main_portfolio_entry()
             self._persist_all_portfolios()
-            if self.last_data and 'portfolio' in self.last_data:
-                if t in self.last_data['portfolio']:
-                    del self.last_data['portfolio'][t]
-                self.last_data['targets'] = [item for item in self.last_data.get('targets', []) if item.get('ticker') != t]
-                self.last_data['news'] = [item for item in self.last_data.get('news', []) if not (item.get('category') == 'portfolio' and item.get('ticker') == t)]
-                self.update_ui(self.last_data)
-            else:
-                self.repopulate_portfolio()
-                self.p4_table.setRowCount(len(getattr(self, 'active_tickers', self.tickers)))
-                if self.active_portfolio_id == self.main_portfolio_id and hasattr(self, '_p4_refresh_active_momentum_view'):
-                    self._p4_refresh_active_momentum_view()
-            if self.active_portfolio_id == self.main_portfolio_id and getattr(self, 'last_data', None):
-                self.update_page4(self.last_data)
+            self._dashboard_apply_local_portfolio_membership(self.last_data)
+            if self.active_portfolio_id == self.main_portfolio_id:
+                if self._page_initialized(page_attr='page4'):
+                    self.update_page4(self.last_data or {'portfolio': {}})
             logger.info('Removed ticker %s', t)
 
-    def refresh_data(self, *, force: bool=False) -> None:
+    def refresh_data(self, *, force: bool=False, reason: str='full') -> None:
         """Refresh portfolio data plus the dashboard chart workstation."""
+        self._dashboard_pending_refresh_reason = str(reason or 'full')
         if not force and hasattr(self, '_dashboard_refresh_timer'):
             self._dashboard_refresh_timer.start(150)
             return
+        if force and hasattr(self, '_dashboard_refresh_timer') and self._dashboard_refresh_timer.isActive():
+            self._dashboard_refresh_timer.stop()
         self._execute_refresh_data()
 
     def _execute_refresh_data(self) -> None:
         """Perform the dashboard refresh immediately."""
-        self._news_auto_summarized = False
-        if hasattr(self, 'p3_summary_status'):
-            self.p3_summary_status.setText('Refreshing news...')
-        if hasattr(self, 'p3_summary_text') and not self._p3_summarizing:
-            self.p3_summary_text.setPlainText('Refreshing loaded headlines...')
+        refresh_reason = str(getattr(self, '_dashboard_pending_refresh_reason', 'full') or 'full')
+        allow_non_chart_reuse = refresh_reason == 'portfolio_row_click'
+        membership_only_refresh = refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON
+        self._dashboard_pending_refresh_reason = 'full'
+        if not allow_non_chart_reuse:
+            self._news_auto_summarized = False
+            if hasattr(self, 'p3_summary_status'):
+                self.p3_summary_status.setText('Refreshing news...')
+            if hasattr(self, 'p3_summary_text') and not self._p3_summarizing:
+                self.p3_summary_text.setPlainText('Refreshing loaded headlines...')
         self.dashboard_symbol = str(self.dashboard_symbol_input.text() or self.dashboard_chart_state.get('symbol') or 'SPY').upper().strip()
         if not self.dashboard_symbol:
             self.dashboard_symbol = 'SPY'
@@ -876,11 +979,18 @@ class DashboardMixin:
         chart_configs_snapshot = list(self.chart_configs)
         self.dashboard_load_btn.setEnabled(False)
         self.dashboard_refresh_btn.setEnabled(False)
-        self._dashboard_set_status(f'Loading {self.dashboard_symbol} {self.dashboard_timeframe_label}...', 'info')
-        self.worker_thread = threading.Thread(target=self.run_worker, args=(request_id, chart_configs_snapshot), daemon=True)
+        if membership_only_refresh:
+            self._dashboard_set_status('Refreshing portfolio holdings...', 'info')
+        else:
+            self._dashboard_set_status(f'Loading {self.dashboard_symbol} {self.dashboard_timeframe_label}...', 'info')
+        self.worker_thread = threading.Thread(
+            target=self.run_worker,
+            args=(request_id, chart_configs_snapshot, refresh_reason, allow_non_chart_reuse),
+            daemon=True,
+        )
         self.worker_thread.start()
 
-    def run_worker(self, request_id: int, chart_configs_snapshot: Any) -> None:
+    def run_worker(self, request_id: int, chart_configs_snapshot: Any, refresh_reason: str, allow_non_chart_reuse: bool) -> None:
         """Run the shared market data worker."""
         worker = DataWorker(
             self._get_fetch_tickers(),
@@ -888,6 +998,8 @@ class DashboardMixin:
             request_id=request_id,
             cancel_check=lambda req=request_id: req != getattr(self, '_dashboard_latest_request_id', 0),
             cache_manager=self._get_cache_manager(),
+            refresh_reason=refresh_reason,
+            allow_non_chart_reuse=allow_non_chart_reuse,
         )
         worker.finished.connect(self.update_ui)
         worker.error.connect(self.handle_error)
@@ -911,9 +1023,12 @@ class DashboardMixin:
 
     def repopulate_portfolio(self) -> Any:
         """Populate the main dashboard portfolio table."""
-        if not self.last_data:
-            return
-        portfolio = {ticker: info for ticker, info in self.last_data.get('portfolio', {}).items() if ticker in self.tickers}
+        data = self.last_data if isinstance(self.last_data, dict) else {}
+        quote_map = data.get('portfolio', {}) if isinstance(data.get('portfolio', {}), dict) else {}
+        portfolio = {}
+        for ticker in self.tickers:
+            info = quote_map.get(ticker, {})
+            portfolio[ticker] = info if isinstance(info, dict) else {}
         showing_all = getattr(self, '_dashboard_showing_all', False)
         if showing_all:
             header_name = 'All Portfolios'
@@ -926,14 +1041,16 @@ class DashboardMixin:
 
         def market_value(ticker: Any, info: Any) -> Any:
             shares = tracker.get(ticker, {}).get('shares', 0)
-            return shares * info['price'] if shares else 0
+            price = info.get('price', 0) if isinstance(info, dict) else 0
+            return shares * price if shares else 0
 
         total_value = sum((market_value(ticker, info) for ticker, info in portfolio.items()))
-        def dollar_gain_key(ticker, info):
+        def dollar_gain_key(ticker: Any, info: Any) -> Any:
             t = tracker.get(ticker, {})
             shares = t.get('shares', 0)
             avg_price = t.get('avg_price', 0)
-            return (info['price'] - avg_price) * shares if shares else 0
+            price = info.get('price', 0) if isinstance(info, dict) else 0
+            return (price - avg_price) * shares if shares else 0
 
         sorted_items = sorted(portfolio.items(), key=lambda item: dollar_gain_key(item[0], item[1]), reverse=True)
         default_text_color = self.theme_qcolor('text_primary')
@@ -941,22 +1058,30 @@ class DashboardMixin:
         try:
             self.port_table.setRowCount(len(sorted_items))
             for i, (ticker, info) in enumerate(sorted_items):
-                price = info['price']
-                change_pct = info['change']
+                has_quote = isinstance(info, dict) and ('price' in info or 'change' in info)
+                price = float(info.get('price', 0) or 0) if has_quote else 0.0
+                change_pct = float(info.get('change', 0) or 0) if has_quote else 0.0
                 shares = tracker.get(ticker, {}).get('shares', 0)
                 avg_price = tracker.get(ticker, {}).get('avg_price', 0)
                 market_val = shares * price if shares else 0
-                weight_pct = market_val / total_value * 100 if total_value > 0 and shares else 0
-                dollar_gain = (price - avg_price) * shares if shares else 0
+                weight_pct = market_val / total_value * 100 if total_value > 0 and shares and has_quote else 0
+                dollar_gain = (price - avg_price) * shares if shares and has_quote else 0
                 is_up = change_pct >= 0
                 sign = '+' if is_up else ''
                 text_color = self.theme_qcolor('accent_positive' if is_up else 'accent_negative')
                 row_bg = self.theme_qcolor('accent_positive_bg' if is_up else 'accent_negative_bg')
+                price_str = f'${price:.2f}'
+                change_str = f'{sign}{change_pct:.2f}%'
+                if not has_quote:
+                    text_color = default_text_color
+                    row_bg = self.theme_qcolor('panel_background')
+                    price_str = '--'
+                    change_str = '--'
                 gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
                 gain_sign = '+' if dollar_gain >= 0 else ''
-                weight_str = f'{weight_pct:.1f}%' if shares else '--'
-                gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares else '--'
-                cols = [ticker, f'${price:.2f}', f'{sign}{change_pct:.2f}%', weight_str, gain_str]
+                weight_str = f'{weight_pct:.1f}%' if shares and has_quote else '--'
+                gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares and has_quote else '--'
+                cols = [ticker, price_str, change_str, weight_str, gain_str]
                 for col, val in enumerate(cols):
                     item = self._dashboard_ensure_portfolio_item(i, col)
                     item.setText(val)
@@ -1140,17 +1265,10 @@ class DashboardMixin:
             return
         self._dashboard_set_status(f'Top options volume copied to clipboard for {symbol}', 'positive')
 
-    def update_ui(self, data: Any) -> Any:
-        """Update the dashboard and shared pages with new data."""
-        request_id = int(data.get('request_id', 0)) if isinstance(data, dict) else 0
-        if request_id and request_id != getattr(self, '_dashboard_latest_request_id', 0):
-            logger.info('Ignoring stale dashboard response %s; latest request is %s.', request_id, getattr(self, '_dashboard_latest_request_id', 0))
-            return
-        logger.info('Updating UI with new data')
-        self.last_data = data
-        self._set_data_collection_info(['yfinance'])
+    def _dashboard_apply_non_chart_data(self, data: Any) -> None:
+        """Apply shared non-chart dashboard data and related page updates."""
         self.repopulate_portfolio()
-        for idx, info in data['market'].items():
+        for idx, info in data.get('market', {}).items():
             if idx in self.index_labels:
                 price = info.get('price', 0)
                 change = info.get('change', 0)
@@ -1186,12 +1304,13 @@ class DashboardMixin:
             self.target_table.setUpdatesEnabled(True)
         portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') != 'macro' and article.get('ticker') in self.tickers])
         self._populate_news_table(self.news_table, portfolio_news)
-        self.update_page3(data)
-        self.update_page4(data)
-        self._p7_fetch_events()
-        self._p6_update_total()
+        self._call_if_page_initialized('update_page3', data, page_attr='page3')
+        self._call_if_page_initialized('update_page4', data, page_attr='page4')
+        self._call_if_page_initialized('_p7_fetch_events', page_attr='page7')
+        self._call_if_page_initialized('_p6_update_total', page_attr='page6')
 
-        symbol = self.dashboard_symbol
+    def _dashboard_apply_chart_data(self, symbol: Any, data: Any) -> bool:
+        """Apply the selected dashboard symbol chart and options payload."""
         self._dashboard_populate_option_tables(symbol, data)
         df = data.get('charts', {}).get(symbol)
         if df is None or df.empty:
@@ -1199,8 +1318,9 @@ class DashboardMixin:
             self._dashboard_clear_chart(symbol)
             self.dashboard_load_btn.setEnabled(True)
             self.dashboard_refresh_btn.setEnabled(True)
+            self.dashboard_pending_x_range = None
             self._dashboard_set_status(f'Chart unavailable for {symbol}.', 'negative')
-            return
+            return False
         self.dashboard_chart_df = df
         self.dashboard_chart_interval = self.dashboard_timeframe_map.get(self.dashboard_timeframe_label, self.dashboard_timeframe_map['1 Day'])[1]
         close_value = float(df['Close'].iloc[-1])
@@ -1235,6 +1355,65 @@ class DashboardMixin:
         self.dashboard_pending_x_range = None
         self._dashboard_update_indicator_panel_labels()
         self._dashboard_set_status(f'Loaded {symbol} {self.dashboard_timeframe_label}.', 'positive')
+        return True
+
+    def update_ui(self, data: Any) -> Any:
+        """Update the dashboard and shared pages with new data."""
+        request_id = int(data.get('request_id', 0)) if isinstance(data, dict) else 0
+        if request_id and request_id != getattr(self, '_dashboard_latest_request_id', 0):
+            logger.info('Ignoring stale dashboard response %s; latest request is %s.', request_id, getattr(self, '_dashboard_latest_request_id', 0))
+            return
+        refresh_meta = data.get('_dashboard_refresh_meta', {}) if isinstance(data, dict) else {}
+        refresh_reason = str(refresh_meta.get('refresh_reason', 'full') or 'full')
+        non_chart_reused = bool(refresh_meta.get('non_chart_reused', False))
+        worker_timings_ms = refresh_meta.get('worker_timings_ms', {})
+        logger.info(
+            'Updating UI with new data (reason=%s, non_chart_reused=%s, worker_timings_ms=%s)',
+            refresh_reason,
+            non_chart_reused,
+            worker_timings_ms,
+        )
+        had_previous_data = bool(getattr(self, 'last_data', None))
+        self.last_data = data
+        self._set_data_collection_info(['yfinance'])
+        symbol = self.dashboard_symbol
+        apply_non_chart = (not non_chart_reused) or (not had_previous_data)
+        ui_non_chart_ms = 0.0
+        if apply_non_chart:
+            non_chart_started = time.perf_counter()
+            if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
+                self._dashboard_apply_local_portfolio_membership(data)
+                self._call_if_page_initialized('update_page4', data, page_attr='page4')
+            else:
+                self._dashboard_apply_non_chart_data(data)
+            ui_non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
+        else:
+            logger.info('Skipping non-chart UI apply for dashboard request %s (reason=%s).', request_id, refresh_reason)
+        if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
+            self.dashboard_load_btn.setEnabled(True)
+            self.dashboard_refresh_btn.setEnabled(True)
+            self.dashboard_pending_x_range = None
+            self._dashboard_set_status('Portfolio holdings refreshed.', 'positive')
+            logger.info(
+                'Dashboard membership-only apply finished (request=%s, ui_non_chart_ms=%.1f).',
+                request_id,
+                ui_non_chart_ms,
+            )
+            return
+        chart_started = time.perf_counter()
+        chart_loaded = self._dashboard_apply_chart_data(symbol, data)
+        ui_chart_ms = (time.perf_counter() - chart_started) * 1000.0
+        logger.info(
+            'Dashboard UI apply finished for %s (reason=%s, non_chart_reused=%s, chart_loaded=%s, ui_non_chart_ms=%.1f, ui_chart_ms=%.1f)',
+            symbol,
+            refresh_reason,
+            non_chart_reused,
+            chart_loaded,
+            ui_non_chart_ms,
+            ui_chart_ms,
+        )
+        if not had_previous_data:
+            self._startup_profiler_stamp('startup_refresh_complete')
 
     def _apply_dashboard_theme(self) -> None:
         """Refresh dashboard colors after a theme change."""

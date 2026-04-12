@@ -330,6 +330,9 @@ class PortfolioSetupMixin:
             return
         if widget is getattr(self, 'p4_momentum_page', None) and hasattr(self, '_p4_refresh_active_momentum_view'):
             QTimer.singleShot(0, self._p4_refresh_active_momentum_view)
+            return
+        if widget is getattr(self, 'p4_metrics_page', None) and hasattr(self, '_p4_refresh_portfolio_metrics_view'):
+            QTimer.singleShot(0, self._p4_refresh_portfolio_metrics_view)
 
     def _p4_try_call_runtime(self, names: Any, *args: Any) -> bool:
         """Call the first runtime helper that exists."""
@@ -364,9 +367,17 @@ class PortfolioSetupMixin:
             self.p4_table.blockSignals(True)
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
+            if hasattr(self, '_p4_update_stock_positions_label'):
+                self._p4_update_stock_positions_label()
             self._p4_apply_table_width_preferences('stock')
             if hasattr(self, '_p4_refresh_active_momentum_view'):
                 self._p4_refresh_active_momentum_view()
+        if (
+            hasattr(self, 'p4_content_tabs')
+            and self.p4_content_tabs.currentWidget() is getattr(self, 'p4_metrics_page', None)
+            and hasattr(self, '_p4_refresh_portfolio_metrics_view')
+        ):
+            self._p4_refresh_portfolio_metrics_view()
 
     def _p4_rename_active_portfolio(self) -> None:
         """Prompt the user to rename the selected portfolio slot."""
@@ -470,11 +481,14 @@ class PortfolioSetupMixin:
         self.set_theme_role(title_lbl, 'page_title')
         self.p4_total_label = QLabel('Total:  $0.00  USD')
         self.set_theme_role(self.p4_total_label, 'metric')
+        self.p4_stock_positions_label = QLabel('Stock Positions:  0')
+        self.set_theme_role(self.p4_stock_positions_label, 'badge')
         self.p4_opt_pl_label = QLabel('Options P&L:  $0.00')
         self.set_theme_role(self.p4_opt_pl_label, 'badge')
         summary_bar.addWidget(title_lbl)
         summary_bar.addStretch()
         summary_bar.addWidget(self.p4_opt_pl_label)
+        summary_bar.addWidget(self.p4_stock_positions_label)
         summary_bar.addWidget(self.p4_total_label)
         layout.addLayout(summary_bar)
         selector_bar = QHBoxLayout()
@@ -664,8 +678,10 @@ class PortfolioSetupMixin:
         momentum_page_layout.setContentsMargins(0, 0, 0, 0)
         momentum_page_layout.setSpacing(0)
         momentum_page_layout.addWidget(momentum_container)
+        self.p4_metrics_page = self._build_portfolio_metrics_page() if hasattr(self, '_build_portfolio_metrics_page') else QWidget()
         self.p4_content_tabs.addTab(self.p4_positions_page, 'Positions')
         self.p4_content_tabs.addTab(self.p4_momentum_page, 'Momentum Tracker')
+        self.p4_content_tabs.addTab(self.p4_metrics_page, 'Portfolio Metrics')
         layout.addWidget(self.p4_content_tabs, 1)
         QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
         self._p4_refresh_portfolio_selector()
@@ -685,8 +701,19 @@ class PortfolioSetupMixin:
                     self._p4_invalidate_returns_cache(self.active_portfolio_id)
                 if hasattr(self, '_p4_invalidate_momentum_cache'):
                     self._p4_invalidate_momentum_cache(self.active_portfolio_id)
+                if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
+                    self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
                 self._persist_all_portfolios()
-                self.refresh_data()
+                self.update_page4(self.last_data or {'portfolio': {}})
+                if (
+                    self.active_portfolio_id == self.main_portfolio_id
+                    or getattr(self, '_dashboard_showing_all', False)
+                ) and hasattr(self, '_dashboard_apply_local_portfolio_membership'):
+                    self._dashboard_apply_local_portfolio_membership(self.last_data)
+                if self.last_data:
+                    self.refresh_data(reason='portfolio_membership_change')
+                else:
+                    self.refresh_data()
 
     def _init_options_tab(self) -> Any:
         """Build the Options section widget and return it."""

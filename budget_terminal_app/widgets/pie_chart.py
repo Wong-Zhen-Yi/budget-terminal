@@ -16,6 +16,7 @@ class PieChartWidget(QWidget):
         self._donut_hole_ratio = 0.56
         self._center_text = ''
         self._center_subtext = ''
+        self._start_angle_degrees = 90.0
         self.setMinimumWidth(200)
 
     def set_theme(self, slice_colors: Any, legend_text_color: Any) -> None:
@@ -40,6 +41,15 @@ class PieChartWidget(QWidget):
         """Update the text shown in the donut center."""
         self._center_text = str(text or '')
         self._center_subtext = str(subtext or '')
+        self.update()
+
+    def set_start_angle(self, degrees: float=90.0) -> None:
+        """Set the pie start angle in degrees, where 0 is the right side."""
+        try:
+            value = float(degrees)
+        except (TypeError, ValueError):
+            value = 90.0
+        self._start_angle_degrees = value % 360.0
         self.update()
 
     def set_data(self, weights: dict) -> None:
@@ -76,7 +86,7 @@ class PieChartWidget(QWidget):
                 painter.drawEllipse(rect)
                 self._draw_donut_center(painter, cx, cy, diameter)
             return
-        angle = 90 * 16
+        angle = int(self._start_angle_degrees * 16)
         for label, val, color in self.slices:
             span = int(-(val / total) * 360 * 16)
             painter.setBrush(QColor(color))

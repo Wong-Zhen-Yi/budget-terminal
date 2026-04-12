@@ -4,6 +4,100 @@ from ..compat import *
 
 class SimpleChartsMixin:
 
+    def _p2_ordered_statement_cols(self, df: Any) -> list[Any]:
+        """Return DataFrame columns in chronological order when possible."""
+        cols = list(getattr(df, 'columns', []))
+        try:
+            return sorted(cols)
+        except Exception:
+            return list(reversed(cols))
+
+    def _p2_extract_statement_series(self, df: Any, keys: Any, period: Any) -> Any:
+        """Return (values, labels, cols) for the first matching statement row."""
+        if df is None or df.empty:
+            return ([], [], [])
+        idx_lower = {str(k).lower(): k for k in df.index}
+
+        def _col_label(column: Any) -> Any:
+            if period == 'annual':
+                return column.strftime('%Y') if hasattr(column, 'strftime') else str(column)[:4]
+            return f"{column.strftime('%Y')}-Q{(column.month - 1) // 3 + 1}" if hasattr(column, 'strftime') else str(column)[:7]
+
+        def _extract(orig: Any) -> Any:
+            vals, labels, valid_cols = ([], [], [])
+            for column in self._p2_ordered_statement_cols(df):
+                try:
+                    value = float(df.at[orig, column])
+                    if not pd.isna(value):
+                        vals.append(value)
+                        labels.append(_col_label(column))
+                        valid_cols.append(column)
+                except Exception:
+                    pass
+            return (vals, labels, valid_cols) if vals else None
+
+        for key in keys:
+            if key in idx_lower:
+                result = _extract(idx_lower[key])
+                if result:
+                    return result
+        for key in keys:
+            for low, orig in idx_lower.items():
+                if key in low:
+                    result = _extract(orig)
+                    if result:
+                        return result
+        return ([], [], [])
+
+    def _p2_sum_statement_series(self, df: Any, period: Any, *key_groups: Any) -> Any:
+        """Sum multiple statement rows, aligned by reporting column."""
+        combined = {}
+        col_labels = {}
+        for keys in key_groups:
+            vals, labels, cols = self._p2_extract_statement_series(df, keys, period)
+            for value, label, column in zip(vals, labels, cols):
+                combined[column] = combined.get(column, 0.0) + value
+                col_labels[column] = label
+        if not combined:
+            return ([], [], [])
+        sorted_cols = sorted(combined.keys())
+        return (
+            [combined[column] for column in sorted_cols],
+            [col_labels[column] for column in sorted_cols],
+            sorted_cols,
+        )
+
+    def _p2_total_debt_series(self, df: Any, period: Any) -> Any:
+        """Resolve total debt with fallbacks for statements that split debt rows."""
+        total_debt = self._p2_extract_statement_series(df, ['total debt'], period)
+        if total_debt[0]:
+            return total_debt
+        lease_total = self._p2_sum_statement_series(
+            df,
+            period,
+            ['long term debt and capital lease obligation'],
+            ['current debt and capital lease obligation'],
+        )
+        if lease_total[0]:
+            return lease_total
+        combined_debt = self._p2_sum_statement_series(
+            df,
+            period,
+            ['long term debt'],
+            ['current debt'],
+        )
+        if combined_debt[0]:
+            return combined_debt
+        return self._p2_extract_statement_series(df, ['long term debt'], period)
+
+    def _p2_latest_total_debt_value(self, data: Any, period: Any='annual') -> Any:
+        """Return the most recent total debt value from the selected statement period."""
+        if not isinstance(data, dict):
+            return None
+        frame_key = 'balance_sheet' if period == 'annual' else 'quarterly_balance_sheet'
+        values, _, _ = self._p2_total_debt_series(data.get(frame_key), period)
+        return values[-1] if values else None
+
     def _render_simple_charts(self, data: Any, period: Any) -> Any:
         """Render simple charts."""
         fin_df = data['financials'] if period == 'annual' else data['quarterly_financials']
@@ -20,45 +114,11 @@ class SimpleChartsMixin:
 
         def _ordered_cols(df: Any) -> Any:
             """Return dataframe columns in chronological order."""
-            cols = list(df.columns)
-            try:
-                return sorted(cols)
-            except Exception:
-                return list(reversed(cols))
+            return self._p2_ordered_statement_cols(df)
 
         def _get_series(df: Any, keys: Any) -> Any:
             """Returns (vals, labels, cols) — NaN entries are skipped entirely."""
-            if df is None or df.empty:
-                return ([], [], [])
-            idx_lower = {str(k).lower(): k for k in df.index}
-
-            def _extract(orig):
-                all_cols = _ordered_cols(df)
-                vals, labels, valid_cols = ([], [], [])
-                for c in all_cols:
-                    try:
-                        v = float(df.at[orig, c])
-                        if not pd.isna(v):
-                            vals.append(v)
-                            labels.append(_col_label(c))
-                            valid_cols.append(c)
-                    except Exception:
-                        pass
-                return (vals, labels, valid_cols) if vals else None
-
-            for key in keys:
-                # Try exact match first
-                if key in idx_lower:
-                    result = _extract(idx_lower[key])
-                    if result:
-                        return result
-                # Fall back to substring match
-                for low, orig in idx_lower.items():
-                    if key in low:
-                        result = _extract(orig)
-                        if result:
-                            return result
-            return ([], [], [])
+            return self._p2_extract_statement_series(df, keys, period)
 
         def _sum_series(df, *key_lists):
             """Sum multiple _get_series results, aligning by column."""
@@ -223,9 +283,9 @@ class SimpleChartsMixin:
             ['cash cash equivalents and short term investments', 'cash and cash equivalents', 'cash equivalents'],
             ['available for sale securities', 'marketable securities'],
         )
-        debt_series = _get_series(bs_df, ['long term debt'])
+        debt_series = self._p2_total_debt_series(bs_df, period)
         if cash_series[0] or debt_series[0]:
-            _grouped_chart(pw, self.p2_simple_legend_bars[4], [cash_series, debt_series], [-0.25, +0.25], [(self.theme_color('accent_positive'), self.theme_color('text_secondary'), 'Cash'), (self.theme_color('accent_negative'), self.theme_color('text_secondary'), 'Debt')])
+            _grouped_chart(pw, self.p2_simple_legend_bars[4], [cash_series, debt_series], [-0.25, +0.25], [(self.theme_color('accent_positive'), self.theme_color('text_secondary'), 'Cash'), (self.theme_color('accent_negative'), self.theme_color('text_secondary'), 'Total Debt')])
         pw = self.p2_simple_charts[5]
         pw.clear()
         _clear_legend_bar(self.p2_simple_legend_bars[5])

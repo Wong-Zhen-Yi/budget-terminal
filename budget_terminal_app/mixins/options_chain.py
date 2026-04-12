@@ -27,19 +27,89 @@ class OptionsChainMixin:
     _P5_CSP_DELTA_TARGET = 0.225
     _P5_CC_DELTA_BAND = (0.15, 0.40)
     _P5_CSP_DELTA_BAND = (0.12, 0.35)
+    _P5_TOP_VOLUME_COLUMNS = ('Ticker', 'Type', 'Strike', 'Exp', 'Price', 'Vol')
+    _P5_SHORT_TERM_BUCKETS = (
+        ('0_week', '0 Week', 0),
+        ('1_week', '1 Week', 7),
+        ('2_weeks', '2 Weeks', 14),
+        ('3_weeks', '3 Weeks', 21),
+        ('4_weeks', '4 Weeks', 28),
+        ('5_weeks', '5 Weeks', 35),
+    )
+    _P5_MEDIUM_TERM_BUCKETS = (
+        ('6_weeks', '6 Weeks', 42),
+        ('7_weeks', '7 Weeks', 49),
+        ('8_weeks', '8 Weeks', 56),
+        ('9_weeks', '9 Weeks', 63),
+        ('10_weeks', '10 Weeks', 70),
+        ('11_weeks', '11 Weeks', 77),
+        ('12_weeks', '12 Weeks', 84),
+    )
+    _P5_LONG_TERM_BUCKETS = (
+        ('52_plus_weeks', '52+ Weeks', 365),
+    )
+    _P5_TOP_VOLUME_TAB_CONFIGS = (
+        ('short_term', 'Short Term', _P5_SHORT_TERM_BUCKETS),
+        ('medium_term', 'Medium Term', _P5_MEDIUM_TERM_BUCKETS),
+        ('long_term', 'Long Term', _P5_LONG_TERM_BUCKETS),
+    )
+    _P5_TOP_VOLUME_GRID_COLUMNS = 3
+
     def init_page5(self) -> None:
-        """Build the Options Chain page UI."""
+        """Build the Options page UI."""
         layout = QVBoxLayout(self.page5)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(5)
+        self._p5_expiry_request_seq = 0
+        self._p5_expiry_latest_request_id = 0
+        self._p5_chain_request_seq = 0
+        self._p5_chain_latest_request_id = 0
+        self._p5_top_volume_request_seq = 0
+        self._p5_top_volume_latest_request_ids = {}
+        self._p5_top_volume_payloads = {}
+        self.p5_top_volume_views = {}
+        self._p5_top_volume_tab_order = []
+        shared_controls = QHBoxLayout()
+        self.p5_shared_ticker_input = QLineEdit()
+        self.p5_shared_ticker_input.setPlaceholderText('Enter Ticker (e.g. AAPL)')
+        self.p5_shared_ticker_input.setMinimumWidth(140)
+        self.p5_shared_ticker_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.p5_shared_ticker_input.returnPressed.connect(self._p5_load_active_subtab)
+        shared_load_btn = QPushButton('Load All')
+        self.set_theme_variant(shared_load_btn, 'accent')
+        shared_load_btn.clicked.connect(self._p5_load_active_subtab)
+        self.p5_export_top_volume_btn = QPushButton('Export Top Options by Volume')
+        self.set_theme_variant(self.p5_export_top_volume_btn, 'accent')
+        self.p5_export_top_volume_btn.clicked.connect(self._p5_export_top_options_by_volume)
+        shared_controls.addWidget(QLabel('<b>Ticker:</b>'))
+        shared_controls.addWidget(self.p5_shared_ticker_input)
+        shared_controls.addWidget(shared_load_btn)
+        shared_controls.addWidget(self.p5_export_top_volume_btn)
+        shared_controls.addStretch()
+        layout.addLayout(shared_controls, 0)
+        self.p5_tabs = QTabWidget()
+        self.p5_tabs.setDocumentMode(True)
+        self.p5_tabs.addTab(self._p5_build_chain_tab(), 'Chain')
+        for view_key, tab_label, bucket_config in self._P5_TOP_VOLUME_TAB_CONFIGS:
+            self._p5_top_volume_latest_request_ids[view_key] = 0
+            self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload(bucket_config)
+            self.p5_tabs.addTab(self._p5_build_top_volume_tab(view_key, tab_label, bucket_config), tab_label)
+            self._p5_top_volume_tab_order.append(view_key)
+        layout.addWidget(self.p5_tabs, 1)
+
+    def _p5_build_chain_tab(self) -> Any:
+        """Build the Chain subtab content."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
         controls = QHBoxLayout()
-        self.p5_ticker_input = QLineEdit()
-        self.p5_ticker_input.setPlaceholderText('Enter Ticker (e.g. AAPL)')
-        self.p5_ticker_input.setMinimumWidth(100)
-        self.p5_ticker_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.p5_ticker_input.returnPressed.connect(self._p5_load_expiries)
         load_btn = QPushButton('Load Chain')
+        self.set_theme_variant(load_btn, 'accent')
         load_btn.clicked.connect(self._p5_load_expiries)
+        self.p5_export_chain_btn = QPushButton('Export Chain')
+        self.set_theme_variant(self.p5_export_chain_btn, 'accent')
+        self.p5_export_chain_btn.clicked.connect(self._p5_export_chain)
         self.p5_expiry_combo = QComboBox()
         self.p5_expiry_combo.setMinimumWidth(140)
         self.p5_expiry_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -49,22 +119,22 @@ class OptionsChainMixin:
         self.p5_strategy_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.p5_strategy_combo.addItems(list(self._P5_STRATEGIES))
         self.p5_strategy_combo.currentIndexChanged.connect(self._p5_refresh_strategy_view)
-        self.p5_status_lbl = QLabel('Enter a ticker to view the full options chain.')
+        self.p5_status_lbl = QLabel('Enter a ticker above to view the full options chain.')
         self.p5_status_lbl.setWordWrap(True)
         self.p5_status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.set_theme_role(self.p5_status_lbl, 'status_muted')
         self.p5_price_lbl = QLabel('')
         self.p5_price_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {self.theme_color('accent_positive')}; margin-left: 10px;")
         self._p5_chain_df = pd.DataFrame()
+        self._p5_chain_ticker = ''
         self._p5_chain_spot_price = 0.0
         self._p5_chain_expiry = ''
         self._p5_chain_rate = 0.0
         self._p5_chain_dividend_yield = 0.0
         self._p5_chain_rate_source = 'default'
         self._p5_chain_dividend_source = 'default'
-        controls.addWidget(QLabel('<b>Ticker:</b>'))
-        controls.addWidget(self.p5_ticker_input)
         controls.addWidget(load_btn)
+        controls.addWidget(self.p5_export_chain_btn)
         controls.addSpacing(10)
         controls.addWidget(self.p5_price_lbl)
         controls.addSpacing(20)
@@ -92,6 +162,66 @@ class OptionsChainMixin:
         splitter.addWidget(puts_widget)
         layout.addWidget(splitter, 1)
         layout.addWidget(self.p5_status_lbl, 0)
+        return tab
+
+    def _p5_build_top_volume_tab(self, view_key: str, tab_label: str, bucket_config: tuple[tuple[str, str, int], ...]) -> Any:
+        """Build one reusable top-volume timeframe subtab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QHBoxLayout()
+        load_btn = QPushButton('Load Top Options')
+        self.set_theme_variant(load_btn, 'accent')
+        load_btn.clicked.connect(partial(self._p5_load_top_volume, view_key))
+        controls.addWidget(load_btn)
+        controls.addStretch()
+        layout.addLayout(controls, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_contents = QWidget()
+        scroll_layout = QGridLayout(scroll_contents)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setHorizontalSpacing(10)
+        scroll_layout.setVerticalSpacing(10)
+        sections = {}
+        for index, (bucket_key, bucket_label, _days_out) in enumerate(bucket_config):
+            panel = QFrame()
+            self.set_theme_role(panel, 'panel')
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(6, 6, 6, 6)
+            panel_layout.setSpacing(4)
+            section_label = QLabel('')
+            self.set_theme_role(section_label, 'section_title')
+            table = self._make_top_volume_table()
+            panel_layout.addWidget(section_label)
+            panel_layout.addWidget(table, 1)
+            sections[bucket_key] = {'label': section_label, 'table': table, 'panel': panel}
+            self._p5_set_top_volume_bucket_title(view_key, bucket_key)
+            row = index // self._P5_TOP_VOLUME_GRID_COLUMNS
+            col = index % self._P5_TOP_VOLUME_GRID_COLUMNS
+            scroll_layout.addWidget(panel, row, col)
+        for col in range(self._P5_TOP_VOLUME_GRID_COLUMNS):
+            scroll_layout.setColumnStretch(col, 1)
+        total_rows = max(1, math.ceil(len(bucket_config) / self._P5_TOP_VOLUME_GRID_COLUMNS))
+        for row in range(total_rows):
+            scroll_layout.setRowStretch(row, 1)
+        scroll.setWidget(scroll_contents)
+        layout.addWidget(scroll, 1)
+        status_lbl = QLabel(f'Enter a ticker above to view {tab_label.lower()} top options by volume.')
+        status_lbl.setWordWrap(True)
+        status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.set_theme_role(status_lbl, 'status_muted')
+        layout.addWidget(status_lbl, 0)
+        self.p5_top_volume_views[view_key] = {
+            'tab': tab,
+            'tab_label': tab_label,
+            'bucket_config': tuple(bucket_config),
+            'status_lbl': status_lbl,
+            'sections': sections,
+        }
+        return tab
 
     def _make_chain_table(self) -> Any:
         """Create a shared options chain table."""
@@ -105,11 +235,484 @@ class OptionsChainMixin:
         t.setAlternatingRowColors(True)
         return t
 
+    def _make_top_volume_table(self) -> Any:
+        """Create a Top Options by Volume table using the dashboard-style columns."""
+        table = QTableWidget(0, len(self._P5_TOP_VOLUME_COLUMNS))
+        table.setHorizontalHeaderLabels(list(self._P5_TOP_VOLUME_COLUMNS))
+        table.horizontalHeader().setMinimumHeight(28)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(24)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setMinimumHeight(220)
+        return table
+
+    def _p5_format_top_volume_expiration(self, expiry: str) -> str:
+        """Render one expiration in compact uppercase month format."""
+        expiry_text = str(expiry or '').strip()
+        if not expiry_text:
+            return ''
+        try:
+            expiry_date = datetime.date.fromisoformat(expiry_text)
+        except ValueError:
+            return expiry_text
+        return f"{expiry_date.strftime('%b').upper()} {expiry_date.day} '{expiry_date.strftime('%y')}"
+
+    def _p5_empty_top_volume_payload(self, bucket_config: tuple[tuple[str, str, int], ...], ticker: str = '') -> dict[str, Any]:
+        """Build an empty payload for one top-volume timeframe view."""
+        return {
+            'ticker': str(ticker or ''),
+            'records': {bucket_key: [] for bucket_key, _, _ in bucket_config},
+            'expirations': {bucket_key: '' for bucket_key, _, _ in bucket_config},
+        }
+
+    def _p5_shared_ticker(self) -> str:
+        """Return the shared Options-page ticker symbol."""
+        return str(getattr(self, 'p5_shared_ticker_input', None).text() if hasattr(self, 'p5_shared_ticker_input') else '').upper().strip()
+
+    def _p5_session_snapshot(self) -> dict[str, Any] | None:
+        """Return the current Options workspace snapshot when it has restorable state."""
+        shared_ticker = self._p5_shared_ticker() or str(getattr(self, '_p5_chain_ticker', '') or '').upper().strip()
+        has_chain_data = not getattr(self, '_p5_chain_df', pd.DataFrame()).empty
+        has_top_volume_data = any(
+            any(bool(records) for records in (payload.get('records', {}) if isinstance(payload, dict) else {}).values())
+            for payload in getattr(self, '_p5_top_volume_payloads', {}).values()
+        )
+        if not shared_ticker and not has_chain_data and not has_top_volume_data:
+            return None
+        return {
+            'shared_ticker': shared_ticker,
+            'active_tab_index': int(self.p5_tabs.currentIndex()) if hasattr(self, 'p5_tabs') else 0,
+            'selected_expiry': str(self.p5_expiry_combo.currentData() if hasattr(self, 'p5_expiry_combo') else getattr(self, '_p5_chain_expiry', '') or ''),
+            'strategy': str(self.p5_strategy_combo.currentText() if hasattr(self, 'p5_strategy_combo') else 'None' or 'None'),
+            'chain_ticker': str(getattr(self, '_p5_chain_ticker', '') or '').upper().strip(),
+            'chain_spot_price': float(getattr(self, '_p5_chain_spot_price', 0.0) or 0.0),
+            'chain_expiry': str(getattr(self, '_p5_chain_expiry', '') or '').strip(),
+            'chain_rate': float(getattr(self, '_p5_chain_rate', 0.0) or 0.0),
+            'chain_dividend_yield': float(getattr(self, '_p5_chain_dividend_yield', 0.0) or 0.0),
+            'chain_rate_source': str(getattr(self, '_p5_chain_rate_source', 'default') or 'default'),
+            'chain_dividend_source': str(getattr(self, '_p5_chain_dividend_source', 'default') or 'default'),
+            'chain_df': serialize_session_value(getattr(self, '_p5_chain_df', pd.DataFrame())),
+            'top_volume_payloads': serialize_session_value(getattr(self, '_p5_top_volume_payloads', {})),
+        }
+
+    def _p5_save_session_snapshot(self, *, immediate: bool=False) -> None:
+        """Persist the latest Options workspace snapshot."""
+        if hasattr(self, '_set_tab_session_snapshot'):
+            self._set_tab_session_snapshot('options', self._p5_session_snapshot(), immediate=immediate)
+
+    def _p5_restore_expiry_selection(self, expiry: str) -> None:
+        """Restore the shared expiry selector from cached state."""
+        expiry_text = str(expiry or '').strip()
+        if not hasattr(self, 'p5_expiry_combo') or not expiry_text:
+            return
+        self.p5_expiry_combo.blockSignals(True)
+        self.p5_expiry_combo.clear()
+        try:
+            expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
+            dte = (expiry_date - datetime.date.today()).days
+            label = f'{expiry_text} ({dte}d)'
+        except Exception:
+            label = expiry_text
+        self.p5_expiry_combo.addItem(label, expiry_text)
+        self.p5_expiry_combo.blockSignals(False)
+
+    def _p5_restore_session_snapshot(self, snapshot: Any) -> bool:
+        """Restore the Options workspace from cached session state."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        shared_ticker = str(payload.get('shared_ticker', '') or '').upper().strip()
+        if shared_ticker:
+            self.p5_shared_ticker_input.setText(shared_ticker)
+        selected_expiry = str(payload.get('selected_expiry', '') or payload.get('chain_expiry', '') or '').strip()
+        if selected_expiry:
+            self._p5_restore_expiry_selection(selected_expiry)
+        strategy = str(payload.get('strategy', 'None') or 'None')
+        if strategy in self._P5_STRATEGIES:
+            self.p5_strategy_combo.setCurrentText(strategy)
+        active_tab_index = int(payload.get('active_tab_index', 0) or 0) if hasattr(self, 'p5_tabs') else 0
+        if hasattr(self, 'p5_tabs') and 0 <= active_tab_index < self.p5_tabs.count():
+            self.p5_tabs.setCurrentIndex(active_tab_index)
+        self._p5_chain_ticker = str(payload.get('chain_ticker', shared_ticker) or shared_ticker).upper().strip()
+        self._p5_chain_spot_price = float(payload.get('chain_spot_price', 0.0) or 0.0)
+        self._p5_chain_rate = float(payload.get('chain_rate', 0.0) or 0.0)
+        self._p5_chain_dividend_yield = float(payload.get('chain_dividend_yield', 0.0) or 0.0)
+        self._p5_chain_rate_source = str(payload.get('chain_rate_source', 'default') or 'default')
+        self._p5_chain_dividend_source = str(payload.get('chain_dividend_source', 'default') or 'default')
+        if self._p5_chain_spot_price > 0:
+            self.p5_price_lbl.setText(f'${self._p5_chain_spot_price:.2f}')
+        else:
+            self.p5_price_lbl.setText('')
+        chain_df = deserialize_session_value(payload.get('chain_df'))
+        if isinstance(chain_df, pd.DataFrame) and not chain_df.empty:
+            self._p5_populate_tables(chain_df, selected_expiry or str(payload.get('chain_expiry', '') or ''))
+            self.set_status_text(self.p5_status_lbl, f'Restored last session for {self._p5_chain_ticker or shared_ticker}.', status='positive')
+        top_volume_payloads = deserialize_session_value(payload.get('top_volume_payloads'))
+        if isinstance(top_volume_payloads, dict):
+            for view_key, _tab_label, bucket_config in self._P5_TOP_VOLUME_TAB_CONFIGS:
+                cached_payload = top_volume_payloads.get(view_key)
+                if not isinstance(cached_payload, dict):
+                    continue
+                normalized_payload = {
+                    'ticker': str(cached_payload.get('ticker', shared_ticker) or shared_ticker),
+                    'records': {
+                        bucket_key: list((cached_payload.get('records', {}) if isinstance(cached_payload.get('records', {}), dict) else {}).get(bucket_key, []))
+                        for bucket_key, _, _ in bucket_config
+                    },
+                    'expirations': {
+                        bucket_key: str((cached_payload.get('expirations', {}) if isinstance(cached_payload.get('expirations', {}), dict) else {}).get(bucket_key, '') or '')
+                        for bucket_key, _, _ in bucket_config
+                    },
+                }
+                self._p5_top_volume_payloads[view_key] = normalized_payload
+                self._p5_render_top_volume_tables(
+                    view_key,
+                    normalized_payload['ticker'],
+                    normalized_payload['records'],
+                    normalized_payload['expirations'],
+                )
+                view = self._p5_top_volume_view(view_key)
+                status_lbl = view.get('status_lbl')
+                if status_lbl is not None:
+                    self.set_status_text(status_lbl, f"Restored last session for {normalized_payload['ticker']}.", status='positive')
+        return bool(shared_ticker or (isinstance(chain_df, pd.DataFrame) and not chain_df.empty))
+
+    def _p5_restore_startup_session(self, snapshot: Any) -> None:
+        """Hydrate Options from the last session, then refresh it in the background."""
+        restored = self._p5_restore_session_snapshot(snapshot)
+        if restored and self._p5_shared_ticker():
+            self._p5_load_active_subtab()
+
+    def _p5_load_active_subtab(self) -> None:
+        """Load all Options subtabs using the shared ticker."""
+        self._p5_load_expiries()
+        for view_key in list(getattr(self, '_p5_top_volume_tab_order', [])):
+            self._p5_load_top_volume(view_key)
+
+    def _p5_top_volume_view(self, view_key: str) -> dict[str, Any]:
+        """Return the metadata for one top-volume timeframe tab."""
+        return getattr(self, 'p5_top_volume_views', {}).get(view_key, {})
+
+    def _p5_top_volume_buckets(self, view_key: str) -> tuple[tuple[str, str, int], ...]:
+        """Return the configured bucket list for one top-volume timeframe tab."""
+        view = self._p5_top_volume_view(view_key)
+        raw = view.get('bucket_config', ())
+        return tuple(raw) if isinstance(raw, (list, tuple)) else ()
+
+    def _p5_top_volume_bucket_label(self, view_key: str, bucket_key: str) -> str:
+        """Return the configured label for one top-volume bucket key."""
+        for key, label, _days_out in self._p5_top_volume_buckets(view_key):
+            if key == bucket_key:
+                return label
+        return bucket_key
+
+    def _p5_set_top_volume_bucket_title(self, view_key: str, bucket_key: str, expiry: str = '') -> None:
+        """Refresh the section label for one top-volume bucket."""
+        view = self._p5_top_volume_view(view_key)
+        section = view.get('sections', {}).get(bucket_key, {}) if isinstance(view.get('sections', {}), dict) else {}
+        label_widget = section.get('label')
+        if label_widget is None:
+            return
+        bucket_label = self._p5_top_volume_bucket_label(view_key, bucket_key)
+        expiry_display = self._p5_format_top_volume_expiration(expiry)
+        suffix = f' ({expiry_display})' if expiry_display else ' (Unavailable)'
+        label_widget.setText(f'Top Options by Volume - {bucket_label}{suffix}')
+
+    def _p5_clear_top_volume_tables(self, view_key: str) -> None:
+        """Reset all top-volume bucket tables to an empty state."""
+        view = self._p5_top_volume_view(view_key)
+        sections = view.get('sections', {}) if isinstance(view.get('sections', {}), dict) else {}
+        for bucket_key, _bucket_label, _days_out in self._p5_top_volume_buckets(view_key):
+            section = sections.get(bucket_key, {})
+            table = section.get('table')
+            if table is not None:
+                table.setRowCount(0)
+                table.setToolTip('')
+            self._p5_set_top_volume_bucket_title(view_key, bucket_key)
+
+    def _p5_load_top_volume(self, view_key: str, *_: Any) -> None:
+        """Fetch and render top options by volume for one timeframe workspace."""
+        view = self._p5_top_volume_view(view_key)
+        bucket_config = self._p5_top_volume_buckets(view_key)
+        status_lbl = view.get('status_lbl')
+        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
+        ticker = self._p5_shared_ticker()
+        if not ticker:
+            self._p5_clear_top_volume_tables(view_key)
+            self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload(bucket_config)
+            if status_lbl is not None:
+                self.set_status_text(status_lbl, f'Enter a ticker above to view {tab_label.lower()} top options by volume.', status='muted')
+            return
+        self._p5_top_volume_request_seq += 1
+        request_id = self._p5_top_volume_request_seq
+        self._p5_top_volume_latest_request_ids[view_key] = request_id
+        self._p5_clear_top_volume_tables(view_key)
+        self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload(bucket_config, ticker=ticker)
+        if status_lbl is not None:
+            self.set_status_text(status_lbl, f'Loading {tab_label.lower()} top options by volume for {ticker}...', status='warning')
+
+        def _run() -> None:
+            """Load top-volume buckets in the background."""
+            try:
+                expiries = self._get_cached_options_expiries(ticker)
+                if expiries is None:
+                    with YF_LOCK:
+                        ticker_obj = yf.Ticker(ticker)
+                        expiries = ticker_obj.options
+                    if expiries:
+                        self._save_cached_options_expiries(ticker, expiries)
+                chain_cache: dict[str, Any] = {}
+                bucket_records = {bucket_key: [] for bucket_key, _, _ in bucket_config}
+                if view_key == 'long_term':
+                    long_term_expiries = self._p5_select_top_volume_expiries_after_days(expiries, int(bucket_config[0][2] if bucket_config else 365))
+                    bucket_key = str(bucket_config[0][0]) if bucket_config else '52_plus_weeks'
+                    bucket_expirations = {
+                        bucket_key: 'All > 52 Weeks' if long_term_expiries else '',
+                    }
+                    if long_term_expiries:
+                        bucket_records[bucket_key] = self._p5_prepare_top_volume_records_for_expiries(ticker, long_term_expiries, chain_cache)
+                else:
+                    bucket_expirations = self._p5_select_top_volume_buckets(expiries, bucket_config)
+                    for bucket_key, expiry in bucket_expirations.items():
+                        if not expiry:
+                            continue
+                        try:
+                            chain_df = chain_cache.get(expiry)
+                            if chain_df is None:
+                                chain_df = self._get_cached_option_chain(ticker, expiry)
+                                chain_cache[expiry] = chain_df
+                            bucket_records[bucket_key] = self._p5_prepare_top_volume_records(chain_df, ticker, expiry)
+                        except Exception as exc:
+                            logger.warning('%s top options by volume load failed for %s %s (%s): %s', tab_label, ticker, bucket_key, expiry, exc)
+                if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
+                    return
+                self._invoke_main.emit(
+                    lambda key=view_key, rid=request_id, symbol=ticker, records=bucket_records, expirations=bucket_expirations: self._p5_update_top_volume_view(
+                        key,
+                        rid,
+                        symbol,
+                        records,
+                        expirations,
+                    )
+                )
+            except Exception as exc:
+                logger.error('P5 %s top options load failed for %s: %s', tab_label.lower(), ticker, exc)
+                if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
+                    return
+                self._invoke_main.emit(
+                    lambda key=view_key, rid=request_id, symbol=ticker, message=str(exc): self._p5_handle_top_volume_error(
+                        key,
+                        rid,
+                        symbol,
+                        message,
+                    )
+                )
+        self._submit_options_fetch(_run)
+
+    def _p5_select_top_volume_buckets(self, expiries: Any, bucket_config: tuple[tuple[str, str, int], ...]) -> dict[str, str]:
+        """Resolve the first available expiration at or after each configured week offset."""
+        bucket_map = {bucket_key: '' for bucket_key, _, _ in bucket_config}
+        if not expiries:
+            return bucket_map
+        parsed = []
+        for expiry in expiries:
+            try:
+                expiry_text = str(expiry or '').strip()
+                if not expiry_text:
+                    continue
+                parsed.append((expiry_text, datetime.date.fromisoformat(expiry_text)))
+            except Exception:
+                continue
+        if not parsed:
+            return bucket_map
+        parsed.sort(key=lambda item: item[1])
+        today = datetime.date.today()
+        for bucket_key, _bucket_label, days_out in bucket_config:
+            target_date = today + datetime.timedelta(days=int(days_out))
+            selected = next((expiry_text for expiry_text, expiry_date in parsed if expiry_date >= target_date), None)
+            bucket_map[bucket_key] = selected or parsed[-1][0]
+        return bucket_map
+
+    def _p5_select_top_volume_expiries_after_days(self, expiries: Any, min_days_out: int) -> list[str]:
+        """Return all expirations strictly beyond the configured minimum days out."""
+        if not expiries:
+            return []
+        parsed = []
+        for expiry in expiries:
+            try:
+                expiry_text = str(expiry or '').strip()
+                if not expiry_text:
+                    continue
+                parsed.append((expiry_text, datetime.date.fromisoformat(expiry_text)))
+            except Exception:
+                continue
+        if not parsed:
+            return []
+        parsed.sort(key=lambda item: item[1])
+        target_date = datetime.date.today() + datetime.timedelta(days=int(min_days_out))
+        return [expiry_text for expiry_text, expiry_date in parsed if expiry_date >= target_date]
+
+    def _p5_prepare_top_volume_records(self, chain_df: Any, ticker: str, expiry: str) -> list[dict[str, Any]]:
+        """Normalize one chain and return the top-volume rows for display."""
+        if chain_df is None or chain_df.empty:
+            return []
+        prepared = chain_df.copy()
+        if 'ticker' not in prepared.columns:
+            prepared['ticker'] = ticker
+        if 'type' not in prepared.columns:
+            prepared['type'] = ''
+        if 'expiration' not in prepared.columns:
+            prepared['expiration'] = expiry
+        for col in ('strike', 'lastPrice', 'volume', 'openInterest'):
+            if col not in prepared.columns:
+                prepared[col] = 0.0
+            prepared[col] = pd.to_numeric(prepared[col], errors='coerce')
+        prepared['volume'] = prepared['volume'].fillna(0.0)
+        prepared['openInterest'] = prepared['openInterest'].fillna(0.0)
+        top_options = prepared.sort_values(by=['volume', 'openInterest'], ascending=False, na_position='last').head(10)
+        return top_options.to_dict('records')
+
+    def _p5_prepare_top_volume_records_for_expiries(self, ticker: str, expiries: list[str], chain_cache: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Merge multiple expirations and return the top-volume rows across the whole range."""
+        if not expiries:
+            return []
+        cache = chain_cache if isinstance(chain_cache, dict) else {}
+        frames = []
+        for expiry in expiries:
+            try:
+                chain_df = cache.get(expiry)
+                if chain_df is None:
+                    chain_df = self._get_cached_option_chain(ticker, expiry)
+                    cache[expiry] = chain_df
+                if chain_df is None or chain_df.empty:
+                    continue
+                prepared = chain_df.copy()
+                if 'expiration' not in prepared.columns:
+                    prepared['expiration'] = expiry
+                frames.append(prepared)
+            except Exception as exc:
+                logger.warning('Long-term top options load failed for %s %s: %s', ticker, expiry, exc)
+        if not frames:
+            return []
+        merged = pd.concat(frames, ignore_index=True)
+        return self._p5_prepare_top_volume_records(merged, ticker, '')
+
+    def _p5_update_top_volume_view(self, view_key: str, request_id: int, ticker: str, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+        """Store and render the latest top-volume bucket payload."""
+        if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
+            return
+        view = self._p5_top_volume_view(view_key)
+        bucket_config = self._p5_top_volume_buckets(view_key)
+        status_lbl = view.get('status_lbl')
+        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
+        normalized_records = {
+            bucket_key: list(bucket_records.get(bucket_key, []))
+            for bucket_key, _, _ in bucket_config
+        }
+        normalized_expirations = {
+            bucket_key: str(bucket_expirations.get(bucket_key, '') or '')
+            for bucket_key, _, _ in bucket_config
+        }
+        self._p5_top_volume_payloads[view_key] = {
+            'ticker': ticker,
+            'records': normalized_records,
+            'expirations': normalized_expirations,
+        }
+        self._p5_save_session_snapshot()
+        self._p5_render_top_volume_tables(view_key, ticker, normalized_records, normalized_expirations)
+        row_total = sum(len(records) for records in normalized_records.values())
+        resolved_count = sum(1 for expiry in normalized_expirations.values() if expiry)
+        missing_count = len(bucket_config) - resolved_count
+        if row_total <= 0:
+            status_text = f'No {tab_label.lower()} top options volume data available for {ticker}.'
+            if missing_count:
+                status_text += f' {missing_count} week buckets had no matching expiration.'
+            if status_lbl is not None:
+                self.set_status_text(status_lbl, status_text, status='warning')
+            return
+        status_text = f"{tab_label} top options updated for {ticker} at {datetime.datetime.now().strftime('%H:%M:%S')}"
+        status_text += f' | {row_total} rows across {resolved_count} buckets'
+        if missing_count:
+            status_text += f' | {missing_count} buckets unavailable'
+        if status_lbl is not None:
+            self.set_status_text(status_lbl, status_text, status='positive' if missing_count == 0 else 'warning')
+
+    def _p5_handle_top_volume_error(self, view_key: str, request_id: int, ticker: str, message: str) -> None:
+        """Render a top-volume load failure if the request is still current."""
+        if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
+            return
+        view = self._p5_top_volume_view(view_key)
+        bucket_config = self._p5_top_volume_buckets(view_key)
+        status_lbl = view.get('status_lbl')
+        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
+        self._p5_clear_top_volume_tables(view_key)
+        self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload(bucket_config, ticker=ticker)
+        if status_lbl is not None:
+            self.set_status_text(status_lbl, f'Error loading {tab_label.lower()} top options for {ticker}: {message}', status='negative')
+
+    def _p5_render_top_volume_tables(self, view_key: str, ticker: str, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+        """Render the cached top-volume bucket records into the UI tables."""
+        view = self._p5_top_volume_view(view_key)
+        sections = view.get('sections', {}) if isinstance(view.get('sections', {}), dict) else {}
+        for bucket_key, _bucket_label, _days_out in self._p5_top_volume_buckets(view_key):
+            section = sections.get(bucket_key, {})
+            table = section.get('table')
+            expiry = str(bucket_expirations.get(bucket_key, '') or '')
+            expiry_display = self._p5_format_top_volume_expiration(expiry)
+            self._p5_set_top_volume_bucket_title(view_key, bucket_key, expiry)
+            if table is None:
+                continue
+            table.setRowCount(0)
+            table.setToolTip(f'Using expiration {expiry_display}' if expiry_display else 'No expiration available')
+            for opt in list(bucket_records.get(bucket_key, [])):
+                row = table.rowCount()
+                table.insertRow(row)
+                ticker_item = QTableWidgetItem(str(opt.get('ticker', ticker) or ticker))
+                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 0, ticker_item)
+                type_value = str(opt.get('type', '') or '')
+                type_item = QTableWidgetItem(type_value)
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if type_value == 'Call':
+                    type_item.setForeground(self.theme_qcolor('accent_positive'))
+                elif type_value == 'Put':
+                    type_item.setForeground(self.theme_qcolor('accent_negative'))
+                table.setItem(row, 1, type_item)
+                strike = opt.get('strike')
+                strike_item = QTableWidgetItem(f'{float(strike):.1f}' if strike is not None and not pd.isna(strike) else '')
+                strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 2, strike_item)
+                exp_value = str(opt.get('expiration', '') or expiry)
+                exp_item = QTableWidgetItem(self._p5_format_top_volume_expiration(exp_value))
+                exp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 3, exp_item)
+                last_price = opt.get('lastPrice')
+                price_item = QTableWidgetItem(f'{float(last_price):.2f}' if last_price is not None and not pd.isna(last_price) else '')
+                price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 4, price_item)
+                volume = opt.get('volume', 0)
+                vol_text = '0'
+                if volume is not None and not pd.isna(volume):
+                    try:
+                        vol_text = f'{int(float(volume)):,}'
+                    except (TypeError, ValueError, OverflowError):
+                        vol_text = str(volume)
+                vol_item = QTableWidgetItem(vol_text)
+                vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 5, vol_item)
+
     def _p5_load_expiries(self) -> None:
         """Fetch available expiry dates for the entered ticker."""
-        ticker = self.p5_ticker_input.text().upper().strip()
+        ticker = self._p5_shared_ticker()
         if not ticker:
+            self.set_status_text(self.p5_status_lbl, 'Enter a ticker above to view the full options chain.', status='muted')
             return
+        preferred_expiry = str(self.p5_expiry_combo.currentData() or getattr(self, '_p5_chain_expiry', '') or '').strip()
+        self._p5_expiry_request_seq += 1
+        request_id = self._p5_expiry_request_seq
+        self._p5_expiry_latest_request_id = request_id
         self.set_status_text(self.p5_status_lbl, f'Fetching expiries for {ticker}...', status='warning')
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
@@ -134,21 +737,48 @@ class OptionsChainMixin:
                     if exps:
                         cache.save_options_expiries(ticker, exps)
 
-                def _update_ui() -> None:
-                    """Populate expiry combo and spot label."""
-                    self._p5_chain_spot_price = price or 0.0
-                    self._p5_populate_expiries(exps)
-                    if price:
-                        self.p5_price_lbl.setText(f'${price:.2f}')
-                    else:
-                        self.p5_price_lbl.setText('')
-                self._invoke_main.emit(_update_ui)
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, expiries=exps, spot=price, selected=preferred_expiry: self._p5_handle_loaded_expiries(
+                        rid,
+                        symbol,
+                        expiries,
+                        spot,
+                        preferred_expiry=selected,
+                    )
+                )
             except Exception as e:
                 logger.error(f'P5 expiry fetch failed for {ticker}: {e}')
-                self._invoke_main.emit(lambda: self.set_status_text(self.p5_status_lbl, f'Error: {e}', status='negative'))
+                self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_expiry_error(rid, message))
         threading.Thread(target=_run, daemon=True).start()
 
-    def _p5_populate_expiries(self, exps: Any) -> None:
+    def _p5_handle_loaded_expiries(
+        self,
+        request_id: int,
+        ticker: str,
+        exps: Any,
+        price: float | None,
+        *,
+        preferred_expiry: str='',
+    ) -> None:
+        """Apply one expiry fetch only when it is still current."""
+        if request_id != getattr(self, '_p5_expiry_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_chain_spot_price = float(price or 0.0)
+        self._p5_populate_expiries(exps, preferred_expiry=preferred_expiry)
+        if price:
+            self.p5_price_lbl.setText(f'${float(price):.2f}')
+        else:
+            self.p5_price_lbl.setText('')
+
+    def _p5_handle_expiry_error(self, request_id: int, message: str) -> None:
+        """Show an expiry-fetch failure only when it is still current."""
+        if request_id != getattr(self, '_p5_expiry_latest_request_id', 0):
+            return
+        self.set_status_text(self.p5_status_lbl, f'Error: {message}', status='negative')
+
+    def _p5_populate_expiries(self, exps: Any, *, preferred_expiry: str='') -> None:
         """Populate the expiry selector."""
         if not exps:
             self.set_status_text(self.p5_status_lbl, 'No options found.', status='muted')
@@ -156,6 +786,7 @@ class OptionsChainMixin:
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
         today = datetime.date.today()
+        preferred = str(preferred_expiry or '').strip()
         for exp in exps:
             try:
                 ed = datetime.datetime.strptime(exp, '%Y-%m-%d').date()
@@ -163,16 +794,21 @@ class OptionsChainMixin:
                 self.p5_expiry_combo.addItem(f'{exp} ({dte}d)', exp)
             except Exception:
                 self.p5_expiry_combo.addItem(exp, exp)
+        preferred_index = self.p5_expiry_combo.findData(preferred) if preferred else -1
+        self.p5_expiry_combo.setCurrentIndex(preferred_index if preferred_index >= 0 else 0)
         self.p5_expiry_combo.blockSignals(False)
         self.set_status_text(self.p5_status_lbl, 'Expiries loaded.', status='positive')
         self._p5_load_chain()
 
     def _p5_load_chain(self) -> None:
         """Load and render the selected options chain."""
-        ticker = self.p5_ticker_input.text().upper().strip()
+        ticker = self._p5_shared_ticker()
         expiry = self.p5_expiry_combo.currentData()
         if not ticker or not expiry:
             return
+        self._p5_chain_request_seq += 1
+        request_id = self._p5_chain_request_seq
+        self._p5_chain_latest_request_id = request_id
         self.set_status_text(self.p5_status_lbl, f'Loading {ticker} {expiry} chain...', status='warning')
         spot_price = float(getattr(self, '_p5_chain_spot_price', 0.0) or 0.0)
 
@@ -209,11 +845,42 @@ class OptionsChainMixin:
                     float(greek_inputs.get('risk_free_rate', 0.0) or 0.0),
                     float(greek_inputs.get('dividend_yield', 0.0) or 0.0),
                 )
-                self._invoke_main.emit(lambda: self._p5_update_chain_view(enriched, expiry, current_spot, greek_inputs))
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, frame=enriched, exp=expiry, spot=current_spot, inputs=greek_inputs: self._p5_handle_loaded_chain(
+                        rid,
+                        symbol,
+                        frame,
+                        exp,
+                        spot,
+                        inputs,
+                    )
+                )
             except Exception as e:
                 logger.error(f'P5 chain load failed for {ticker} {expiry}: {e}')
-                self._invoke_main.emit(lambda: self.set_status_text(self.p5_status_lbl, f'Error: {e}', status='negative'))
+                self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_chain_error(rid, message))
         threading.Thread(target=_run, daemon=True).start()
+
+    def _p5_handle_loaded_chain(
+        self,
+        request_id: int,
+        ticker: str,
+        df: Any,
+        expiry: str,
+        spot_price: float,
+        greek_inputs: dict[str, Any],
+    ) -> None:
+        """Apply one chain response only when it is still current."""
+        if request_id != getattr(self, '_p5_chain_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_update_chain_view(ticker, df, expiry, spot_price, greek_inputs)
+
+    def _p5_handle_chain_error(self, request_id: int, message: str) -> None:
+        """Show a chain-load failure only when it is still current."""
+        if request_id != getattr(self, '_p5_chain_latest_request_id', 0):
+            return
+        self.set_status_text(self.p5_status_lbl, f'Error: {message}', status='negative')
 
     def _p5_enrich_chain(self, df: Any, expiry: str, spot_price: float, risk_free_rate: float, dividend_yield: float) -> Any:
         """Add UI-ready market and Greek columns to the raw chain data."""
@@ -269,8 +936,9 @@ class OptionsChainMixin:
             enriched[col] = greeks[col] if col in greeks else None
         return enriched
 
-    def _p5_update_chain_view(self, df: Any, expiry: str, spot_price: float, greek_inputs: dict[str, Any]) -> None:
+    def _p5_update_chain_view(self, ticker: str, df: Any, expiry: str, spot_price: float, greek_inputs: dict[str, Any]) -> None:
         """Store the latest spot value and redraw the chain tables."""
+        self._p5_chain_ticker = str(ticker or '').upper().strip()
         self._p5_chain_spot_price = spot_price or 0.0
         self._p5_chain_rate = float(greek_inputs.get('risk_free_rate', 0.0) or 0.0)
         self._p5_chain_dividend_yield = float(greek_inputs.get('dividend_yield', 0.0) or 0.0)
@@ -279,6 +947,218 @@ class OptionsChainMixin:
         if spot_price:
             self.p5_price_lbl.setText(f'${spot_price:.2f}')
         self._p5_populate_tables(df, expiry)
+        self._p5_save_session_snapshot()
+
+    def _p5_escape_markdown_cell(self, value: Any) -> str:
+        """Sanitize plain values for Markdown table cells."""
+        if value is None:
+            return ''
+        try:
+            if pd.isna(value):
+                return ''
+        except Exception:
+            pass
+        return str(value).replace('|', '\\|').replace('\r', ' ').replace('\n', ' ').strip()
+
+    def _p5_format_option_export_value(self, value: Any, *, decimals: int=2, integer: bool=False) -> str:
+        """Render one top-options export cell."""
+        if value is None:
+            return ''
+        try:
+            if pd.isna(value):
+                return ''
+        except Exception:
+            pass
+        try:
+            if integer:
+                return f'{int(float(value)):,}'
+            return f'{float(value):,.{decimals}f}'
+        except (TypeError, ValueError, OverflowError):
+            return self._p5_escape_markdown_cell(value)
+
+    def _p5_copy_export_to_clipboard(self, text: str, success_message: str, *, target_status_label: Any=None) -> bool:
+        """Copy export text to the clipboard and update status labels."""
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception as exc:
+            if target_status_label is not None:
+                self.set_status_text(target_status_label, f'Export failed: {exc}', status='negative')
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, f'Export failed: {exc}', status='negative')
+            QMessageBox.critical(self, 'Export Failed', f'Unable to copy export to the clipboard.\n\n{exc}')
+            return False
+        if target_status_label is not None:
+            self.set_status_text(target_status_label, success_message, status='positive')
+        if hasattr(self, 'status_bar'):
+            self.set_status_text(self.status_bar, success_message, status='positive')
+        return True
+
+    def _p5_build_chain_export_table(self, df: Any) -> list[str]:
+        """Convert one side of the chain into a Markdown table."""
+        if df is None or df.empty:
+            return ['No rows available.', '']
+        lines = [
+            '| ' + ' | '.join(label for label, _, _ in self._P5_CHAIN_COLUMNS) + ' |',
+            '| ' + ' | '.join('---:' if label not in ('IV',) else '---' for label, _, _ in self._P5_CHAIN_COLUMNS) + ' |',
+        ]
+        for _idx, row in df.iterrows():
+            cells = []
+            for _label, key, fmt in self._P5_CHAIN_COLUMNS:
+                value = row.get(key)
+                cells.append(self._p5_escape_markdown_cell(self._p5_format_chain_value(value, fmt)))
+            lines.append('| ' + ' | '.join(cells) + ' |')
+        lines.append('')
+        return lines
+
+    def _p5_build_chain_export(self) -> str:
+        """Build a Markdown export for the currently loaded chain view."""
+        ticker = str(getattr(self, '_p5_chain_ticker', '') or '').upper().strip()
+        expiry = str(getattr(self, '_p5_chain_expiry', '') or '').strip()
+        strategy = str(self.p5_strategy_combo.currentText() if hasattr(self, 'p5_strategy_combo') else 'None' or 'None')
+        exported_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        calls = self._p5_chain_df[self._p5_chain_df['type'] == 'Call'].sort_values('strike').reset_index(drop=True)
+        puts = self._p5_chain_df[self._p5_chain_df['type'] == 'Put'].sort_values('strike').reset_index(drop=True)
+        lines = [
+            f'# Options Chain Export - {ticker}',
+            '',
+            f'- Symbol: {ticker}',
+            f'- Expiration: {expiry or "Unavailable"}',
+            f'- Spot Price: {self._p5_format_option_export_value(getattr(self, "_p5_chain_spot_price", 0.0))}',
+            f'- Risk-Free Rate: {self._p5_chain_rate * 100:.2f}% ({self._p5_chain_rate_source})',
+            f'- Dividend Yield: {self._p5_chain_dividend_yield * 100:.2f}% ({self._p5_chain_dividend_source})',
+            f'- Strategy View: {strategy}',
+            f'- Exported At: {exported_at}',
+            '',
+            '## Context',
+            '',
+            'This is the currently loaded options chain for one expiry. Analyze liquidity, strike positioning, implied volatility, and call-versus-put structure from the quoted market data and calculated Greeks.',
+            '',
+            '## Calls',
+            '',
+        ]
+        lines.extend(self._p5_build_chain_export_table(calls))
+        lines.extend([
+            '## Puts',
+            '',
+        ])
+        lines.extend(self._p5_build_chain_export_table(puts))
+        return '\n'.join(lines).rstrip() + '\n'
+
+    def _p5_export_chain(self) -> None:
+        """Copy the current chain snapshot to the clipboard for external analysis."""
+        ticker = str(getattr(self, '_p5_chain_ticker', '') or '').upper().strip()
+        if not ticker or getattr(self, '_p5_chain_df', pd.DataFrame()).empty or not str(getattr(self, '_p5_chain_expiry', '') or '').strip():
+            self.set_status_text(self.p5_status_lbl, 'No chain data is currently loaded to export.', status='warning')
+            QMessageBox.warning(self, 'No Chain Data', 'No options chain is currently loaded. Load a chain first, then export it.')
+            return
+        self._p5_copy_export_to_clipboard(
+            self._p5_build_chain_export(),
+            f'Chain export copied to clipboard for {ticker} {self._p5_chain_expiry}',
+            target_status_label=self.p5_status_lbl,
+        )
+
+    def _p5_build_top_options_timeframe_export(self, view_key: str, tab_label: str, payload: dict[str, Any], bucket_config: tuple[tuple[str, str, int], ...]) -> list[str]:
+        """Build one timeframe section for the top-options export."""
+        ticker = str(payload.get('ticker', '') or '').upper().strip()
+        records_by_bucket = payload.get('records', {}) if isinstance(payload.get('records', {}), dict) else {}
+        expirations = payload.get('expirations', {}) if isinstance(payload.get('expirations', {}), dict) else {}
+        lines = [
+            f'## {tab_label}',
+            '',
+            f'- Symbol: {ticker or "Unavailable"}',
+            '',
+        ]
+        if view_key == 'long_term':
+            lines.extend([
+                'This section aggregates contracts across all expirations more than 52 weeks out.',
+                '',
+            ])
+        for bucket_key, bucket_label, _days_out in bucket_config:
+            bucket_records = list(records_by_bucket.get(bucket_key, []))
+            selected_expiration = str(expirations.get(bucket_key, '') or '')
+            lines.extend([
+                f'### {bucket_label}',
+                '',
+                f'- Selected expiration: {selected_expiration or "Unavailable"}',
+                f'- Rows exported: {len(bucket_records)}',
+                '',
+            ])
+            if not bucket_records:
+                lines.extend([
+                    'No top options volume records were available for this bucket.',
+                    '',
+                ])
+                continue
+            lines.extend([
+                '| Ticker | Type | Strike | Expiration | Last Price | Volume |',
+                '| --- | --- | ---: | --- | ---: | ---: |',
+            ])
+            for opt in bucket_records:
+                lines.append(
+                    '| {ticker} | {type_} | {strike} | {expiration} | {last_price} | {volume} |'.format(
+                        ticker=self._p5_escape_markdown_cell(str(opt.get('ticker', ticker) or ticker)),
+                        type_=self._p5_escape_markdown_cell(str(opt.get('type', '') or '')),
+                        strike=self._p5_format_option_export_value(opt.get('strike'), decimals=1),
+                        expiration=self._p5_escape_markdown_cell(str(opt.get('expiration', '') or selected_expiration)),
+                        last_price=self._p5_format_option_export_value(opt.get('lastPrice')),
+                        volume=self._p5_format_option_export_value(opt.get('volume', 0), integer=True),
+                    )
+                )
+            lines.append('')
+        return lines
+
+    def _p5_build_top_options_export(self) -> str:
+        """Build a combined Markdown export for all top-options timeframe tabs."""
+        exported_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        shared_ticker = self._p5_shared_ticker()
+        loaded_symbols = sorted(
+            {
+                str(payload.get('ticker', '') or '').upper().strip()
+                for payload in getattr(self, '_p5_top_volume_payloads', {}).values()
+                if isinstance(payload, dict) and str(payload.get('ticker', '') or '').strip()
+            }
+        )
+        symbol_summary = ', '.join(loaded_symbols) if loaded_symbols else 'Unavailable'
+        lines = [
+            '# Top Options by Volume Export',
+            '',
+            f'- Current Input Symbol: {shared_ticker or "Unavailable"}',
+            f'- Loaded Symbols: {symbol_summary}',
+            f'- Exported At: {exported_at}',
+            '',
+            '## Context',
+            '',
+            'This export groups the highest-volume options across the short-, medium-, and long-term views. Analyze call-versus-put skew, strike clustering, and volume concentration by timeframe, while noting that the data is a ranked snapshot rather than full order-flow context.',
+            '',
+        ]
+        for view_key, tab_label, bucket_config in self._P5_TOP_VOLUME_TAB_CONFIGS:
+            payload = getattr(self, '_p5_top_volume_payloads', {}).get(view_key, {})
+            if not isinstance(payload, dict):
+                payload = self._p5_empty_top_volume_payload(bucket_config)
+            lines.extend(self._p5_build_top_options_timeframe_export(view_key, tab_label, payload, bucket_config))
+        return '\n'.join(lines).rstrip() + '\n'
+
+    def _p5_export_top_options_by_volume(self) -> None:
+        """Copy all top-options timeframe payloads to the clipboard for external analysis."""
+        payloads = getattr(self, '_p5_top_volume_payloads', {})
+        total_rows = 0
+        for view_key, _tab_label, bucket_config in self._P5_TOP_VOLUME_TAB_CONFIGS:
+            payload = payloads.get(view_key, {})
+            records = payload.get('records', {}) if isinstance(payload, dict) and isinstance(payload.get('records', {}), dict) else {}
+            total_rows += sum(len(list(records.get(bucket_key, []))) for bucket_key, _bucket_label, _days_out in bucket_config)
+        if total_rows <= 0:
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, 'No top options by volume data is currently loaded to export.', status='warning')
+            QMessageBox.warning(
+                self,
+                'No Top Options Data',
+                'No short-, medium-, or long-term top options by volume data is currently loaded. Load the Options page data first, then export it.',
+            )
+            return
+        self._p5_copy_export_to_clipboard(
+            self._p5_build_top_options_export(),
+            'Top options by volume export copied to clipboard for short, medium, and long term views',
+        )
 
     def _p5_implied_vol(self, spot: float, strike: float, expiry: str, risk_free_rate: float, dividend_yield: float, market_price: float, option_type: str) -> float:
         """Newton-Raphson solver to back out implied volatility from an option price."""
@@ -559,6 +1439,18 @@ class OptionsChainMixin:
             self.set_status_text(self.p5_status_lbl, self.p5_status_lbl.text(), status=self.p5_status_lbl.property('bt_status') or 'muted')
         if not getattr(self, '_p5_chain_df', pd.DataFrame()).empty:
             self._p5_populate_tables(self._p5_chain_df, self._p5_chain_expiry)
+        for view_key, view in getattr(self, 'p5_top_volume_views', {}).items():
+            status_lbl = view.get('status_lbl')
+            if status_lbl is not None:
+                self.set_status_text(status_lbl, status_lbl.text(), status=status_lbl.property('bt_status') or 'muted')
+            top_volume_payload = getattr(self, '_p5_top_volume_payloads', {}).get(view_key, {})
+            if isinstance(top_volume_payload, dict):
+                self._p5_render_top_volume_tables(
+                    view_key,
+                    str(top_volume_payload.get('ticker', '') or ''),
+                    top_volume_payload.get('records', {}) if isinstance(top_volume_payload.get('records', {}), dict) else {},
+                    top_volume_payload.get('expirations', {}) if isinstance(top_volume_payload.get('expirations', {}), dict) else {},
+                )
 
     def _p5_format_chain_value(self, value: Any, fmt: str) -> str:
         """Format a chain cell value for display."""

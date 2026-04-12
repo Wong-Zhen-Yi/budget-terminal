@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .compat import *
+from .dependencies import QMainWindow, pyqtSignal
 from .mixins.calendar_page import CalendarPageMixin
 from .mixins.dashboard import DashboardMixin
 from .mixins.etf_analyser import EtfAnalyserMixin
@@ -29,6 +29,7 @@ from .mixins.theme_support import ThemeSupportMixin
 from .mixins.window_bootstrap import WindowBootstrapMixin
 from .mixins.window_lifecycle import WindowLifecycleMixin
 from .mixins.window_setup import WindowSetupMixin
+
 
 class BudgetTerminalApp(ThemeSupportMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, PoliticsMixin, YouTubeMixin, NotesMixin, NewsMixin, NetWorthMixin, CalendarPageMixin, SectorsMixin, SettingsMixin, ChartsPageMixin, StocksPageMixin, MultiChartsMixin, QMainWindow):
     _invoke_main = pyqtSignal(object)

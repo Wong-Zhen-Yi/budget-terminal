@@ -1,5 +1,7 @@
 from __future__ import annotations
 from collections import deque
+from copy import deepcopy
+from contextlib import nullcontext
 from typing import Any
 from .. import __version__
 from ..compat import *
@@ -58,7 +60,21 @@ def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: 
 class WindowBootstrapMixin:
     _PORTFOLIO_PERSIST_DEBOUNCE_MS = 250
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
+    _SESSION_CACHE_PERSIST_DEBOUNCE_MS = 250
     _OPTIONS_FETCH_MAX_WORKERS = 4
+
+    def _startup_profiler_stamp(self, name: str) -> None:
+        """Record one startup milestone when profiling is enabled."""
+        profiler = getattr(self, '_startup_profiler', None)
+        if profiler is not None:
+            profiler.stamp(name)
+
+    def _startup_profiler_step(self, name: str) -> Any:
+        """Return a no-op or active startup timing context manager."""
+        profiler = getattr(self, '_startup_profiler', None)
+        if profiler is None:
+            return nullcontext()
+        return profiler.step(name)
 
     def _get_cache_manager(self) -> Any:
         """Return the shared cache manager for the running app session."""
@@ -216,6 +232,65 @@ class WindowBootstrapMixin:
         else:
             self._flush_dashboard_state_persist()
 
+    def _session_cache_tabs(self) -> dict[str, Any]:
+        """Return the mutable tab-session cache payload map."""
+        cache = getattr(self, '_tab_session_cache', None)
+        if not isinstance(cache, dict):
+            cache = load_tab_session_cache()
+            self._tab_session_cache = cache
+        tabs = cache.get('tabs')
+        if not isinstance(tabs, dict):
+            tabs = {}
+            cache['tabs'] = tabs
+        return tabs
+
+    def _get_tab_session_snapshot(self, tab_key: str) -> dict[str, Any] | None:
+        """Return one cached tab snapshot when available."""
+        payload = self._session_cache_tabs().get(str(tab_key or '').strip())
+        return deepcopy(payload) if isinstance(payload, dict) else None
+
+    def _flush_tab_session_cache(self) -> None:
+        """Write the current in-memory tab-session cache to disk immediately."""
+        self._tab_session_cache = save_tab_session_cache(getattr(self, '_tab_session_cache', {}))
+
+    def _persist_tab_session_cache(self, *, immediate: bool=False) -> None:
+        """Persist cached tab snapshots, buffering bursty updates."""
+        if immediate:
+            if hasattr(self, '_session_cache_persist_timer'):
+                self._session_cache_persist_timer.stop()
+            self._flush_tab_session_cache()
+            return
+        if hasattr(self, '_session_cache_persist_timer'):
+            self._session_cache_persist_timer.start(self._SESSION_CACHE_PERSIST_DEBOUNCE_MS)
+        else:
+            self._flush_tab_session_cache()
+
+    def _set_tab_session_snapshot(self, tab_key: str, payload: Any, *, immediate: bool=False) -> None:
+        """Replace one cached tab snapshot and schedule persistence."""
+        key = str(tab_key or '').strip()
+        if not key:
+            return
+        tabs = self._session_cache_tabs()
+        tabs[key] = deepcopy(payload) if isinstance(payload, dict) else None
+        self._persist_tab_session_cache(immediate=immediate)
+
+    def _clear_tab_session_cache(self, *, immediate: bool=False) -> None:
+        """Clear all cached tab snapshots from memory and disk."""
+        self._tab_session_cache = clear_tab_session_cache()
+        if immediate:
+            if hasattr(self, '_session_cache_persist_timer'):
+                self._session_cache_persist_timer.stop()
+            return
+        self._persist_tab_session_cache()
+
+    def _ensure_options_fetch_executor(self) -> Any:
+        """Create the shared options executor only when the portfolio page needs it."""
+        executor = getattr(self, '_options_fetch_executor', None)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=self._OPTIONS_FETCH_MAX_WORKERS)
+            self._options_fetch_executor = executor
+        return executor
+
     def _init_session_log_capture(self) -> None:
         """Attach a single in-memory session log collector to the app logger."""
         self._session_log_max_entries = 1500
@@ -333,20 +408,15 @@ class WindowBootstrapMixin:
         self._apply_active_portfolio_editor_state()
         if hasattr(self, '_sync_chart_slot_inputs'):
             self._sync_chart_slot_inputs()
-        if hasattr(self, '_reload_options_table'):
-            self._reload_options_table()
-        if hasattr(self, '_p4_refresh_portfolio_selector'):
-            self._p4_refresh_portfolio_selector()
+        self._call_if_page_initialized('_reload_options_table', page_attr='page4')
+        self._call_if_page_initialized('_p4_refresh_portfolio_selector', page_attr='page4')
         if hasattr(self, '_dashboard_refresh_portfolio_selector'):
             self._dashboard_refresh_portfolio_selector()
-        if hasattr(self, '_p10_rebuild_watchlists'):
-            self._p10_rebuild_watchlists()
-        if hasattr(self, '_p6_update_total'):
-            self._p6_update_total()
-        if hasattr(self, '_p7_refresh_options_expirations'):
-            self._p7_refresh_options_expirations()
+        self._call_if_page_initialized('_p10_rebuild_watchlists', page_attr='page10')
+        self._call_if_page_initialized('_p6_update_total', page_attr='page6')
+        self._call_if_page_initialized('_p7_refresh_options_expirations', page_attr='page7')
         if getattr(self, 'last_data', None):
-            self.update_page4(self.last_data)
+            self._call_if_page_initialized('update_page4', self.last_data, page_attr='page4')
             self.repopulate_portfolio()
         if refresh_main:
             self.last_data = None
@@ -439,85 +509,110 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=deleted_main)
         return True
 
-    def __init__(self) -> None:
+    def __init__(self, startup_profiler: Any=None) -> None:
         """Initialize the object."""
         super().__init__()
+        self._startup_profiler = startup_profiler
         self._invoke_main.connect(self._on_invoke_main)
-        self._init_session_log_capture()
-        self.setWindowTitle(f'Budget Terminal v{__version__}')
-        self.resize(1280, 600)
-        self.all_portfolios_state = load_all_portfolios_state()
-        self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
-        self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
-        self._rebuild_portfolio_slots()
-        self.tickers = []
-        self.chart_slots = []
-        self.dashboard_chart_state = load_dashboard_chart_settings()
-        self._dashboard_chart_initialized = False
-        self.dashboard_symbol = str(self.dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
-        self.dashboard_timeframe_label = str(self.dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
-        self.dashboard_active_indicators = list(self.dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
-        self.dashboard_auto_follow = bool(self.dashboard_chart_state.get('auto', True))
-        self.dashboard_chart_df = None
-        self.dashboard_chart_stats = {}
-        self.dashboard_rsi_series = None
-        self.dashboard_chart_interval = '1d'
-        self.dashboard_manual_x_range = None
-        self.dashboard_pending_x_range = None
-        self.dashboard_overlay_items = {}
-        self.chart_configs = []
-        self._dashboard_request_seq = 0
-        self._dashboard_latest_request_id = 0
-        self._cache_manager = CacheManager()
-        self.last_data = None
-        self.p2_current_data = None
-        self.tracker_data = {}
-        self._mktcap_cache = {}
-        self._mktcap_cache_ts = {}
-        self._mktcap_inflight_tickers = set()
-        self._mktcap_queued_tickers = set()
-        self._return_metrics_cache = {}
-        self._return_metrics_fetching = {}
-        self._active_return_timeframe = 'dip_finder'
-        self._momentum_metrics_cache = {}
-        self._momentum_metrics_fetching = {}
-        self._active_momentum_timeframe = '1mo'
-        self._news_auto_summarized = False
-        self._data_collection_ts = None
-        self._data_collection_sources = []
-        self._portfolio_persist_timer = QTimer(self)
-        self._portfolio_persist_timer.setSingleShot(True)
-        self._portfolio_persist_timer.timeout.connect(self._flush_portfolio_persist)
-        self._dashboard_state_persist_timer = QTimer(self)
-        self._dashboard_state_persist_timer.setSingleShot(True)
-        self._dashboard_state_persist_timer.timeout.connect(self._flush_dashboard_state_persist)
-        self._dashboard_refresh_timer = QTimer(self)
-        self._dashboard_refresh_timer.setSingleShot(True)
-        self._dashboard_refresh_timer.timeout.connect(self._execute_refresh_data)
-        self._options_fetch_executor = ThreadPoolExecutor(max_workers=self._OPTIONS_FETCH_MAX_WORKERS)
-        self._option_chain_memory_cache = {}
-        self._option_chain_memory_cache_ttl = 60.0
-        self._options_expiry_memory_cache = {}
-        self._options_expiry_memory_cache_ttl = 900.0
-        self.options_data = []
-        self.active_tickers = []
-        self.active_tracker_data = {}
-        self.active_options_data = []
-        self.networth_data = load_networth_data()
-        self.notes_data = load_notes_data()
-        self.theme_settings = load_theme_settings()
-        self.chart_page_state = load_chart_page_settings()
-        self.stocks_page_state = load_stocks_page_settings()
-        self.init_theme_system(apply=False)
-        self.dashboard_chart_rows = []
-        self.dashboard_chart_ma200 = None
-        self.dashboard_chart_view_guard = False
-        self._apply_main_portfolio_runtime()
-        self._apply_active_portfolio_editor_state()
-        self.init_ui()
-        self.theme_manager.apply_theme(self.current_theme_id, persist=False)
-        self._sync_after_portfolio_change(refresh_main=False)
-        self.refresh_data(force=True)
+        with self._startup_profiler_step('window_init'):
+            self._init_session_log_capture()
+            self.setWindowTitle(f'Budget Terminal v{__version__}')
+            self.resize(1280, 600)
+            with self._startup_profiler_step('state_load'):
+                self.all_portfolios_state = load_all_portfolios_state()
+                self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
+                self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
+                self.dashboard_chart_state = load_dashboard_chart_settings()
+                self.portfolio_metrics_state = load_portfolio_metrics_settings()
+                self.networth_data = load_networth_data()
+                self._tab_session_cache = load_tab_session_cache()
+            self._rebuild_portfolio_slots()
+            self.tickers = []
+            self.chart_slots = []
+            self._dashboard_chart_initialized = False
+            self.dashboard_symbol = str(self.dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
+            self.dashboard_timeframe_label = str(self.dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
+            self.dashboard_active_indicators = list(self.dashboard_chart_state.get('indicators', ['Volume', '200 MA']))
+            self.dashboard_auto_follow = bool(self.dashboard_chart_state.get('auto', True))
+            self.p4_metrics_benchmark_symbol = str(
+                self.portfolio_metrics_state.get('benchmark_symbol', DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol'])
+                or DEFAULT_PORTFOLIO_METRICS_SETTINGS['benchmark_symbol']
+            ).upper().strip()
+            self.p4_metrics_lookback_key = str(
+                self.portfolio_metrics_state.get('lookback_key', DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key'])
+                or DEFAULT_PORTFOLIO_METRICS_SETTINGS['lookback_key']
+            ).strip().lower()
+            self.dashboard_chart_df = None
+            self.dashboard_chart_stats = {}
+            self.dashboard_rsi_series = None
+            self.dashboard_chart_interval = '1d'
+            self.dashboard_manual_x_range = None
+            self.dashboard_pending_x_range = None
+            self.dashboard_overlay_items = {}
+            self.chart_configs = []
+            self._dashboard_request_seq = 0
+            self._dashboard_latest_request_id = 0
+            self._cache_manager = CacheManager()
+            self.last_data = None
+            self.p2_current_data = None
+            self.tracker_data = {}
+            self._mktcap_cache = {}
+            self._mktcap_cache_ts = {}
+            self._mktcap_inflight_tickers = set()
+            self._mktcap_queued_tickers = set()
+            self._return_metrics_cache = {}
+            self._return_metrics_fetching = {}
+            self._active_return_timeframe = 'dip_finder'
+            self._momentum_metrics_cache = {}
+            self._momentum_metrics_fetching = {}
+            self._active_momentum_timeframe = '1mo'
+            self._portfolio_analytics_cache = {}
+            self._portfolio_analytics_fetching = {}
+            self._news_auto_summarized = False
+            self._data_collection_ts = None
+            self._data_collection_sources = []
+            self._portfolio_persist_timer = QTimer(self)
+            self._portfolio_persist_timer.setSingleShot(True)
+            self._portfolio_persist_timer.timeout.connect(self._flush_portfolio_persist)
+            self._dashboard_state_persist_timer = QTimer(self)
+            self._dashboard_state_persist_timer.setSingleShot(True)
+            self._dashboard_state_persist_timer.timeout.connect(self._flush_dashboard_state_persist)
+            self._session_cache_persist_timer = QTimer(self)
+            self._session_cache_persist_timer.setSingleShot(True)
+            self._session_cache_persist_timer.timeout.connect(self._flush_tab_session_cache)
+            self._dashboard_refresh_timer = QTimer(self)
+            self._dashboard_refresh_timer.setSingleShot(True)
+            self._dashboard_refresh_timer.timeout.connect(self._execute_refresh_data)
+            self._startup_show_completed = False
+            self._startup_refresh_pending = False
+            self._startup_page_prefetch_pending = False
+            self._startup_session_restore_pending = False
+            self._startup_session_restore_queue = []
+            self._lazy_warmup_queue = []
+            self._lazy_page_warmup_timer = QTimer(self)
+            self._lazy_page_warmup_timer.setSingleShot(True)
+            self._lazy_page_warmup_timer.timeout.connect(self._warm_next_page)
+            self._options_fetch_executor = None
+            self._option_chain_memory_cache = {}
+            self._option_chain_memory_cache_ttl = 60.0
+            self._options_expiry_memory_cache = {}
+            self._options_expiry_memory_cache_ttl = 900.0
+            self.options_data = []
+            self.active_tickers = []
+            self.active_tracker_data = {}
+            self.active_options_data = []
+            with self._startup_profiler_step('theme_init'):
+                self.init_theme_system(apply=False)
+            self.dashboard_chart_rows = []
+            self.dashboard_chart_ma200 = None
+            self.dashboard_chart_view_guard = False
+            self._apply_main_portfolio_runtime()
+            self._apply_active_portfolio_editor_state()
+            with self._startup_profiler_step('ui_build'):
+                self.init_ui()
+            with self._startup_profiler_step('theme_apply'):
+                self.theme_manager.apply_theme(self.current_theme_id, persist=False)
+            self._sync_after_portfolio_change(refresh_main=False)
 
     def _on_invoke_main(self, fn: Any) -> None:
         """Handle invoke main."""

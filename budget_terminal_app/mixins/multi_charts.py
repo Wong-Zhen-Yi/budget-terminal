@@ -66,8 +66,11 @@ class _MCPlotWidget(pg.PlotWidget):
 
 class MultiChartsMixin:
 
-    def init_page11(self) -> None:
-        """Build the Multi Charts page."""
+    def init_page11(self, container: Any = None, *, show_title: bool = True) -> None:
+        """Build the Multi Charts view into the provided container once."""
+        if getattr(self, '_mc_initialized', False):
+            return
+        self._mc_initialized = True
         self._mc_charts: dict[str, dict] = {}
         self._mc_timeframe_label = MC_DEFAULT_TIMEFRAME
         self._mc_timeframe_map = {label: (period, interval) for label, period, interval in MC_TIMEFRAME_OPTIONS}
@@ -83,16 +86,18 @@ class MultiChartsMixin:
         self._mc_resize_timer.setSingleShot(True)
         self._mc_resize_timer.timeout.connect(self._mc_handle_resize)
         self._mc_active_tab = 'portfolio'
+        self._mc_container = container if container is not None else self.page11
 
-        layout = QVBoxLayout(self.page11)
+        layout = QVBoxLayout(self._mc_container)
         layout.setContentsMargins(10, 10, 10, 6)
         layout.setSpacing(8)
 
         toolbar = QHBoxLayout()
-        title = QLabel('<b>Multi Charts</b>')
-        self.set_theme_role(title, 'page_title')
-        toolbar.addWidget(title)
-        toolbar.addSpacing(16)
+        if show_title:
+            title = QLabel('<b>Multi Charts</b>')
+            self.set_theme_role(title, 'page_title')
+            toolbar.addWidget(title)
+            toolbar.addSpacing(16)
 
         self._mc_tab_group = QButtonGroup(self)
         self._mc_tab_group.setExclusive(True)
@@ -157,6 +162,7 @@ class MultiChartsMixin:
         self.set_theme_variant(refresh_btn, 'accent')
         refresh_btn.setFixedHeight(28)
         refresh_btn.clicked.connect(self._mc_refresh_all)
+        self._mc_refresh_btn = refresh_btn
         toolbar.addWidget(refresh_btn)
 
         toolbar.addStretch()
@@ -178,15 +184,42 @@ class MultiChartsMixin:
         layout.addWidget(self._mc_scroll, 1)
 
     def _mc_on_show(self) -> None:
-        """Called when Multi Charts page is shown."""
+        """Refresh the Multi Charts symbol grid when its view becomes visible."""
         symbols = self._mc_get_active_symbols()
         self._mc_sync_grid(symbols)
         if not self._mc_charts:
+            self._mc_set_status('', 'muted')
+            self._mc_sync_status_to_status_bar()
             return
         for sym in symbols:
             entry = self._mc_charts.get(sym)
             if entry and entry.get('df') is None:
                 self._mc_fetch_single(sym)
+        self._mc_sync_status_to_status_bar()
+
+    def _mc_set_status(self, text: Any, status: Any = 'muted') -> None:
+        """Set the Multi Charts status label and mirror it when visible."""
+        if not hasattr(self, '_mc_status'):
+            return
+        self.set_status_text(self._mc_status, text, status=str(status))
+        self._mc_sync_status_to_status_bar()
+
+    def _mc_sync_status_to_status_bar(self) -> None:
+        """Mirror the Multi Charts status into the shared footer when active."""
+        if not hasattr(self, 'status_bar') or not hasattr(self, '_mc_status'):
+            return
+        is_active = (
+            hasattr(self, '_p10_active_subtab_key')
+            and callable(getattr(self, '_p10_active_subtab_key'))
+            and self._p10_active_subtab_key() == 'multicharts'
+        )
+        if not is_active:
+            return
+        self.set_status_text(
+            self.status_bar,
+            self._mc_status.text(),
+            status=str(self._mc_status.property('bt_status') or 'muted'),
+        )
 
     def _mc_switch_tab(self, tab_key: str) -> None:
         """Switch between Portfolio and Watchlist tabs."""
@@ -257,7 +290,7 @@ class MultiChartsMixin:
         self._mc_add_input.clear()
         existing = self._mc_get_all_symbols()
         if text in existing:
-            self._mc_status.setText(f'{text} already shown.')
+            self._mc_set_status(f'{text} already shown.', 'warning')
             return
         self._mc_custom_symbols.append(text)
         self._mc_sync_grid(self._mc_get_all_symbols())
@@ -267,11 +300,11 @@ class MultiChartsMixin:
     def _mc_remove_symbol(self, symbol: str) -> None:
         """Remove a custom symbol (portfolio/watchlist symbols can't be removed here)."""
         if self._mc_active_tab == 'watchlist':
-            self._mc_status.setText(f'{symbol} is in your watchlist \u2014 remove it in Charts.')
+            self._mc_set_status(f'{symbol} is in your watchlist \u2014 remove it in Charts.', 'warning')
             return
         portfolio = set(s.upper() for s in getattr(self, 'tickers', []))
         if symbol.upper() in portfolio:
-            self._mc_status.setText(f'{symbol} is in your portfolio \u2014 remove it there.')
+            self._mc_set_status(f'{symbol} is in your portfolio \u2014 remove it there.', 'warning')
             return
         self._mc_custom_symbols = [s for s in self._mc_custom_symbols if s.upper() != symbol.upper()]
         if symbol in self._mc_charts:
@@ -280,7 +313,7 @@ class MultiChartsMixin:
             entry['frame'].deleteLater()
         self._mc_relayout()
         self._mc_save_state()
-        self._mc_status.setText(f'Removed {symbol}.')
+        self._mc_set_status(f'Removed {symbol}.', 'muted')
 
     def _mc_open_reorder_dialog(self) -> None:
         """Open a drag-and-drop dialog to reorder charts."""
@@ -385,6 +418,8 @@ class MultiChartsMixin:
             symbols = self._mc_get_active_symbols()
             if symbols:
                 self._mc_sync_grid(symbols)
+        if symbols:
+            self._mc_set_status(f'Loading {len(symbols)} chart{"s" if len(symbols) != 1 else ""}...', 'info')
         for sym in symbols:
             self._mc_fetch_single(sym)
 
@@ -399,6 +434,9 @@ class MultiChartsMixin:
             self._mc_charts[sym] = self._mc_create_chart_card(sym)
 
         self._mc_relayout()
+        if not symbols:
+            self._mc_set_status('', 'muted')
+            return
 
         for sym in symbols:
             self._mc_fetch_single(sym)
@@ -532,6 +570,7 @@ class MultiChartsMixin:
         card_layout.addWidget(status_label)
 
         return {
+            'symbol': symbol,
             'frame': frame,
             'plot': plot,
             'view_box': view_box,
@@ -633,6 +672,10 @@ class MultiChartsMixin:
         if symbol in self._mc_fetching:
             return
         self._mc_fetching.add(symbol)
+        self._mc_set_status(
+            f'Loading {len(self._mc_fetching)} chart{"s" if len(self._mc_fetching) != 1 else ""}...',
+            'info',
+        )
         entry = self._mc_charts.get(symbol)
         if entry:
             entry['status_label'].setText('Loading...')
@@ -688,9 +731,9 @@ class MultiChartsMixin:
         self._mc_render_chart(symbol, entry, df)
         remaining = len(self._mc_fetching)
         if remaining > 0:
-            self._mc_status.setText(f'Loading {remaining} chart{"s" if remaining > 1 else ""}...')
+            self._mc_set_status(f'Loading {remaining} chart{"s" if remaining > 1 else ""}...', 'info')
         else:
-            self._mc_status.setText('')
+            self._mc_set_status('', 'muted')
 
     def _mc_on_fetch_error(self, symbol: str, error: str) -> None:
         """Handle chart fetch error on the main thread."""
@@ -703,7 +746,9 @@ class MultiChartsMixin:
             )
         remaining = len(self._mc_fetching)
         if remaining == 0:
-            self._mc_status.setText('')
+            self._mc_set_status('', 'muted')
+        else:
+            self._mc_set_status(f'Loading {remaining} chart{"s" if remaining != 1 else ""}...', 'info')
 
     # ------------------------------------------------------------------
     # Rendering
@@ -782,6 +827,53 @@ class MultiChartsMixin:
         new_cols = self._mc_compute_cols()
         if new_cols != self._mc_cols:
             self._mc_relayout()
+
+    def _mc_apply_theme(self) -> None:
+        """Refresh Multi Charts widgets after a theme change."""
+        for symbol, entry in getattr(self, '_mc_charts', {}).items():
+            frame = entry.get('frame')
+            if frame is not None:
+                frame.setStyleSheet(
+                    f'QFrame {{ background-color: {self.theme_color("panel_background")}; '
+                    f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}'
+                )
+            sym_label = entry.get('sym_label')
+            if sym_label is not None:
+                sym_label.setStyleSheet(
+                    f'color: {self.theme_color("text_primary")}; font-size: 14px; border: none;'
+                )
+            remove_btn = entry.get('remove_btn')
+            if remove_btn is not None:
+                remove_btn.setStyleSheet(
+                    f'QPushButton {{ color: {self.theme_color("text_muted")}; background: transparent; '
+                    f'border: none; font-size: 16px; font-weight: bold; }} '
+                    f'QPushButton:hover {{ color: {self.theme_color("accent_negative")}; }}'
+                )
+            plot = entry.get('plot')
+            if plot is not None:
+                self.style_plot_widget(plot)
+            df = entry.get('df')
+            if df is not None and not df.empty:
+                self._mc_render_chart(symbol, entry, df)
+            else:
+                price_label = entry.get('price_label')
+                if price_label is not None:
+                    price_label.setStyleSheet(
+                        f'color: {self.theme_color("text_muted")}; font-size: 12px; border: none;'
+                    )
+                change_label = entry.get('change_label')
+                if change_label is not None:
+                    change_label.setStyleSheet(
+                        f'color: {self.theme_color("text_muted")}; font-size: 12px; border: none;'
+                    )
+                status_label = entry.get('status_label')
+                if status_label is not None:
+                    status_color = 'accent_negative' if status_label.text().startswith('Error:') else 'text_muted'
+                    status_label.setStyleSheet(
+                        f'color: {self.theme_color(status_color)}; font-size: 10px; border: none;'
+                    )
+        if hasattr(self, '_mc_status'):
+            self._mc_set_status(self._mc_status.text(), self._mc_status.property('bt_status') or 'muted')
 
     def eventFilter(self, obj: Any, event: Any) -> bool:
         """Intercept viewport resize for responsive relayout."""

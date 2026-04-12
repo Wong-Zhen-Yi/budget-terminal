@@ -4,6 +4,7 @@ from typing import Any
 from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QBrush, QFont, QPen
 from ..compat import *
+from budget_terminal_app.workers.pre_market import PreMarketWorker
 
 
 def _fg_score_color(score: float | None) -> str:
@@ -198,7 +199,7 @@ class PreMarketMixin:
         self.set_theme_role(futures_title, 'section_title')
         futures_title.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
         futures_lay.addWidget(futures_title)
-        self.p14_futures_table = QTableWidget(3, 5)
+        self.p14_futures_table = QTableWidget(len(PreMarketWorker._FUTURES_CONTRACTS), 5)
         self.p14_futures_table.setHorizontalHeaderLabels(['Ticker', 'Name', 'Price', 'Chg %', 'Direction'])
         futures_header = self.p14_futures_table.horizontalHeader()
         futures_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -454,7 +455,6 @@ class PreMarketMixin:
 
     def _p14_on_data(self, result: dict) -> None:
         self.p14_refresh_btn.setEnabled(True)
-        self.set_status_text(self.p14_status_lbl, 'Data loaded', status='positive')
 
         # Futures
         futures = result.get('futures', [])
@@ -560,6 +560,21 @@ class PreMarketMixin:
                 )
             elif last_close is not None:
                 self.p14_momentum_lbl.setText(f'SPY: ${last_close:.2f} | 125-day MA: -- | --')
+
+        has_other_data = any(
+            bool(result.get(key))
+            for key in ('dxy', 'tnx', 'vix', 'fear_greed', 'spy_momentum')
+        )
+        if futures:
+            self.set_status_text(self.p14_status_lbl, 'Data loaded', status='positive')
+        elif has_other_data:
+            self.set_status_text(
+                self.p14_status_lbl,
+                'Pre-market data loaded, but futures were unavailable.',
+                status='warning',
+            )
+        else:
+            self.set_status_text(self.p14_status_lbl, 'Pre-market data unavailable.', status='warning')
 
     def _p14_on_error(self, msg: str) -> None:
         self.p14_refresh_btn.setEnabled(True)

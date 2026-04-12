@@ -4,6 +4,15 @@ from ..dependencies import *
 
 
 class PreMarketWorker(QObject):
+    # Yahoo's DX=F lookup is currently unavailable; DXY is shown via _fetch_dxy().
+    _FUTURES_CONTRACTS = (
+        ('ES=F', 'S&P 500'),
+        ('NQ=F', 'Nasdaq 100'),
+        ('YM=F', 'Dow Jones'),
+        ('CL=F', 'WTI Crude'),
+        ('ZB=F', 'T-Bond'),
+    )
+
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
@@ -27,26 +36,72 @@ class PreMarketWorker(QObject):
 
     def _fetch_futures(self) -> list[dict]:
         rows = []
-        names = {'ES=F': 'S&P 500', 'NQ=F': 'Nasdaq 100', 'YM=F': 'Dow Jones'}
-        for ticker in ('ES=F', 'NQ=F', 'YM=F'):
+        for ticker, name in self._FUTURES_CONTRACTS:
             try:
-                with YF_LOCK:
-                    df = yf.Ticker(ticker).history(period='2d', interval='1h')
-                if df is None or df.empty or len(df) < 2:
+                df, source_label = self._fetch_futures_history(ticker)
+                closes = self._extract_close_series(df, ticker)
+                if len(closes) < 2:
+                    logger.warning('Futures data unavailable for %s after intraday and daily fallback.', ticker)
                     continue
-                closes = df['Close'].dropna()
                 current = float(closes.iloc[-1])
-                prior_day = df[df.index.date < df.index.date[-1]]
-                if prior_day.empty:
-                    prior_close = float(closes.iloc[0])
-                else:
-                    prior_close = float(prior_day['Close'].dropna().iloc[-1])
+                prior_close = self._resolve_futures_prior_close(df, ticker, closes)
+                if prior_close is None:
+                    logger.warning('Futures prior-close calculation failed for %s using %s data.', ticker, source_label)
+                    continue
                 chg_pct = (current - prior_close) / prior_close * 100 if prior_close else 0
                 direction = 'Up' if chg_pct > 0.05 else ('Down' if chg_pct < -0.05 else 'Flat')
-                rows.append({'ticker': ticker, 'name': names.get(ticker, ''), 'price': current, 'change_pct': chg_pct, 'direction': direction})
+                rows.append({'ticker': ticker, 'name': name, 'price': current, 'change_pct': chg_pct, 'direction': direction})
             except Exception as ex:
                 logger.warning(f'Futures fetch error {ticker}: {ex}')
+        if not rows:
+            logger.warning('Pre-market futures data unavailable for all configured contracts.')
         return rows
+
+    def _fetch_futures_history(self, ticker: str) -> tuple[Any, str]:
+        """Fetch futures history, preferring hourly data and falling back to daily bars."""
+        with YF_LOCK:
+            intraday = yf.Ticker(ticker).history(period='5d', interval='1h')
+        if intraday is not None and not intraday.empty:
+            return intraday, 'hourly'
+        logger.info('Futures intraday data unavailable for %s; falling back to daily bars.', ticker)
+        with YF_LOCK:
+            daily = yf.Ticker(ticker).history(period='5d', interval='1d')
+        return daily, 'daily'
+
+    @staticmethod
+    def _extract_close_series(df: Any, ticker: str) -> Any:
+        """Return a normalized close series from Yahoo output."""
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+        close_data = df.get('Close')
+        if close_data is None:
+            return pd.Series(dtype=float)
+        if isinstance(close_data, pd.DataFrame):
+            if ticker in close_data.columns:
+                close_data = close_data[ticker]
+            else:
+                close_data = close_data.iloc[:, 0]
+        closes = pd.to_numeric(close_data, errors='coerce').dropna()
+        if getattr(closes, 'empty', True):
+            return pd.Series(dtype=float)
+        return closes
+
+    def _resolve_futures_prior_close(self, df: Any, ticker: str, closes: Any) -> float | None:
+        """Resolve the previous-session close for intraday or daily futures data."""
+        if df is None or df.empty or len(closes) < 2:
+            return None
+        try:
+            last_session_date = pd.Timestamp(df.index[-1]).date()
+        except Exception:
+            return float(closes.iloc[-2]) if len(closes) >= 2 else None
+        try:
+            prior_frame = df[df.index.date < last_session_date]
+        except Exception:
+            prior_frame = None
+        prior_closes = self._extract_close_series(prior_frame, ticker)
+        if not prior_closes.empty:
+            return float(prior_closes.iloc[-1])
+        return float(closes.iloc[-2]) if len(closes) >= 2 else None
 
     def _fetch_dxy(self) -> dict:
         try:

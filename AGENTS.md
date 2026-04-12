@@ -1,19 +1,58 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`budget_terminal.py` is the main application and contains the PyQt6 UI, data workers, charting, caching, and persistence logic. Supporting scripts such as `check_news.py`, `debug_yf.py`, `inspect_cache.py`, and `test_options_fetch.py` are root-level utilities for targeted debugging. Runtime data files like `portfolio.json` and `portfolio_tracker.json` also live at the repository root. GitHub automation is under `.github/workflows/` and `.github/commands/`.
+`budget_terminal.py` is the top-level launcher. The live PyQt6 application now lives under `budget_terminal_app/`, with `main.py` creating the Qt app and `app.py` defining `BudgetTerminalApp`.
+
+Keep changes close to the subsystem they affect:
+- `budget_terminal_app/mixins/`: window, page, and feature behavior
+- `budget_terminal_app/workers/`: background data fetchers and signal-driven tasks
+- `budget_terminal_app/widgets/`: custom charts and visual widgets
+- `budget_terminal_app/themes/`: theme tokens and theme implementations
+- `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
+
+Root-level scripts such as `test_options_fetch.py`, `debug_yf.py`, `inspect_cache.py`, and related helpers are ad hoc diagnostics and smoke tests. Build and release artifacts live in `build/`, `dist/`, and `release/` and should be treated as generated output unless a task explicitly targets packaging.
 
 ## Build, Test, and Development Commands
-Create a virtual environment and install dependencies with `python -m venv .venv` and `.\.venv\Scripts\pip install -r requirements.txt`. Run the desktop app with `python budget_terminal.py`. Use `python test_options_fetch.py` to sanity-check Yahoo Finance options access, and `python -m compileall budget_terminal.py` for a quick syntax check before submitting changes.
+Create a virtual environment with `python -m venv .venv`, then install dependencies with `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+
+Common commands:
+- `python budget_terminal.py`: launch the desktop app
+- `python -m compileall budget_terminal.py budget_terminal_app`: quick syntax check for the launcher and package
+- `python test_options_fetch.py`: smoke-test Yahoo Finance options fetching
+- `.\build_exe.bat`: build the Windows executable package
+
+If a change affects a specific helper script, run that script directly as part of verification.
 
 ## Coding Style & Naming Conventions
-Follow the existing Python style in `budget_terminal.py`: 4-space indentation, `snake_case` for functions and variables, `PascalCase` for classes, and uppercase names for module-level constants like `PORTFOLIO_FILE`. Keep new helpers close to the feature they support, and prefer small, targeted edits over broad reformatting. There is no configured formatter in this checkout, so preserve the current layout and import style.
+Follow the existing Python style already used throughout the package:
+- 4-space indentation
+- `snake_case` for functions, methods, and variables
+- `PascalCase` for classes
+- `UPPER_CASE` for module-level constants
+
+Prefer small, targeted edits over sweeping rewrites. Add new helpers in the module that owns the behavior, or in the nearest shared support module when the logic is reused across features. Preserve the current import style and file layout unless the task specifically requires refactoring.
 
 ## Testing Guidelines
-This repository does not include a formal `pytest` suite yet. Treat focused scripts as smoke tests and run the ones relevant to your change. For UI or persistence updates, verify that the app launches cleanly, data files still load, and any edited workflow or utility script runs without tracebacks. Name new ad hoc test scripts `test_<feature>.py` for consistency with the existing root-level pattern.
+There is no formal `pytest` suite in this checkout, so validation is primarily smoke-test based. Run the checks that match the code you touched.
+
+Typical verification:
+- launch the app for UI, startup, theme, or persistence changes
+- run `python -m compileall budget_terminal.py budget_terminal_app` for Python edits
+- run focused root-level test or debug scripts for data-fetching changes
+- confirm modified workflows or packaging scripts execute without obvious errors when relevant
+
+Name any new ad hoc verification script `test_<feature>.py` and keep it at the repository root unless there is a clear reason to colocate it elsewhere.
 
 ## Commit & Pull Request Guidelines
-Git history is not available in this workspace snapshot, so no repository-specific commit convention can be confirmed here. Use short, imperative commit subjects such as `Fix tracker totals rounding` or `Add cache guard for options fetch`. Pull requests should describe the user-visible change, list manual verification steps, and include screenshots when the UI changes.
+Git history may not be available in every workspace snapshot, so use short, imperative commit titles such as `Fix options refresh state` or `Update theme token defaults`.
+
+Pull requests should include:
+- a brief user-facing summary
+- manual verification steps
+- screenshots for UI changes
+- packaging notes when the executable build flow changes
 
 ## Configuration & Data Safety
-Do not commit personal portfolio data, API credentials, or generated cache files. Keep any new local-only outputs alongside the existing JSON/cache files or in a dedicated ignored directory such as `screenshots/`.
+Do not commit personal portfolio data, API keys, generated cache databases, or machine-specific runtime files. Be careful around JSON and cache files in the repository root and any app data mirrored during local testing.
+
+For packaged builds, user-writable data belongs under `%LOCALAPPDATA%\BudgetTerminal`. Keep new local-only outputs in ignored locations such as `screenshots/` or other clearly temporary directories.

@@ -44,7 +44,9 @@ class StocksPageMixin:
         self.stocks_page_state['symbol'] = self.stocks_symbol
         self._stocks_request_seq = 0
         self._stocks_active_request = 0
+        self._stocks_request_contexts = {}
         self._stocks_loaded_once = False
+        self._stocks_loaded_payload = None
         self._stocks_chart_df = None
         self._stocks_chart_rows = []
         self._stocks_chart_stats = {}
@@ -341,6 +343,46 @@ class StocksPageMixin:
             self._stocks_loaded_once = True
             self._stocks_load_from_input()
 
+    def _stocks_session_snapshot(self) -> dict[str, Any] | None:
+        """Return the current Stocks workspace snapshot when data is loaded."""
+        payload = getattr(self, '_stocks_loaded_payload', None)
+        if not isinstance(payload, dict):
+            return None
+        symbol = str(payload.get('symbol', '') or '').upper().strip()
+        if not symbol:
+            return None
+        return {
+            'symbol': symbol,
+            'payload': serialize_session_value(payload),
+        }
+
+    def _stocks_save_session_snapshot(self, *, immediate: bool=False) -> None:
+        """Persist the latest Stocks workspace snapshot."""
+        if hasattr(self, '_set_tab_session_snapshot'):
+            self._set_tab_session_snapshot('stocks', self._stocks_session_snapshot(), immediate=immediate)
+
+    def _stocks_restore_session_snapshot(self, snapshot: Any) -> bool:
+        """Restore the Stocks workspace from cached session data."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        restored_payload = deserialize_session_value(payload.get('payload'))
+        if not isinstance(restored_payload, dict):
+            return False
+        self._stocks_loaded_once = True
+        self._stocks_apply_payload_to_ui(
+            restored_payload,
+            include_global_status=False,
+            update_collection_info=False,
+            status_text=f"Restored last session for {str(restored_payload.get('symbol', '') or self.stocks_symbol).upper().strip()}.",
+        )
+        return True
+
+    def _stocks_restore_startup_session(self, snapshot: Any) -> None:
+        """Hydrate Stocks from the last session, then refresh it in the background."""
+        restored = self._stocks_restore_session_snapshot(snapshot)
+        symbol = str(self.stocks_symbol_input.text() or self.stocks_symbol or '').upper().strip()
+        if restored and symbol:
+            self._stocks_load_from_input(include_global_status=False, update_collection_info=False)
+
     def _stocks_save_state(self) -> None:
         self.stocks_page_state = save_stocks_page_settings({
             **getattr(self, 'stocks_page_state', {}),
@@ -375,9 +417,9 @@ class StocksPageMixin:
     def _stocks_on_splitter_moved(self, *_: Any) -> None:
         self._stocks_save_state()
 
-    def _stocks_set_status(self, text: Any, status: Any='muted') -> None:
+    def _stocks_set_status(self, text: Any, status: Any='muted', *, include_global: bool=True) -> None:
         self.set_status_text(self.stocks_status_label, text, status=str(status))
-        if hasattr(self, 'status_bar'):
+        if include_global and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
     def _stocks_update_auto_button_style(self) -> None:
@@ -505,7 +547,7 @@ class StocksPageMixin:
         else:
             self._stocks_manual_x_range = current_range
 
-    def _stocks_load_from_input(self) -> None:
+    def _stocks_load_from_input(self, *_: Any, include_global_status: bool=True, update_collection_info: bool=True) -> None:
         symbol = str(self.stocks_symbol_input.text() or self.stocks_symbol or 'SPY').upper().strip() or 'SPY'
         self.stocks_symbol = symbol
         self.stocks_symbol_input.setText(symbol)
@@ -517,8 +559,12 @@ class StocksPageMixin:
         self._stocks_request_seq += 1
         request_id = self._stocks_request_seq
         self._stocks_active_request = request_id
+        self._stocks_request_contexts[request_id] = {
+            'include_global_status': bool(include_global_status),
+            'update_collection_info': bool(update_collection_info),
+        }
         self.stocks_load_btn.setEnabled(False)
-        self._stocks_set_status(f'Loading {symbol}...', 'info')
+        self._stocks_set_status(f'Loading {symbol}...', 'info', include_global=include_global_status)
 
         def _run() -> None:
             try:
@@ -602,13 +648,20 @@ class StocksPageMixin:
                 articles.append(article)
         return articles
 
-    def _stocks_apply_payload(self, request_id: int, payload: dict[str, Any]) -> None:
-        if request_id != self._stocks_active_request:
-            return
+    def _stocks_apply_payload_to_ui(
+        self,
+        payload: dict[str, Any],
+        *,
+        include_global_status: bool=True,
+        update_collection_info: bool=True,
+        status_text: str | None=None,
+    ) -> None:
+        """Apply one fetched or restored Stocks payload to the UI."""
         chart_payload = payload.get('chart', {})
         self._stocks_info = payload.get('info', {}) if isinstance(payload.get('info', {}), dict) else {}
         self.stocks_symbol = str(payload.get('symbol') or self.stocks_symbol).upper().strip()
         self._stocks_loaded_symbol = self.stocks_symbol
+        self._stocks_loaded_payload = payload
         self.stocks_symbol_input.setText(self.stocks_symbol)
         self._stocks_save_state()
         self._stocks_chart_df = chart_payload.get('df')
@@ -631,15 +684,34 @@ class StocksPageMixin:
         self._stocks_render_insider_rows(self._stocks_loaded_insider_rows)
         self.stocks_load_btn.setEnabled(True)
         self._stocks_pending_x_range = None
-        self._set_data_collection_info(['yfinance'])
-        self._stocks_set_status(f'Loaded {self.stocks_symbol}.', 'positive')
+        if update_collection_info:
+            self._set_data_collection_info(['yfinance'])
+        self._stocks_set_status(status_text or f'Loaded {self.stocks_symbol}.', 'positive', include_global=include_global_status)
+        self._stocks_save_session_snapshot()
+
+    def _stocks_apply_payload(self, request_id: int, payload: dict[str, Any]) -> None:
+        if request_id != self._stocks_active_request:
+            self._stocks_request_contexts.pop(request_id, None)
+            return
+        context = self._stocks_request_contexts.pop(request_id, {})
+        self._stocks_apply_payload_to_ui(
+            payload,
+            include_global_status=bool(context.get('include_global_status', True)),
+            update_collection_info=bool(context.get('update_collection_info', True)),
+        )
 
     def _stocks_handle_error(self, request_id: int, message: str) -> None:
         if request_id != self._stocks_active_request:
+            self._stocks_request_contexts.pop(request_id, None)
             return
+        context = self._stocks_request_contexts.pop(request_id, {})
         self.stocks_load_btn.setEnabled(True)
         self._stocks_pending_x_range = None
-        self._stocks_set_status(f'Stocks load failed: {message}', 'negative')
+        self._stocks_set_status(
+            f'Stocks load failed: {message}',
+            'negative',
+            include_global=bool(context.get('include_global_status', True)),
+        )
 
     def _stocks_render_chart(self) -> None:
         self.style_plot_widget(self.stocks_plot)
@@ -897,29 +969,39 @@ class StocksPageMixin:
 
     def _stocks_go_to_charts(self) -> None:
         symbol = self._stocks_current_symbol()
-        if not symbol or not hasattr(self, 'p10_symbol_input'):
+        if not symbol:
             return
         self.p10_symbol = symbol
-        self.p10_symbol_input.setText(symbol)
-        self.switch_page(self._stocks_page_index('page10', 8))
-        if hasattr(self, '_p10_load_from_input'):
+        if isinstance(getattr(self, 'chart_page_state', None), dict):
+            self.chart_page_state = {
+                **self.chart_page_state,
+                'symbol': symbol,
+            }
+        page_index = self._stocks_page_index('page10', 8)
+        page_ready = self._page_initialized(index=page_index)
+        self.switch_page(page_index)
+        if hasattr(self, 'p10_symbol_input'):
+            self.p10_symbol_input.setText(symbol)
+        if page_ready and hasattr(self, '_p10_load_from_input'):
             self._p10_load_from_input()
 
     def _stocks_go_to_fundamentals(self) -> None:
         symbol = self._stocks_current_symbol()
-        if not symbol or not hasattr(self, 'p2_ticker_input'):
+        if not symbol:
             return
-        self.p2_ticker_input.setText(symbol)
         self.switch_page(self._stocks_page_index('page2', 7))
+        if hasattr(self, 'p2_ticker_input'):
+            self.p2_ticker_input.setText(symbol)
         if hasattr(self, 'analyze_stock_p2'):
             self.analyze_stock_p2()
 
     def _stocks_go_to_options(self) -> None:
         symbol = self._stocks_current_symbol()
-        if not symbol or not hasattr(self, 'p5_ticker_input'):
+        if not symbol:
             return
-        self.p5_ticker_input.setText(symbol)
         self.switch_page(self._stocks_page_index('page5', 10))
+        if hasattr(self, 'p5_shared_ticker_input'):
+            self.p5_shared_ticker_input.setText(symbol)
         if hasattr(self, '_p5_load_expiries'):
             self._p5_load_expiries()
 

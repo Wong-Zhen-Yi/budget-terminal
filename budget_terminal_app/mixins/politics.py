@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.workers.politics import PoliticsExportWorker, PoliticsWorker
 
 PARTY_COLORS = {'Democrat': '#2196f3', 'Republican': '#f44336', 'Independent': '#9e9e9e', 'Unknown': '#666666'}
 TRADE_COLORS = {'Purchase': '#00c853', 'Sale (Full)': '#ff1744', 'Sale (Partial)': '#ff5252', 'Exchange': '#ffc107'}
@@ -547,13 +548,22 @@ class PoliticsMixin:
 
     def _p15_navigate_to_charts(self, ticker: str) -> None:
         ticker = str(ticker or '').upper().strip()
-        if not ticker or not hasattr(self, 'p10_symbol_input'):
+        if not ticker:
             return
-        self.p10_symbol_input.setText(ticker)
-        if hasattr(self, '_p10_load_from_input'):
-            self._p10_load_from_input()
+        self.p10_symbol = ticker
+        if isinstance(getattr(self, 'chart_page_state', None), dict):
+            self.chart_page_state = {
+                **self.chart_page_state,
+                'symbol': ticker,
+            }
         page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
-        self.switch_page(page_index if page_index >= 0 else 8)
+        target_index = page_index if page_index >= 0 else 8
+        page_ready = self._page_initialized(index=target_index)
+        self.switch_page(target_index)
+        if hasattr(self, 'p10_symbol_input'):
+            self.p10_symbol_input.setText(ticker)
+        if page_ready and hasattr(self, '_p10_load_from_input'):
+            self._p10_load_from_input()
 
     def _apply_politics_theme(self) -> None:
         bg = self.theme_color('panel_background')

@@ -2,6 +2,14 @@ from __future__ import annotations
 import calendar as _calendar_mod
 from typing import Any
 from ..compat import *
+from budget_terminal_app.workers.calendar import (
+    CalendarWorker,
+    MarketHolidayWarmupWorker,
+    _get_economic_events,
+    _get_economic_events_for_year,
+    _get_market_holiday_events,
+    _market_holidays_cached_for_year,
+)
 
 _P7_SPLITTER_CONFIG = user_data_path('p7_splitter.json')
 _P7_SPLITTER_PANE_COUNT = 5
@@ -18,6 +26,44 @@ class CalendarPageMixin:
     def _p7_on_calendar_filter_changed(self, *_: Any) -> None:
         """Re-render the calendar immediately when a category toggle changes."""
         self._p7_render_month()
+
+    def _p7_queue_market_holiday_year(self, year: Any, *, force_refresh: bool=False) -> None:
+        """Warm the selected market-holiday year in the background when cache is missing."""
+        try:
+            year_value = int(year)
+        except (TypeError, ValueError):
+            return
+        if (not force_refresh) and _market_holidays_cached_for_year(year_value):
+            return
+        pending_years = list(getattr(self, '_p7_market_holiday_pending_years', []))
+        if year_value not in pending_years:
+            pending_years.append(year_value)
+        self._p7_market_holiday_pending_years = pending_years
+        self._p7_market_holiday_force_refresh = bool(getattr(self, '_p7_market_holiday_force_refresh', False) or force_refresh)
+        self._p7_start_market_holiday_warmup()
+
+    def _p7_start_market_holiday_warmup(self) -> None:
+        """Launch one background warmup worker for any pending market-holiday years."""
+        if getattr(self, '_p7_market_holiday_fetching', False):
+            return
+        years = list(getattr(self, '_p7_market_holiday_pending_years', []))
+        if not years:
+            return
+        self._p7_market_holiday_pending_years = []
+        force_refresh = bool(getattr(self, '_p7_market_holiday_force_refresh', False))
+        self._p7_market_holiday_force_refresh = False
+        self._launch_worker(
+            MarketHolidayWarmupWorker(years, force_refresh=force_refresh),
+            self._p7_on_market_holidays_ready,
+            '_p7_market_holiday_fetching',
+        )
+
+    def _p7_on_market_holidays_ready(self, _results: Any) -> None:
+        """Re-render the calendar once background market-holiday data is ready."""
+        self._p7_market_holiday_fetching = False
+        if hasattr(self, 'p7_month_label'):
+            self._p7_render_month()
+        self._p7_start_market_holiday_warmup()
 
     def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 6) -> None:
         """Set all detail tables to the same height based on the tallest one."""
@@ -114,11 +160,11 @@ class CalendarPageMixin:
                     item.setForeground(QColor(color))
                 table.setItem(i, col, item)
 
-    def _p7_collect_year_market_holidays(self, year: Any) -> Any:
+    def _p7_collect_year_market_holidays(self, year: Any, *, blocking: bool=True) -> Any:
         """Return holiday and early-close rows for the displayed calendar year."""
         rows = []
         for event_month in range(1, 13):
-            for event in _get_market_holiday_events(year, event_month):
+            for event in _get_market_holiday_events(year, event_month, blocking=blocking):
                 event_date = event.get('date')
                 if event_date is None:
                     continue
@@ -200,6 +246,7 @@ class CalendarPageMixin:
         today = self._p7_get_reference_today()
         self._p7_year = today.year
         self._p7_month = today.month
+        self._p7_queue_market_holiday_year(self._p7_year)
         self._p7_render_month()
 
     def init_page7(self) -> None:
@@ -399,7 +446,9 @@ class CalendarPageMixin:
         self._p7_events = {}
         self._p7_fetching = False
         self._p7_force_economic_refresh = False
-        self._p7_render_month()
+        self._p7_market_holiday_fetching = False
+        self._p7_market_holiday_force_refresh = False
+        self._p7_market_holiday_pending_years = []
         self._p7_apply_detail_table_widths()
 
     def _p7_change_month(self, delta: Any, *_: Any) -> None:
@@ -414,11 +463,13 @@ class CalendarPageMixin:
             y += 1
         self._p7_month = m
         self._p7_year = y
+        self._p7_queue_market_holiday_year(self._p7_year)
         self._p7_render_month()
 
     def _p7_fetch_events(self) -> None:
         """Handle p7 fetch events."""
         self._p7_force_economic_refresh = True
+        self._p7_queue_market_holiday_year(self._p7_year, force_refresh=True)
         self._launch_worker(CalendarWorker(self.tickers[:]), self._p7_on_events_ready, '_p7_fetching')
 
     def _p7_on_events_ready(self, results: Any) -> None:
@@ -446,9 +497,11 @@ class CalendarPageMixin:
                 _get_economic_events_for_year(econ_year, force_refresh=True)
             self._p7_force_economic_refresh = False
         self.p7_month_label.setText(f'{calendar.month_name[month]} {year}')
-        _ECON_COLORS = {'FOMC Decision': '#e040fb', 'CPI Release': '#ff5252', 'NFP Jobs Report': '#ffab40', 'PCE Inflation': '#7c4dff', 'GDP Report': '#69f0ae'}
+        _ECON_COLORS = {'FOMC Decision': '#e040fb', 'PCE Inflation': '#7c4dff', 'GDP Report': '#69f0ae'}
         econ_events = _get_economic_events(year, month) if show_econ else []
-        market_holiday_events = _get_market_holiday_events(year, month) if show_market_holidays else []
+        if show_market_holidays:
+            self._p7_queue_market_holiday_year(year)
+        market_holiday_events = _get_market_holiday_events(year, month, blocking=False) if show_market_holidays else []
         date_events = {}
         if show_market_holidays:
             for event in market_holiday_events:
@@ -519,7 +572,7 @@ class CalendarPageMixin:
                 cell.setStyleSheet(f'QLabel {{ background: {bg}; border: 1px solid {border}; border-radius: 4px; padding: 3px; font-size: 10px; min-height: 70px; }}')
         economic_events = []
         company_events = []
-        holiday_events = self._p7_collect_year_market_holidays(year) if show_market_holidays else []
+        holiday_events = self._p7_collect_year_market_holidays(year, blocking=False) if show_market_holidays else []
         if hasattr(self, 'p7_market_holidays_label'):
             self.p7_market_holidays_label.setText(
                 f'<b>US Market Holidays & Early Closes</b>  <span style="color: #9aa4ad;">{year}</span>'
@@ -574,7 +627,7 @@ class CalendarPageMixin:
         # --- Collect market holidays and early closes ---
         market_holiday_events = []
         if inc_market_holidays:
-            for event in _get_market_holiday_events(year, month):
+            for event in _get_market_holiday_events(year, month, blocking=True):
                 event_date = event.get('date')
                 if event_date is None:
                     continue

@@ -3,6 +3,9 @@ from typing import Any
 from ..compat import *
 
 class WindowLifecycleMixin:
+    _STARTUP_SESSION_RESTORE_INITIAL_DELAY_MS = 350
+    _STARTUP_SESSION_RESTORE_STEP_MS = 250
+
     def _get_tzinfo(self, idx: Any) -> Any:
         """Resolve a UI timezone selection into a tzinfo object."""
         if idx is None or idx < 0 or idx >= len(self._tz_choices):
@@ -70,12 +73,169 @@ class WindowLifecycleMixin:
         self._pages[index] = {'btn': btn, 'on_show': on_show, 'on_hide': on_hide}
         btn.clicked.connect(partial(self.switch_page, index))
 
+    def showEvent(self, event: Any) -> None:
+        """Start deferred startup work only after the window has been shown once."""
+        super().showEvent(event)
+        if getattr(self, '_startup_show_completed', False):
+            return
+        self._startup_show_completed = True
+        self._startup_profiler_stamp('window_shown')
+        profiler = getattr(self, '_startup_profiler', None)
+        if profiler is not None:
+            profiler.log_summary()
+        self._schedule_startup_refresh()
+        self._schedule_startup_page_prefetches()
+        self._schedule_startup_session_restores()
+        self._start_lazy_warmup()
+
+    def _schedule_startup_refresh(self) -> None:
+        """Queue the first dashboard refresh for the next event turn after first paint."""
+        if getattr(self, '_startup_refresh_pending', False):
+            return
+        self._startup_refresh_pending = True
+        QTimer.singleShot(0, self._run_startup_refresh)
+
+    def _run_startup_refresh(self) -> None:
+        """Run the deferred startup refresh once the window is visible."""
+        self._startup_refresh_pending = False
+        if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
+            return
+        self._startup_profiler_stamp('startup_refresh_start')
+        self.refresh_data(force=True)
+
+    def _schedule_startup_page_prefetches(self) -> None:
+        """Queue eager post-show page data work without blocking first paint."""
+        if getattr(self, '_startup_page_prefetch_pending', False):
+            return
+        self._startup_page_prefetch_pending = True
+        QTimer.singleShot(0, self._run_startup_page_prefetches)
+
+    def _run_startup_page_prefetches(self) -> None:
+        """Kick off background data loads for startup-priority secondary pages."""
+        self._startup_page_prefetch_pending = False
+        if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
+            return
+        self._ensure_page_initialized(5)
+        self._call_if_page_initialized(
+            '_p8_request_refresh',
+            page_attr='page8',
+            status_text='Loading sector data...',
+        )
+
+    def _startup_session_restore_specs(self) -> list[dict[str, Any]]:
+        """Return the tab-session restore tasks that should run after first paint."""
+        specs = [
+            {'tab_key': 'stocks', 'page_index': 6, 'restore_method': '_stocks_restore_startup_session'},
+            {'tab_key': 'fundamentals', 'page_index': 7, 'restore_method': '_p2_restore_startup_session'},
+            {'tab_key': 'options', 'page_index': 10, 'restore_method': '_p5_restore_startup_session'},
+            {'tab_key': 'etf', 'page_index': 11, 'restore_method': '_p13_restore_startup_session'},
+            {'tab_key': 'youtube', 'page_index': 14, 'restore_method': '_p16_restore_startup_session'},
+        ]
+        queue = []
+        for spec in specs:
+            snapshot = self._get_tab_session_snapshot(spec['tab_key']) if hasattr(self, '_get_tab_session_snapshot') else None
+            if snapshot:
+                queue.append({**spec, 'snapshot': snapshot})
+        return queue
+
+    def _schedule_startup_session_restores(self) -> None:
+        """Queue hidden last-session tab restores after the dashboard has started loading."""
+        if getattr(self, '_startup_session_restore_pending', False):
+            return
+        queue = self._startup_session_restore_specs()
+        self._startup_session_restore_queue = list(queue)
+        if not queue:
+            return
+        self._startup_session_restore_pending = True
+        QTimer.singleShot(self._STARTUP_SESSION_RESTORE_INITIAL_DELAY_MS, self._run_startup_session_restore_step)
+
+    def _run_startup_session_restore_step(self) -> None:
+        """Build, restore, and silently refresh one cached tab at a time."""
+        self._startup_session_restore_pending = False
+        if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
+            return
+        queue = list(getattr(self, '_startup_session_restore_queue', []))
+        if not queue:
+            return
+        current = queue.pop(0)
+        self._startup_session_restore_queue = queue
+        try:
+            self._ensure_page_initialized(current.get('page_index'))
+            restore_fn = getattr(self, str(current.get('restore_method', '') or ''), None)
+            if callable(restore_fn):
+                restore_fn(current.get('snapshot'))
+        except Exception:
+            logger.exception('Startup session restore failed for %s.', current.get('tab_key'))
+        if self._startup_session_restore_queue:
+            self._startup_session_restore_pending = True
+            QTimer.singleShot(self._STARTUP_SESSION_RESTORE_STEP_MS, self._run_startup_session_restore_step)
+
+    def _start_lazy_warmup(self) -> None:
+        """Warm secondary pages one at a time after the window becomes interactive."""
+        queue = []
+        for button in getattr(self, '_nav_buttons', []):
+            page_index = self._page_index_for_button(button)
+            if page_index in (None, 0) or self._page_initialized(index=page_index):
+                continue
+            if page_index not in queue:
+                queue.append(page_index)
+        priority = {
+            1: 10,
+            2: 20,
+            4: 30,
+            5: 40,
+            6: 50,
+            7: 60,
+            10: 70,
+            11: 80,
+            12: 90,
+            13: 100,
+            14: 110,
+            15: 120,
+            16: 130,
+            8: 140,
+            3: 150,
+        }
+        queue.sort(key=lambda value: priority.get(int(value), 999))
+        self._lazy_warmup_queue = queue
+        timer = getattr(self, '_lazy_page_warmup_timer', None)
+        if timer is None or not queue:
+            return
+        timer.start(getattr(self, '_LAZY_WARMUP_INITIAL_DELAY_MS', 500))
+
+    def _warm_next_page(self) -> None:
+        """Initialize one pending lazy page and reschedule the next warmup step."""
+        while getattr(self, '_lazy_warmup_queue', []):
+            page_index = self._lazy_warmup_queue.pop(0)
+            if self._page_initialized(index=page_index):
+                continue
+            try:
+                with self._startup_profiler_step(f'lazy_page_{int(page_index)}'):
+                    self._build_page_now(page_index)
+            except Exception:
+                logger.exception('Lazy page warmup failed for page index %s.', page_index)
+            break
+        timer = getattr(self, '_lazy_page_warmup_timer', None)
+        if timer is not None and getattr(self, '_lazy_warmup_queue', []):
+            timer.start(getattr(self, '_LAZY_WARMUP_STEP_MS', 75))
+
+    def _ensure_page_initialized(self, index: Any) -> None:
+        """Synchronously build a lazy page before it becomes visible."""
+        if self._page_initialized(index=index):
+            return
+        self._build_page_now(index)
+
     def switch_page(self, index: Any, *_: Any) -> None:
         """Switch page."""
-        self.stacked_widget.setCurrentIndex(index)
+        try:
+            numeric_index = int(index)
+        except (TypeError, ValueError):
+            return
+        self._ensure_page_initialized(numeric_index)
+        self.stacked_widget.setCurrentIndex(numeric_index)
         for i, page in self._pages.items():
-            page['btn'].setChecked(i == index)
-            cb = page['on_show'] if i == index else page['on_hide']
+            page['btn'].setChecked(i == numeric_index)
+            cb = page['on_show'] if i == numeric_index else page['on_hide']
             if cb:
                 cb()
 
@@ -156,6 +316,12 @@ class WindowLifecycleMixin:
         self._tab_picker_popup.activateWindow()
         self._tab_picker_input.setFocus()
 
+    def _current_main_nav_button(self) -> Any:
+        """Return the navigation button for the active main page."""
+        if not hasattr(self, 'stacked_widget'):
+            return None
+        return self._pages.get(self.stacked_widget.currentIndex(), {}).get('btn')
+
     def _hide_tab_picker(self) -> None:
         """Collapse the top-bar picker after selection or cancellation."""
         if not hasattr(self, '_tab_picker_popup'):
@@ -163,9 +329,70 @@ class WindowLifecycleMixin:
         self._tab_picker_popup.hide()
         self._tab_picker_input.clear()
         self._tab_picker_list.clearSelection()
-        current_button = self._pages.get(self.stacked_widget.currentIndex(), {}).get('btn')
+        current_button = self._current_main_nav_button()
         if current_button is not None:
             current_button.setFocus()
+
+    def _is_plain_escape_key(self, event: Any) -> bool:
+        """Return whether the event is an unmodified Escape keypress."""
+        return (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        )
+
+    def _is_plain_backtick_key(self, event: Any) -> bool:
+        """Return whether the event is an unmodified backtick keypress."""
+        if event.type() != QEvent.Type.KeyPress or event.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
+        if str(event.text() or '') == '`':
+            return True
+        quote_left = getattr(Qt.Key, 'Key_QuoteLeft', None)
+        return quote_left is not None and event.key() == quote_left
+
+    def _resolve_main_window_text_input(self, widget: Any) -> Any:
+        """Resolve a focused child widget back to an editable main-window text input."""
+        current = widget
+        while current is not None:
+            if isinstance(current, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                if current.window() is not self:
+                    return None
+                if hasattr(current, 'isReadOnly') and current.isReadOnly():
+                    return None
+                return current
+            if current is self or current is getattr(self, '_tab_picker_popup', None):
+                return None
+            current = current.parentWidget()
+        return None
+
+    def _dismiss_main_window_text_input(self, widget: Any=None, *, focus_current_button: bool=True) -> bool:
+        """Exit the active main-window text input and restore non-editing focus."""
+        target = self._resolve_main_window_text_input(widget if widget is not None else QApplication.focusWidget())
+        if target is None:
+            return False
+        target.clearFocus()
+        if focus_current_button:
+            current_button = self._current_main_nav_button()
+            if current_button is not None:
+                current_button.setFocus()
+        return True
+
+    def _handle_global_input_exit_event(self, obj: Any, event: Any) -> bool:
+        """Handle app-wide Escape/backtick behavior for text entry widgets."""
+        if hasattr(self, '_tab_picker_popup') and obj in (self._tab_picker_popup, self._tab_picker_input, self._tab_picker_list):
+            if self._is_plain_escape_key(event) or self._is_plain_backtick_key(event):
+                self._hide_tab_picker()
+                event.accept()
+                return True
+            return False
+        if self._is_plain_escape_key(event) and self._dismiss_main_window_text_input(obj):
+            event.accept()
+            return True
+        if self._is_plain_backtick_key(event) and self._dismiss_main_window_text_input(obj, focus_current_button=False):
+            self._show_tab_picker()
+            event.accept()
+            return True
+        return False
 
     def _should_handle_main_tab_navigation_keys(self) -> bool:
         """Limit global navigation shortcuts to non-editing contexts."""
@@ -216,7 +443,7 @@ class WindowLifecycleMixin:
     def eventFilter(self, obj: Any, event: Any) -> bool:
         """Handle picker-specific keyboard and focus behavior before other filters."""
         if hasattr(self, '_tab_picker_popup') and hasattr(self, '_tab_picker_list') and obj in (self._tab_picker_popup, self._tab_picker_input, self._tab_picker_list):
-            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            if self._is_plain_escape_key(event) or self._is_plain_backtick_key(event):
                 self._hide_tab_picker()
                 event.accept()
                 return True
@@ -259,7 +486,7 @@ class WindowLifecycleMixin:
         else:
             self.time_label.setText(now.strftime('%H:%M:%S'))
         self._refresh_data_collection_label()
-        if hasattr(self, '_p17_refresh_timestamp_labels'):
+        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_refresh_timestamp_labels'):
             self._p17_refresh_timestamp_labels()
 
     def _set_data_collection_info(self, sources: Any, collected_at: Any=None) -> None:
@@ -313,6 +540,17 @@ class WindowLifecycleMixin:
 
     def closeEvent(self, event: Any) -> None:
         """Closeevent."""
+        warmup_timer = getattr(self, '_lazy_page_warmup_timer', None)
+        if warmup_timer is not None:
+            warmup_timer.stop()
+        session_timer = getattr(self, '_session_cache_persist_timer', None)
+        if session_timer is not None:
+            session_timer.stop()
+        app = QApplication.instance()
+        global_filter = getattr(self, '_global_input_exit_filter', None)
+        if app is not None and global_filter is not None and getattr(self, '_app_keyboard_event_filter_installed', False):
+            app.removeEventFilter(global_filter)
+            self._app_keyboard_event_filter_installed = False
         main_entry = self._get_portfolio_entry(self.main_portfolio_id)
         main_entry['portfolio'] = self.tickers
         main_entry['chart_slots'] = self.chart_slots
@@ -321,19 +559,37 @@ class WindowLifecycleMixin:
         active_entry['portfolio'] = getattr(self, 'active_tickers', active_entry.get('portfolio', []))
         active_entry['portfolio_tracker'] = getattr(self, 'active_tracker_data', active_entry.get('portfolio_tracker', {}))
         active_entry['options_tracker'] = self.options_data
-        if hasattr(self, '_p17_flush_pending_save'):
+        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_flush_pending_save'):
             self._p17_flush_pending_save()
-        if hasattr(self, '_p17_finalize_startup_draft_on_close'):
+        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_finalize_startup_draft_on_close'):
             self._p17_finalize_startup_draft_on_close()
         self._persist_all_portfolios(immediate=True)
         if hasattr(self, '_dashboard_save_state'):
             self._dashboard_save_state()
         if hasattr(self, '_persist_dashboard_state'):
             self._persist_dashboard_state(immediate=True)
+        if self._page_initialized(page_attr='page12') and hasattr(self, '_stocks_save_session_snapshot'):
+            self._stocks_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page2') and hasattr(self, '_p2_save_session_snapshot'):
+            self._p2_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page5') and hasattr(self, '_p5_save_session_snapshot'):
+            self._p5_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page13') and hasattr(self, '_p13_save_session_snapshot'):
+            self._p13_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page16') and hasattr(self, '_p16_save_session_snapshot'):
+            self._p16_save_session_snapshot(immediate=True)
+        if hasattr(self, '_persist_tab_session_cache'):
+            self._persist_tab_session_cache(immediate=True)
         save_networth_data(self.networth_data)
         executor = getattr(self, '_options_fetch_executor', None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        mc_executor = getattr(self, '_mc_executor', None)
+        if mc_executor is not None:
+            mc_executor.shutdown(wait=False, cancel_futures=True)
+        compare_executor = getattr(self, '_p10_compare_executor', None)
+        if compare_executor is not None:
+            compare_executor.shutdown(wait=False, cancel_futures=True)
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

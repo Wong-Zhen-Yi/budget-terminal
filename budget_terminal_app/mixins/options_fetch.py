@@ -60,6 +60,8 @@ class OptionsFetchMixin:
     def _submit_options_fetch(self, fn: Any) -> None:
         """Run bounded background work for options fetches."""
         executor = getattr(self, '_options_fetch_executor', None)
+        if executor is None and hasattr(self, '_ensure_options_fetch_executor'):
+            executor = self._ensure_options_fetch_executor()
         if executor is None:
             threading.Thread(target=fn, daemon=True).start()
             return

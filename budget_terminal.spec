@@ -19,6 +19,7 @@ datas += collect_data_files('tzdata')
 hiddenimports = collect_submodules('yfinance')
 hiddenimports += collect_submodules('pandas_market_calendars')
 hiddenimports += collect_submodules('exchange_calendars')
+hiddenimports += ['PyQt6.QtNetwork']
 
 a = Analysis(
     ['budget_terminal.py'],

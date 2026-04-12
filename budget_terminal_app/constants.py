@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .dependencies import *
+
 CLR_UP = '#4caf50'
 CLR_DOWN = '#f44336'
 CLR_UP_BG = '#1a2e1a'

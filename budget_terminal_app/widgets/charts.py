@@ -78,3 +78,19 @@ class FmtAxisItem(pg.AxisItem):
     def tickStrings(self, values: Any, scale: Any, spacing: Any) -> Any:
         """Handle tickStrings."""
         return [fmt_num(v) for v in values]
+
+
+class PercentAxisItem(pg.AxisItem):
+
+    def tickStrings(self, values: Any, scale: Any, spacing: Any) -> Any:
+        """Render axis values as percentages."""
+        strings = []
+        for value in values:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                strings.append('')
+                continue
+            sign = '+' if number > 0 else ''
+            strings.append(f'{sign}{number:.1f}%')
+        return strings

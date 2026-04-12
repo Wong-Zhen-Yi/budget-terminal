@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.workers.news import NewsSummarizerWorker
 
 
 class NewsMixin:

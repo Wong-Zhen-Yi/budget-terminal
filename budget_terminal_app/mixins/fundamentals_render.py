@@ -4,15 +4,19 @@ from ..compat import *
 
 class FundamentalsRenderMixin:
 
-    def update_page2(self, data: Any) -> Any:
+    def update_page2(self, data: Any, *, update_collection_info: bool=True, status_text: str | None=None) -> Any:
         """Update page2."""
         self.p2_current_data = data
         ticker = data['ticker']
         info = data['info']
         source = 'Alpha Vantage' if data.get('av_used') else 'yfinance'
-        self._set_data_collection_info([source])
-        self.p2_status_lbl.setText(f'{ticker}  |  source: {source}')
-        self.p2_status_lbl.setStyleSheet('color: #80ff80;')
+        if update_collection_info:
+            self._set_data_collection_info([source])
+        self.set_status_text(
+            self.p2_status_lbl,
+            status_text or f'{ticker}  |  source: {source}',
+            status='positive',
+        )
         self.p2_analyze_btn.setEnabled(True)
         name = info.get('longName') or ticker
         sector = info.get('sector') or 'N/A'
@@ -82,6 +86,10 @@ class FundamentalsRenderMixin:
         fcf = sg('freeCashflow')
         total_cash = sg('totalCash')
         total_debt = sg('totalDebt')
+        if total_debt is None:
+            total_debt = self._p2_latest_total_debt_value(data, 'quarterly')
+        if total_debt is None:
+            total_debt = self._p2_latest_total_debt_value(data, 'annual')
         ebitda = sg('ebitda')
         fcf_margin = fcf / total_rev * 100 if fcf is not None and total_rev else None
         ev_rev = ev / total_rev if ev is not None and total_rev else None
@@ -99,3 +107,5 @@ class FundamentalsRenderMixin:
         self.p2_metric_vals['mktcap'].setText(fmt_num(mktcap) if mktcap is not None else 'N/A')
         self._on_period_toggle()
         QTimer.singleShot(0, self._p2_relayout_charts)
+        if hasattr(self, '_p2_save_session_snapshot'):
+            self._p2_save_session_snapshot()
