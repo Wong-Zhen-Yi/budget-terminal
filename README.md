@@ -1,4 +1,4 @@
-# Budget Terminal v0.827
+# Budget Terminal v0.828
 
 ## Architecture
 This project is organized as a small package around the `BudgetTerminalApp` Qt main window. The root `budget_terminal.py` file remains the launcher so existing run commands still work.

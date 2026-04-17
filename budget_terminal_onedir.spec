@@ -46,11 +46,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
-    exclude_binaries=False,
+    exclude_binaries=True,
     name=app_name,
     debug=False,
     bootloader_ignore_signals=False,
@@ -59,4 +56,15 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon='budget_terminal_app/assets/app_icon.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name=app_name,
 )
