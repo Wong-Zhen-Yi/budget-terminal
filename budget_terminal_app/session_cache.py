@@ -15,6 +15,41 @@ _SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'youtube')
 _DATAFRAME_MARKER = '__bt_dataframe__'
 
 
+def _looks_like_datetime_label(value: Any) -> bool:
+    """Return True when a label is already datetime-like or stored as an ISO timestamp string."""
+    if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return True
+    text = str(value or '').strip()
+    if not text:
+        return False
+    if len(text) < 10:
+        return False
+    if text[4] != '-' or text[7] != '-':
+        return False
+    if not (text[:4].isdigit() and text[5:7].isdigit() and text[8:10].isdigit()):
+        return False
+    return True
+
+
+def _deserialize_datetime_axis(values: Any) -> Any:
+    """Restore a cached DataFrame axis as datetimes when every label already looks datetime-like."""
+    try:
+        axis = pd.Index(values)
+    except Exception:
+        return None
+    if axis.empty:
+        return None
+    if not all(_looks_like_datetime_label(value) for value in axis):
+        return None
+    try:
+        parsed = pd.to_datetime(axis, errors='coerce', format='ISO8601')
+    except Exception:
+        return None
+    if getattr(parsed, 'isna', lambda: [])().any():
+        return None
+    return parsed
+
+
 def _read_json(path: Any, default: Any) -> Any:
     """Read JSON from disk, returning a fallback on failure."""
     try:
@@ -119,17 +154,11 @@ def deserialize_session_value(value: Any) -> Any:
                 frame = pd.read_json(StringIO(raw_json), orient=str(value.get('orient', 'split') or 'split'))
             except Exception:
                 return pd.DataFrame()
-            try:
-                parsed_index = pd.to_datetime(frame.index, errors='coerce')
-            except Exception:
-                parsed_index = None
-            if parsed_index is not None and not getattr(parsed_index, 'isna', lambda: [])().all():
+            parsed_index = _deserialize_datetime_axis(frame.index)
+            if parsed_index is not None:
                 frame.index = parsed_index
-            try:
-                parsed_columns = pd.to_datetime(frame.columns, errors='coerce')
-            except Exception:
-                parsed_columns = None
-            if parsed_columns is not None and not getattr(parsed_columns, 'isna', lambda: [])().all():
+            parsed_columns = _deserialize_datetime_axis(frame.columns)
+            if parsed_columns is not None:
                 frame.columns = parsed_columns
             return frame
         return {str(key): deserialize_session_value(item) for key, item in value.items()}

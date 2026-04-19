@@ -37,6 +37,10 @@ Format the response with these exact sections:
 
 
 class DashboardMixin:
+    def _dashboard_portfolio_panel_is_read_only(self) -> bool:
+        """Keep the dashboard portfolio panel in view-only mode."""
+        return True
+
     def _dashboard_refresh_portfolio_selector(self) -> None:
         """Mirror the saved portfolio catalog into the dashboard selector."""
         if not hasattr(self, 'dashboard_portfolio_combo'):
@@ -134,10 +138,16 @@ class DashboardMixin:
     def _dashboard_update_add_ticker_visibility(self) -> None:
         """Show or hide the add-ticker controls based on the active portfolio view."""
         showing_all = getattr(self, '_dashboard_showing_all', False)
+        read_only = self._dashboard_portfolio_panel_is_read_only()
+        can_edit = (not showing_all) and (not read_only)
         if hasattr(self, 'ticker_input'):
-            self.ticker_input.setVisible(not showing_all)
+            self.ticker_input.setVisible(can_edit)
+            self.ticker_input.setEnabled(can_edit)
         for child in getattr(self, '_dashboard_add_btn_refs', []):
-            child.setVisible(not showing_all)
+            child.setVisible(can_edit)
+            child.setEnabled(can_edit)
+        if hasattr(self, 'port_table'):
+            self.port_table.setColumnHidden(5, read_only)
 
     def _dashboard_fit_portfolio_table_height(self, max_rows: int=15) -> None:
         """Keep the portfolio table compact while preserving its current column layout."""
@@ -644,7 +654,9 @@ class DashboardMixin:
             ('ma200', self.dashboard_main_plot),
             ('volume', self.dashboard_volume_plot),
             ('rsi', self.dashboard_rsi_plot),
+            ('rsi_ma', self.dashboard_rsi_plot),
         )
+        visible_index_by_plot = {}
         for key, plot in config:
             item = self.dashboard_overlay_items.get(key)
             if item is None:
@@ -656,7 +668,9 @@ class DashboardMixin:
             x_left, x_right = x_range
             y_bottom, y_top = y_range
             x_pos = float(x_right) - (float(x_right) - float(x_left)) * 0.02
-            y_pos = float(y_top) - (float(y_top) - float(y_bottom)) * 0.04
+            offset_index = visible_index_by_plot.get(plot, 0)
+            visible_index_by_plot[plot] = offset_index + 1
+            y_pos = float(y_top) - (float(y_top) - float(y_bottom)) * (0.04 + (offset_index * 0.08))
             item.setPos(x_pos, y_pos)
 
     def _dashboard_update_indicator_panel_labels(self) -> None:
@@ -686,9 +700,19 @@ class DashboardMixin:
                         latest_rsi = float(value)
                         break
             rsi_text = f"RSI(14) {latest_rsi:.2f}" if latest_rsi is not None else 'RSI(14) --'
+        rsi_ma_text = ''
+        if 'RSI' in self.dashboard_active_indicators:
+            latest_rsi_ma = None
+            if getattr(self, 'dashboard_rsi_ma_series', None) is not None and len(self.dashboard_rsi_ma_series):
+                for value in reversed(list(self.dashboard_rsi_ma_series)):
+                    if not pd.isna(value):
+                        latest_rsi_ma = float(value)
+                        break
+            rsi_ma_text = f"RSI MA(14) {latest_rsi_ma:.2f}" if latest_rsi_ma is not None else 'RSI MA(14) --'
         self._dashboard_set_overlay_text('ma200', self.dashboard_main_plot, ma_text, self.theme_color('chart_ma'))
         self._dashboard_set_overlay_text('volume', self.dashboard_volume_plot, volume_text, self.theme_color('chart_reference'))
         self._dashboard_set_overlay_text('rsi', self.dashboard_rsi_plot, rsi_text, self.theme_color('chart_rsi'))
+        self._dashboard_set_overlay_text('rsi_ma', self.dashboard_rsi_plot, rsi_ma_text, self.theme_color('chart_reference'))
         self._dashboard_refresh_overlay_positions()
 
     def _dashboard_render_indicator_panels(self) -> None:
@@ -717,6 +741,7 @@ class DashboardMixin:
         self.dashboard_last_price_line = None
         self.dashboard_volume_item = None
         self.dashboard_rsi_line_item = None
+        self.dashboard_rsi_ma_line_item = None
         self.dashboard_rsi_upper_line = None
         self.dashboard_rsi_lower_line = None
 
@@ -754,6 +779,11 @@ class DashboardMixin:
         rsi_line_item = getattr(self, 'dashboard_rsi_line_item', None)
         if rsi_line_item is not None:
             rsi_line_item.setPen(self.theme_pen('chart_rsi', width=2.0))
+            rsi_line_item.setVisible(self.dashboard_rsi_series is not None and 'RSI' in self.dashboard_active_indicators)
+        rsi_ma_line_item = getattr(self, 'dashboard_rsi_ma_line_item', None)
+        if rsi_ma_line_item is not None:
+            rsi_ma_line_item.setPen(self.theme_pen('chart_reference', width=1.5, style=Qt.PenStyle.DashLine))
+            rsi_ma_line_item.setVisible(getattr(self, 'dashboard_rsi_ma_series', None) is not None and 'RSI' in self.dashboard_active_indicators)
         rsi_upper_line = getattr(self, 'dashboard_rsi_upper_line', None)
         if rsi_upper_line is not None:
             rsi_upper_line.setPen(self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
@@ -801,6 +831,7 @@ class DashboardMixin:
         self.dashboard_chart_df = None
         self.dashboard_chart_stats = {}
         self.dashboard_rsi_series = None
+        self.dashboard_rsi_ma_series = None
         self.dashboard_chart_ma200 = None
         self.dashboard_chart_interval = self.dashboard_timeframe_map.get(self.dashboard_timeframe_label, ('5y', '1d'))[1]
         self.dashboard_overlay_items = {}
@@ -812,7 +843,7 @@ class DashboardMixin:
         self._dashboard_show_row_details(0)
         self._dashboard_update_indicator_panel_labels()
 
-    def _dashboard_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, ma200_series: Any=None) -> None:
+    def _dashboard_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, rsi_ma_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main dashboard candlestick chart and lower indicator panels."""
         points = []
         volume_brushes = []
@@ -874,6 +905,16 @@ class DashboardMixin:
                 rsi_line_item = self.dashboard_rsi_plot.plot([], [], pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
                 self.dashboard_rsi_line_item = rsi_line_item
             rsi_line_item.setData(x_values, y_values)
+            if rsi_ma_series is not None:
+                rsi_ma_values = [float(value) if not pd.isna(value) else float('nan') for value in rsi_ma_series]
+                rsi_ma_line_item = getattr(self, 'dashboard_rsi_ma_line_item', None)
+                if rsi_ma_line_item is None:
+                    rsi_ma_line_item = self.dashboard_rsi_plot.plot([], [], pen=self.theme_pen('chart_reference', width=1.5, style=Qt.PenStyle.DashLine), antialias=True)
+                    self.dashboard_rsi_ma_line_item = rsi_ma_line_item
+                rsi_ma_line_item.setData(x_values, rsi_ma_values)
+            else:
+                self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_ma_line_item', None))
+                self.dashboard_rsi_ma_line_item = None
             rsi_upper_line = getattr(self, 'dashboard_rsi_upper_line', None)
             if rsi_upper_line is None:
                 rsi_upper_line = pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
@@ -887,16 +928,18 @@ class DashboardMixin:
             self.dashboard_rsi_plot.setYRange(0, 100, padding=0.02)
         else:
             self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_line_item', None))
+            self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_ma_line_item', None))
             self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_upper_line', None))
             self._dashboard_remove_chart_item(self.dashboard_rsi_plot, getattr(self, 'dashboard_rsi_lower_line', None))
             self.dashboard_rsi_line_item = None
+            self.dashboard_rsi_ma_line_item = None
             self.dashboard_rsi_upper_line = None
             self.dashboard_rsi_lower_line = None
         self._dashboard_refresh_chart_presentation()
 
     def add_ticker(self) -> None:
         """Add ticker."""
-        if getattr(self, '_dashboard_showing_all', False):
+        if getattr(self, '_dashboard_showing_all', False) or self._dashboard_portfolio_panel_is_read_only():
             return
         t = self.ticker_input.text().upper().strip()
         if t:
@@ -921,7 +964,7 @@ class DashboardMixin:
 
     def remove_ticker(self, t: Any) -> None:
         """Remove ticker."""
-        if getattr(self, '_dashboard_showing_all', False):
+        if getattr(self, '_dashboard_showing_all', False) or self._dashboard_portfolio_panel_is_read_only():
             return
         if t in self.tickers:
             self.tickers.remove(t)
@@ -1096,7 +1139,7 @@ class DashboardMixin:
                 del_btn = self._dashboard_ensure_portfolio_delete_button(i)
                 self.set_theme_variant(del_btn, 'danger')
                 del_btn.setProperty('portfolio_ticker', ticker)
-                if showing_all:
+                if showing_all or self._dashboard_portfolio_panel_is_read_only():
                     del_btn.setVisible(False)
                 else:
                     del_btn.setVisible(True)
@@ -1341,8 +1384,15 @@ class DashboardMixin:
         self.dashboard_rsi_series = data.get('chart_rsi', {}).get(symbol)
         if self.dashboard_rsi_series is None:
             self.dashboard_rsi_series = self._p10_calculate_rsi(df['Close'])
+        self.dashboard_rsi_ma_series = self._p10_calculate_rsi_ma(self.dashboard_rsi_series)
         self.dashboard_symbol_label.setText(symbol)
-        self._dashboard_render_main_chart(self.dashboard_chart_stats, self.dashboard_chart_interval, self.dashboard_rsi_series, self.dashboard_chart_ma200)
+        self._dashboard_render_main_chart(
+            self.dashboard_chart_stats,
+            self.dashboard_chart_interval,
+            self.dashboard_rsi_series,
+            self.dashboard_rsi_ma_series,
+            self.dashboard_chart_ma200,
+        )
         if self.dashboard_auto_follow:
             self._dashboard_apply_auto_x_range(previous_range)
         else:

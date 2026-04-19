@@ -12,6 +12,12 @@ DEFAULT_BATCH_SYMBOLS = ['SPY', 'DX-Y.NYB', '^VIX', 'GLD', 'CL=F']
 MACRO_TICKERS = ['SPY', 'QQQ', 'GLD', 'CL=F', '^VIX', '^TNX', 'DX-Y.NYB']
 OPTION_BUCKET_TEMPLATE = {'0_week': [], '2_weeks': [], '4_weeks': []}
 OPTION_BUCKET_OFFSETS = (('0_week', 0), ('2_weeks', 14), ('4_weeks', 28))
+CHART_CACHE_PERIOD_DAY_MAP = {
+    'd': 1.0,
+    'wk': 7.0,
+    'mo': 30.0,
+    'y': 365.0,
+}
 
 
 class DataWorker(QObject):
@@ -357,12 +363,21 @@ class DataWorker(QObject):
             return None
         frame = df.copy()
         if isinstance(frame.columns, pd.MultiIndex):
-            level_zero = list(frame.columns.get_level_values(0))
-            level_one = list(frame.columns.get_level_values(1))
-            if symbol in level_zero:
-                frame = frame.xs(symbol, axis=1, level=0, drop_level=True).copy()
-            elif symbol in level_one:
-                frame = frame.xs(symbol, axis=1, level=1, drop_level=True).copy()
+            symbol_text = str(symbol or '').upper().strip()
+            level_zero_raw = list(frame.columns.get_level_values(0))
+            level_one_raw = list(frame.columns.get_level_values(1))
+            level_zero = [str(value).upper().strip() for value in level_zero_raw]
+            level_one = [str(value).upper().strip() for value in level_one_raw]
+            field_names = {'OPEN', 'HIGH', 'LOW', 'CLOSE', 'ADJ CLOSE', 'VOLUME'}
+
+            if symbol_text and symbol_text in level_zero:
+                frame = frame.xs(level_zero_raw[level_zero.index(symbol_text)], axis=1, level=0, drop_level=True).copy()
+            elif symbol_text and symbol_text in level_one:
+                frame = frame.xs(level_one_raw[level_one.index(symbol_text)], axis=1, level=1, drop_level=True).copy()
+            elif len(set(level_one)) == 1 and any(name in field_names for name in level_zero):
+                frame.columns = frame.columns.get_level_values(0)
+            elif len(set(level_zero)) == 1 and any(name in field_names for name in level_one):
+                frame.columns = frame.columns.get_level_values(1)
             else:
                 logger.warning('Dashboard chart %s rejected ambiguous MultiIndex columns: %s', symbol, list(frame.columns))
                 return None
@@ -403,6 +418,55 @@ class DataWorker(QObject):
         ordered_columns = required_columns + [column for column in frame.columns if column not in required_columns]
         return frame.loc[:, ordered_columns]
 
+    def _chart_required_span_days(self, period: Any) -> float | None:
+        """Convert one yfinance period string into approximate calendar days."""
+        text = str(period or '').strip().lower()
+        if not text or text == 'max':
+            return None
+        for suffix, multiplier in CHART_CACHE_PERIOD_DAY_MAP.items():
+            if text.endswith(suffix):
+                number_text = text[:-len(suffix)].strip()
+                try:
+                    return float(number_text) * multiplier
+                except Exception:
+                    return None
+        return None
+
+    def _chart_cache_covers_period(self, df: Any, period: Any) -> bool:
+        """Return whether one cached OHLCV frame is long enough for the requested period."""
+        if df is None or getattr(df, 'empty', True):
+            return False
+        required_days = self._chart_required_span_days(period)
+        if required_days is None:
+            return True
+        try:
+            index = pd.DatetimeIndex(pd.to_datetime(df.index))
+        except Exception:
+            return False
+        if len(index) < 2:
+            return False
+        if getattr(index, 'tz', None) is not None:
+            index = index.tz_localize(None)
+        coverage_days = max(0.0, (index.max() - index.min()).total_seconds() / 86400.0)
+        min_acceptable_days = max(required_days - 45.0, required_days * 0.85)
+        return coverage_days >= min_acceptable_days
+
+    def _load_cached_chart_frame(self, symbol: str, period: Any, interval: Any, *, max_age_hours: float = 24.0) -> Any:
+        """Return one normalized cached chart frame when it is still usable for the request."""
+        raw_df = self._cache_manager.get_data(symbol, interval, max_age_hours=max_age_hours)
+        df = self._normalize_chart_frame(symbol, raw_df)
+        if df is None or df.empty:
+            return None
+        if interval in ('1d', '1wk', '1mo') and not self._chart_cache_covers_period(df, period):
+            logger.info(
+                'Dashboard chart %s cache for interval %s does not cover requested period %s.',
+                symbol,
+                interval,
+                period,
+            )
+            return None
+        return df
+
     def _normalize_datetime_index_ns(self, values: Any) -> Any:
         """Normalize incoming timestamps to a tz-naive nanosecond index for stable merges."""
         index = pd.DatetimeIndex(pd.to_datetime(values))
@@ -412,13 +476,24 @@ class DataWorker(QObject):
         return pd.DatetimeIndex(index.astype('datetime64[ns]'))
 
     def _build_daily_ma200(self, symbol: str, source_df: Any, cache: CacheManager) -> Any:
-        daily_df = cache.get_data(symbol, '1d')
+        daily_df = None
+        if source_df is not None and not source_df.empty and self._chart_cache_covers_period(source_df, '1y'):
+            try:
+                source_index = pd.DatetimeIndex(pd.to_datetime(source_df.index))
+                if getattr(source_index, 'tz', None) is not None:
+                    source_index = source_index.tz_localize(None)
+                if len(source_index) >= 2:
+                    median_gap_days = pd.Series(source_index).diff().dropna().dt.total_seconds().median() / 86400.0
+                    if 0.5 <= float(median_gap_days or 0.0) <= 3.5:
+                        daily_df = self._normalize_chart_frame(symbol, source_df)
+            except Exception:
+                daily_df = None
+        if daily_df is None or daily_df.empty:
+            daily_df = self._load_cached_chart_frame(symbol, '5y', '1d')
         if daily_df is None or daily_df.empty:
             daily_df = self._download_symbol_frame(symbol, '5y', '1d', auto_adjust=False)
             if daily_df is not None and not daily_df.empty:
                 cache.save_data(symbol, '1d', daily_df)
-        else:
-            daily_df = self._normalize_chart_frame(symbol, daily_df)
         if daily_df is None or daily_df.empty or 'Close' not in daily_df.columns:
             return pd.Series(index=source_df.index, dtype=float)
         daily_ma = daily_df['Close'].astype(float).rolling(200, min_periods=200).mean().dropna()
@@ -491,16 +566,13 @@ class DataWorker(QObject):
     def _fetch_chart_payload(self, config: tuple[str, Any, Any]) -> Any:
         symbol, period, interval = config
         cache = self._cache_manager
-        source_label = 'cache'
-        raw_df = cache.get_data(symbol, interval)
-        df = self._normalize_chart_frame(symbol, raw_df)
+        source_label = 'download'
+        df = self._download_symbol_frame(symbol, period, interval)
+        if df is not None and not df.empty and interval in ['1d', '1wk', '1mo']:
+            cache.save_data(symbol, interval, df)
         if df is None:
-            if raw_df is not None:
-                logger.info('Dashboard chart %s cache rejected for interval %s. Refetching.', symbol, interval)
-            source_label = 'download'
-            df = self._download_symbol_frame(symbol, period, interval)
-            if df is not None and interval in ['1d', '1wk', '1mo']:
-                cache.save_data(symbol, interval, df)
+            source_label = 'cache'
+            df = self._load_cached_chart_frame(symbol, period, interval)
         if df is None:
             logger.warning(
                 'Dashboard chart %s unavailable after %s for period=%s interval=%s.',

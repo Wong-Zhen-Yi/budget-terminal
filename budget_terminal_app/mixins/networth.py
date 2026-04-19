@@ -35,15 +35,12 @@ class NetWorthMixin:
         return breakdown
 
     ASSET_COLORS = ['#66bb6a', '#81c784', '#a5d6a7', '#c8e6c9', '#4caf50', '#43a047']
-    PENSION_COLORS = ['#42a5f5', '#64b5f6', '#90caf9', '#bbdefb', '#1e88e5', '#1565c0']
     DEBT_COLORS = ['#ef5350', '#e57373', '#ef9a9a', '#f44336', '#d32f2f', '#c62828']
 
     def _p6_table_for(self, category: Any) -> Any:
         """Return the QTableWidget for a given net-worth category."""
         if category == 'cash':
             return self.p6_cash_table
-        if category == 'pension_insurance':
-            return self.p6_pension_table
         return self.p6_debt_table
 
     def init_page6(self) -> None:
@@ -76,30 +73,6 @@ class NetWorthMixin:
         cash_layout.addLayout(cash_hdr)
         cash_layout.addWidget(self.p6_cash_table)
         tables_splitter.addWidget(cash_widget)
-        pension_widget = QWidget()
-        pension_layout = QVBoxLayout(pension_widget)
-        pension_layout.setContentsMargins(0, 0, 0, 2)
-        pension_layout.setSpacing(6)
-        pension_hdr = QHBoxLayout()
-        pension_hdr.setContentsMargins(0, 0, 0, 2)
-        pension_hdr.setSpacing(8)
-        pension_lbl = QLabel('<b>PENSION & INSURANCE</b>')
-        self.set_theme_role(pension_lbl, 'section_title')
-        add_pension_btn = QPushButton('+ Add')
-        add_pension_btn.setMinimumSize(58, 24)
-        self.set_theme_variant(add_pension_btn, 'accent')
-        add_pension_btn.clicked.connect(lambda: self._p6_add_row('pension_insurance'))
-        pension_hdr.addWidget(pension_lbl)
-        pension_hdr.addStretch()
-        pension_hdr.addWidget(add_pension_btn)
-        self.p6_pension_table = QTableWidget(0, 3)
-        self.p6_pension_table.setHorizontalHeaderLabels(['Description', 'Amount ($)', ''])
-        self.p6_pension_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.p6_pension_table.setColumnWidth(2, 30)
-        self.p6_pension_table.itemChanged.connect(lambda: self._p6_on_data_changed('pension_insurance'))
-        pension_layout.addLayout(pension_hdr)
-        pension_layout.addWidget(self.p6_pension_table)
-        tables_splitter.addWidget(pension_widget)
         debt_widget = QWidget()
         debt_layout = QVBoxLayout(debt_widget)
         debt_layout.setContentsMargins(0, 2, 0, 0)
@@ -124,19 +97,6 @@ class NetWorthMixin:
         debt_layout.addLayout(debt_hdr)
         debt_layout.addWidget(self.p6_debt_table)
         tables_splitter.addWidget(debt_widget)
-        summary_widget = QWidget()
-        summary_layout = QVBoxLayout(summary_widget)
-        summary_layout.setContentsMargins(0, 0, 0, 2)
-        summary_layout.setSpacing(6)
-        summary_lbl = QLabel('<b>SUMMARY</b>')
-        self.set_theme_role(summary_lbl, 'section_title')
-        summary_layout.addWidget(summary_lbl)
-        self.p6_total_summary = QLabel('')
-        self.p6_total_summary.setStyleSheet('font-size: 12px;')
-        self.p6_total_summary.setWordWrap(True)
-        self.p6_total_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
-        summary_layout.addWidget(self.p6_total_summary, 1)
-        tables_splitter.addWidget(summary_widget)
         layout.addWidget(tables_splitter, 1)
         silo_box = QGroupBox('Personal Finance Silos')
         self.set_theme_role(silo_box, 'panel')
@@ -162,7 +122,7 @@ class NetWorthMixin:
 
     def _p6_populate_tables(self) -> None:
         """Handle p6 populate tables."""
-        for category in ['cash', 'pension_insurance', 'debt']:
+        for category in ['cash', 'debt']:
             table = self._p6_table_for(category)
             data_list = sorted(self.networth_data.get(category, []), key=lambda x: x.get('amount', 0.0), reverse=True)
             table.blockSignals(True)
@@ -228,26 +188,7 @@ class NetWorthMixin:
 
     def _p6_update_total(self) -> None:
         """Handle p6 update total."""
-        manual_cash = sum((item.get('amount', 0.0) for item in self.networth_data.get('cash', [])))
-        manual_pension = sum((item.get('amount', 0.0) for item in self.networth_data.get('pension_insurance', [])))
-        manual_debt = sum((item.get('amount', 0.0) for item in self.networth_data.get('debt', [])))
         portfolio_breakdown = self._p6_portfolio_breakdown()
-        stock_mv = sum((item['stocks'] for item in portfolio_breakdown))
-        options_equity = sum((item['options'] for item in portfolio_breakdown))
-        net_worth = manual_cash + manual_pension + stock_mv + options_equity - manual_debt
-        positive_color = self.theme_color('accent_positive')
-        negative_color = self.theme_color('accent_negative')
-        pension_color = '#42a5f5'
-        nw_color = positive_color if net_worth >= 0 else negative_color
-        summary_lines = [f"Cash: <span style='color: {positive_color};'>${manual_cash:,.2f}</span>"]
-        summary_lines.append(f"Pension & Insurance: <span style='color: {pension_color};'>${manual_pension:,.2f}</span>")
-        for item in portfolio_breakdown:
-            summary_lines.append(f"{item['name']} Stocks: <span style='color: {positive_color};'>${item['stocks']:,.2f}</span>")
-            summary_lines.append(f"{item['name']} Options: <span style='color: {(positive_color if item['options'] >= 0 else negative_color)};'>${item['options']:,.2f}</span>")
-        summary_lines.append(f"Liabilities: <span style='color: {negative_color};'>-${manual_debt:,.2f}</span>")
-        summary_lines.append(f"<b style='font-size: 14px;'>Total: <span style='color: {nw_color};'>${net_worth:,.2f}</span></b>")
-        total_summary = '<br/>'.join(summary_lines)
-        self.p6_total_summary.setText(total_summary)
         bar_data = []
         asset_idx = 0
         for ci in self.networth_data.get('cash', []):
@@ -255,12 +196,6 @@ class NetWorthMixin:
             if amt > 0:
                 bar_data.append((ci.get('desc', 'Cash'), amt, self.ASSET_COLORS[asset_idx % len(self.ASSET_COLORS)]))
                 asset_idx += 1
-        pension_idx = 0
-        for pi in self.networth_data.get('pension_insurance', []):
-            amt = pi.get('amount', 0.0)
-            if amt > 0:
-                bar_data.append((pi.get('desc', 'Pension'), amt, self.PENSION_COLORS[pension_idx % len(self.PENSION_COLORS)]))
-                pension_idx += 1
         for item in portfolio_breakdown:
             if item['stocks'] > 0:
                 bar_data.append((f"{item['name']} Stocks", item['stocks'], self.ASSET_COLORS[asset_idx % len(self.ASSET_COLORS)]))
@@ -291,5 +226,4 @@ class NetWorthMixin:
         """Refresh Personal Finance theme surfaces."""
         if hasattr(self, 'p6_silo_bar'):
             self.p6_silo_bar.set_theme(self.theme_color('text_primary'))
-        if hasattr(self, 'p6_total_summary'):
             self._p6_update_total()

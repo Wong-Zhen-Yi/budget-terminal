@@ -20,6 +20,9 @@ STOCKS_FUNDAMENTAL_FIELDS = (
     ('Revenue', 'revenue'),
     ('Net Income', 'net_income'),
     ('EPS', 'eps'),
+    ('Gross Margin', 'gross_margin'),
+    ('Operating Margin', 'operating_margin'),
+    ('Net Margin', 'net_margin'),
     ('Shares outstanding', 'shares_outstanding'),
     ('PE', 'pe'),
     ('Forward PE', 'forward_pe'),
@@ -896,6 +899,30 @@ class StocksPageMixin:
             'revenue': self._stocks_format_compact_value(self._stocks_info_value(info, 'totalRevenue') or self._stocks_extract_statement_value((quarterly_financials, financials), ('total revenue', 'revenue'))),
             'net_income': self._stocks_format_compact_value(self._stocks_info_value(info, 'netIncomeToCommon', 'netIncome') or self._stocks_extract_statement_value((quarterly_financials, financials), ('net income',))),
             'eps': self._stocks_format_decimal(self._stocks_info_value(info, 'trailingEps', 'currentEps') or self._stocks_extract_statement_value((quarterly_financials, financials), ('diluted eps', 'basic eps', 'net income per share'))),
+            'gross_margin': self._stocks_format_percentage(self._stocks_extract_margin_ratio(
+                info,
+                info_keys=('grossMargins',),
+                numerator_aliases=('gross profit',),
+                denominator_aliases=('total revenue', 'revenue'),
+                quarterly_frame=quarterly_financials,
+                annual_frame=financials,
+            )),
+            'operating_margin': self._stocks_format_percentage(self._stocks_extract_margin_ratio(
+                info,
+                info_keys=('operatingMargins',),
+                numerator_aliases=('operating income', 'ebit'),
+                denominator_aliases=('total revenue', 'revenue'),
+                quarterly_frame=quarterly_financials,
+                annual_frame=financials,
+            )),
+            'net_margin': self._stocks_format_percentage(self._stocks_extract_margin_ratio(
+                info,
+                info_keys=('profitMargins', 'netMargins'),
+                numerator_aliases=('net income',),
+                denominator_aliases=('total revenue', 'revenue'),
+                quarterly_frame=quarterly_financials,
+                annual_frame=financials,
+            )),
             'shares_outstanding': self._stocks_format_compact_value(self._stocks_info_value(info, 'sharesOutstanding') or self._stocks_extract_statement_value((quarterly_balance_sheet, balance_sheet), ('ordinary shares number', 'shares outstanding', 'common stock shares outstanding'))),
             'pe': self._stocks_format_ratio(self._stocks_info_value(info, 'trailingPE')),
             'forward_pe': self._stocks_format_ratio(self._stocks_info_value(info, 'forwardPE')),
@@ -1249,6 +1276,30 @@ class StocksPageMixin:
                     return series
         return None
 
+    def _stocks_extract_margin_ratio(
+        self,
+        info: dict[str, Any],
+        *,
+        info_keys: tuple[str, ...],
+        numerator_aliases: tuple[str, ...],
+        denominator_aliases: tuple[str, ...],
+        quarterly_frame: Any,
+        annual_frame: Any,
+    ) -> Any:
+        ratio = self._stocks_info_value(info, *info_keys)
+        if ratio not in (None, '', 'N/A'):
+            return ratio
+        numerator = self._stocks_extract_statement_value((quarterly_frame, annual_frame), numerator_aliases)
+        denominator = self._stocks_extract_statement_value((quarterly_frame, annual_frame), denominator_aliases)
+        try:
+            numerator_value = float(numerator)
+            denominator_value = float(denominator)
+        except Exception:
+            return None
+        if not math.isfinite(numerator_value) or not math.isfinite(denominator_value) or denominator_value == 0:
+            return None
+        return numerator_value / denominator_value
+
     def _stocks_extract_earnings_date(self, info: dict[str, Any], earnings_dates: Any) -> str:
         candidates = []
         if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
@@ -1349,6 +1400,13 @@ class StocksPageMixin:
             return f'{float(value):.2f}'
         except Exception:
             return 'N/A'
+
+    def _stocks_format_percentage(self, value: Any) -> str:
+        try:
+            numeric = float(value) * 100.0
+        except Exception:
+            return 'N/A'
+        return f'{numeric:.2f}%'
 
     def _stocks_format_compact_value(self, value: Any) -> str:
         try:

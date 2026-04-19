@@ -48,15 +48,8 @@ class NotesMixin:
         self.p17_new_btn.clicked.connect(self._p17_create_note)
         self.p17_delete_btn = QPushButton('Delete Note')
         self.p17_delete_btn.clicked.connect(self._p17_delete_selected_note)
-        self.p17_export_btn = QPushButton('Export DOCX')
-        self.set_theme_variant(self.p17_export_btn, 'accent')
-        self.p17_export_btn.clicked.connect(self._p17_export_notes)
-        self.p17_import_btn = QPushButton('Import notes backup')
-        self.p17_import_btn.clicked.connect(self._p17_import_notes)
         title_row.addWidget(self.p17_new_btn)
         title_row.addWidget(self.p17_delete_btn)
-        title_row.addWidget(self.p17_export_btn)
-        title_row.addWidget(self.p17_import_btn)
         layout.addLayout(title_row)
 
         intro_lbl = QLabel('Notes are sorted newest first, track created and edited timestamps automatically, and can include attached pictures.')
@@ -455,63 +448,6 @@ class NotesMixin:
             cursor.movePosition(QTextCursor.MoveOperation.End)
             self.p17_body_edit.setTextCursor(cursor)
         self.set_status_text(self.p17_status_lbl, 'New note created.', status='positive')
-
-    def _p17_export_notes(self) -> None:
-        self._p17_flush_pending_save()
-        default_name = f'budget_terminal_notes_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.docx'
-        path, _ = QFileDialog.getSaveFileName(self, 'Export notes to DOCX', str(Path.home() / default_name), 'Word Documents (*.docx)')
-        if not path:
-            self.set_status_text(self.p17_status_lbl, 'Notes export cancelled.', status='muted')
-            return
-        if not str(path).lower().endswith('.docx'):
-            path = f'{path}.docx'
-        try:
-            export_notes_docx(path)
-        except Exception as exc:
-            self.set_status_text(self.p17_status_lbl, f'Notes export failed: {exc}', status='negative')
-            QMessageBox.critical(self, 'Export Failed', f'Unable to export notes.\n\n{exc}')
-            return
-        self.set_status_text(self.p17_status_lbl, f'All notes exported to {path}', status='positive')
-        QMessageBox.information(self, 'Export Complete', f'All notes exported successfully.\n\n{path}')
-
-    def _p17_import_notes(self) -> None:
-        self._p17_flush_pending_save()
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            'Import notes backup',
-            str(Path.home()),
-            'Notes Files (*.json *.docx);;JSON Files (*.json);;Word Documents (*.docx)',
-        )
-        if not path:
-            self.set_status_text(self.p17_status_lbl, 'Notes import cancelled.', status='muted')
-            return
-        try:
-            payload = load_notes_backup(path)
-        except Exception as exc:
-            self.set_status_text(self.p17_status_lbl, f'Notes import failed: {exc}', status='negative')
-            QMessageBox.critical(self, 'Import Failed', f'Unable to import notes.\n\n{exc}')
-            return
-        reply = QMessageBox.question(
-            self,
-            'Import notes backup',
-            'Importing notes will overwrite all current saved notes. Continue?',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            self.set_status_text(self.p17_status_lbl, 'Notes import cancelled.', status='muted')
-            return
-        try:
-            saved_notes = apply_notes_backup(payload)
-        except Exception as exc:
-            self.set_status_text(self.p17_status_lbl, f'Notes import failed: {exc}', status='negative')
-            QMessageBox.critical(self, 'Import Failed', f'Unable to apply imported notes.\n\n{exc}')
-            return
-        self._p17_selected_note_id = None
-        self._p17_selected_image_id = None
-        self._p17_apply_runtime_notes_data(saved_notes)
-        self.set_status_text(self.p17_status_lbl, f'Imported notes from {path}', status='positive')
-        QMessageBox.information(self, 'Import Complete', 'Notes imported successfully.')
 
     def _p17_create_note(self) -> None:
         self._p17_flush_pending_save()

@@ -413,6 +413,7 @@ class WindowBootstrapMixin:
         if hasattr(self, '_dashboard_refresh_portfolio_selector'):
             self._dashboard_refresh_portfolio_selector()
         self._call_if_page_initialized('_p10_rebuild_watchlists', page_attr='page10')
+        self._call_if_page_initialized('_p10_refresh_chart_presentation', page_attr='page10')
         self._call_if_page_initialized('_p6_update_total', page_attr='page6')
         self._call_if_page_initialized('_p7_refresh_options_expirations', page_attr='page7')
         if getattr(self, 'last_data', None):
@@ -522,6 +523,7 @@ class WindowBootstrapMixin:
                 self.all_portfolios_state = load_all_portfolios_state()
                 self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
                 self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
+                self.fundamentals_page_state = load_fundamentals_page_settings()
                 self.dashboard_chart_state = load_dashboard_chart_settings()
                 self.portfolio_metrics_state = load_portfolio_metrics_settings()
                 self.networth_data = load_networth_data()
@@ -545,6 +547,7 @@ class WindowBootstrapMixin:
             self.dashboard_chart_df = None
             self.dashboard_chart_stats = {}
             self.dashboard_rsi_series = None
+            self.dashboard_rsi_ma_series = None
             self.dashboard_chart_interval = '1d'
             self.dashboard_manual_x_range = None
             self.dashboard_pending_x_range = None
@@ -555,6 +558,13 @@ class WindowBootstrapMixin:
             self._cache_manager = CacheManager()
             self.last_data = None
             self.p2_current_data = None
+            self.p2_selected_configuration = str(
+                self.fundamentals_page_state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
+                or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
+            ).strip().lower()
+            self.p2_custom_selections_by_ticker = dict(
+                self.fundamentals_page_state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
+            )
             self.tracker_data = {}
             self._mktcap_cache = {}
             self._mktcap_cache_ts = {}

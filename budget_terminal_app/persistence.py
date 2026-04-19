@@ -10,16 +10,24 @@ if __package__ in {None, ''}:
     package_root = Path(__file__).resolve().parent.parent
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
+    from budget_terminal_app import __version__ as APP_VERSION
     from budget_terminal_app.dependencies import *
     from budget_terminal_app.paths import legacy_documents_user_data_path, user_data_path
 else:
+    from . import __version__ as APP_VERSION
     from .dependencies import *
     from .paths import legacy_documents_user_data_path, user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = 7
+BACKUP_BUNDLE_VERSION = 1
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
+BACKUP_BUNDLE_MANIFEST_NAME = 'manifest.json'
+BACKUP_BUNDLE_USER_DATA_NAME = 'user_data.json'
+BACKUP_BUNDLE_NOTES_JSON_NAME = 'notes.json'
+BACKUP_BUNDLE_NOTES_DOCX_NAME = 'notes.docx'
+ROLLBACK_BUNDLES_DIR = user_data_path('backups', 'rollbacks')
 DEFAULT_CHART_PAGE_SETTINGS = {
     'symbol': 'SPY',
     'timeframe_label': '1 Day',
@@ -28,8 +36,14 @@ DEFAULT_CHART_PAGE_SETTINGS = {
     'watchlist': [],
     'compare_symbols': [],
     'compare_presets': [],
+    'multi_interval_labels': [],
     'indicators': ['Volume', '200 MA'],
     'auto': True,
+}
+DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
+    'last_ticker': '',
+    'selected_configuration': 'default',
+    'custom_selections_by_ticker': {},
 }
 DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
 DEFAULT_STOCKS_PAGE_SETTINGS = {
@@ -74,6 +88,20 @@ def _write_json(path: Any, data: Any, *, indent: Any=None) -> None:
     with temp_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=indent)
     temp_path.replace(target)
+
+
+def _count_note_images(notes_payload: Any) -> int:
+    """Count embedded or referenced note images in a notes payload."""
+    total = 0
+    if not isinstance(notes_payload, list):
+        return 0
+    for note in notes_payload:
+        if not isinstance(note, dict):
+            continue
+        images = note.get('images', [])
+        if isinstance(images, list):
+            total += sum(1 for image in images if isinstance(image, dict))
+    return total
 
 
 def _portfolio_payload_with_chart_slots(data: Any, chart_slots: Any=None) -> Any:
@@ -605,6 +633,7 @@ def _default_user_data_document() -> Any:
         'active_portfolio_id': portfolio_state['active_portfolio_id'],
         'portfolio_order': list(portfolio_state.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': portfolio_state['portfolios'],
+        'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -625,13 +654,19 @@ def _normalize_user_data_document(payload: Any, *, existing_notes: Any=None) -> 
     saved = payload if isinstance(payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
     notes_fallback = existing_notes if existing_notes is not None else default['notes']
+    chart_page_payload = saved.get('chart_page', default['chart_page'])
+    exported_compare_presets = saved.get('compare_presets')
+    if isinstance(exported_compare_presets, list):
+        chart_page_payload = dict(chart_page_payload) if isinstance(chart_page_payload, dict) else {}
+        chart_page_payload['compare_presets'] = exported_compare_presets
     return {
         'version': USER_DATA_BACKUP_VERSION,
         'main_portfolio_id': portfolio_state['main_portfolio_id'],
         'active_portfolio_id': portfolio_state.get('active_portfolio_id', portfolio_state['main_portfolio_id']),
         'portfolio_order': list(portfolio_state.get('portfolio_order', [DEFAULT_MAIN_PORTFOLIO_ID])),
         'portfolios': portfolio_state['portfolios'],
-        'chart_page': _normalize_chart_page_settings(saved.get('chart_page', default['chart_page'])),
+        'fundamentals_page': _normalize_fundamentals_page_settings(saved.get('fundamentals_page', default['fundamentals_page'])),
+        'chart_page': _normalize_chart_page_settings(chart_page_payload),
         'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
         'portfolio_metrics': _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics', default['portfolio_metrics'])),
@@ -833,6 +868,27 @@ def build_notes_backup() -> Any:
         'version': NOTES_BACKUP_VERSION,
         'exported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'notes': exported_notes,
+    }
+
+
+def _build_backup_bundle_manifest(user_data_backup: Any, notes_backup: Any) -> dict[str, Any]:
+    """Build metadata for a folder-based backup bundle."""
+    portfolio_state = _normalize_multi_portfolio_state(user_data_backup)
+    notes = notes_backup.get('notes', []) if isinstance(notes_backup, dict) else []
+    return {
+        'bundle_version': BACKUP_BUNDLE_VERSION,
+        'app_version': APP_VERSION,
+        'exported_at': str(user_data_backup.get('exported_at', '') or notes_backup.get('exported_at', '')),
+        'files': {
+            'user_data': BACKUP_BUNDLE_USER_DATA_NAME,
+            'notes': BACKUP_BUNDLE_NOTES_JSON_NAME,
+            'notes_docx': BACKUP_BUNDLE_NOTES_DOCX_NAME,
+        },
+        'counts': {
+            'portfolios': len(portfolio_state.get('portfolio_order', [])),
+            'notes': len(notes) if isinstance(notes, list) else 0,
+            'note_images': _count_note_images(notes),
+        },
     }
 
 
@@ -1270,6 +1326,9 @@ def build_user_data_backup(*, include_notes: bool=True) -> Any:
     if not include_notes:
         backup = dict(backup)
         backup.pop('notes', None)
+    backup['compare_presets'] = list(
+        _normalize_chart_page_settings(backup.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)).get('compare_presets', [])
+    )
     backup['version'] = USER_DATA_BACKUP_VERSION
     backup['exported_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return backup
@@ -1280,26 +1339,46 @@ def export_user_data_backup(path: Any) -> None:
     _write_json(path, build_user_data_backup(), indent=2)
 
 
-def export_user_data_bundle(parent_directory: Any) -> dict[str, str]:
-    """Write separate user-data JSON and notes DOCX exports into a timestamped folder."""
+def _bundle_directory(parent_directory: Any, *, prefix: str='budget_terminal_backup') -> Path:
+    """Create a unique bundle directory within the requested parent."""
     target_root = Path(parent_directory)
     target_root.mkdir(parents=True, exist_ok=True)
-    base_name = f"budget_terminal_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    base_name = f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     bundle_dir = target_root / base_name
     suffix = 2
     while bundle_dir.exists():
         bundle_dir = target_root / f'{base_name}_{suffix}'
         suffix += 1
     bundle_dir.mkdir(parents=True, exist_ok=False)
-    user_data_path = bundle_dir / 'user_data.json'
-    notes_backup_path = bundle_dir / 'notes.docx'
-    _write_json(user_data_path, build_user_data_backup(include_notes=False), indent=2)
-    export_notes_docx(notes_backup_path)
+    return bundle_dir
+
+
+def export_user_data_bundle(parent_directory: Any, *, prefix: str='budget_terminal_backup') -> dict[str, str]:
+    """Write separate user-data JSON and notes DOCX exports into a timestamped folder."""
+    bundle_dir = _bundle_directory(parent_directory, prefix=prefix)
+    user_data_backup = build_user_data_backup(include_notes=False)
+    notes_backup = build_notes_backup()
+    user_data_path = bundle_dir / BACKUP_BUNDLE_USER_DATA_NAME
+    notes_json_path = bundle_dir / BACKUP_BUNDLE_NOTES_JSON_NAME
+    notes_docx_path = bundle_dir / BACKUP_BUNDLE_NOTES_DOCX_NAME
+    manifest_path = bundle_dir / BACKUP_BUNDLE_MANIFEST_NAME
+    _write_json(user_data_path, user_data_backup, indent=2)
+    _write_json(notes_json_path, notes_backup, indent=2)
+    export_notes_docx(notes_docx_path)
+    _write_json(manifest_path, _build_backup_bundle_manifest(user_data_backup, notes_backup), indent=2)
     return {
         'folder': str(bundle_dir),
+        'manifest_path': str(manifest_path),
         'user_data_path': str(user_data_path),
-        'notes_path': str(notes_backup_path),
+        'notes_json_path': str(notes_json_path),
+        'notes_path': str(notes_docx_path),
     }
+
+
+def create_rollback_backup_bundle(*, reason: str='before_import') -> dict[str, str]:
+    """Create an automatic rollback bundle under local app data."""
+    safe_reason = ''.join(char if char.isalnum() or char in {'_', '-'} else '_' for char in str(reason or 'before_import')).strip('_') or 'before_import'
+    return export_user_data_bundle(ROLLBACK_BUNDLES_DIR, prefix=f'rollback_{safe_reason}')
 
 
 def _json_block(data: Any) -> Any:
@@ -1362,6 +1441,10 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         '',
+        '## Compare Presets',
+        '',
+        _json_block(payload.get('compare_presets', payload.get('chart_page', {}).get('compare_presets', []))),
+        '',
         '## Dashboard Chart Settings',
         '',
         _json_block(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
@@ -1417,6 +1500,191 @@ def _validate_backup_payload(payload: Any, *, preserve_existing_notes: bool=Fals
     return _normalize_user_data_document(payload, existing_notes=existing_notes)
 
 
+def _summarize_user_data_payload(payload: Any) -> dict[str, Any]:
+    """Build a compact summary for a normalized user-data payload."""
+    normalized = _validate_backup_payload(payload, preserve_existing_notes=False)
+    portfolio_state = _normalize_multi_portfolio_state(normalized)
+    notes = normalized.get('notes', [])
+    return {
+        'portfolios': len(portfolio_state.get('portfolio_order', [])),
+        'notes': len(notes) if isinstance(notes, list) else 0,
+        'note_images': _count_note_images(notes),
+        'exported_at': str(normalized.get('exported_at', '') or payload.get('exported_at', '')) if isinstance(payload, dict) else '',
+        'app_version': str(payload.get('app_version', '') or '') if isinstance(payload, dict) else '',
+    }
+
+
+def _summarize_notes_payload(payload: Any) -> dict[str, Any]:
+    """Build a compact summary for a notes backup payload."""
+    validated = _validate_notes_backup_payload(payload)
+    notes = validated.get('notes', [])
+    return {
+        'portfolios': 0,
+        'notes': len(notes) if isinstance(notes, list) else 0,
+        'note_images': _count_note_images(notes),
+        'exported_at': str(validated.get('exported_at', '') or validated.get('imported_at', '')),
+        'app_version': '',
+    }
+
+
+def _extract_notes_payload_from_user_data(payload: Any) -> Any:
+    """Extract a notes-only backup payload from a user-data backup when possible."""
+    normalized = _validate_backup_payload(payload, preserve_existing_notes=False)
+    notes = normalized.get('notes', [])
+    if not isinstance(notes, list):
+        return None
+    return {
+        'version': NOTES_BACKUP_VERSION,
+        'imported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'notes': notes,
+    }
+
+
+def inspect_import_source(path: Any) -> dict[str, Any]:
+    """Inspect a user-selected backup source without mutating persisted state."""
+    source_path = Path(path)
+    if not source_path.exists():
+        raise ValueError('Selected backup source does not exist.')
+
+    if source_path.is_dir() or source_path.name.lower() == BACKUP_BUNDLE_MANIFEST_NAME:
+        bundle_dir = source_path if source_path.is_dir() else source_path.parent
+        manifest_path = bundle_dir / BACKUP_BUNDLE_MANIFEST_NAME
+        manifest = _read_json(manifest_path, {}) if manifest_path.exists() else {}
+        files_meta = manifest.get('files', {}) if isinstance(manifest, dict) else {}
+        user_data_name = str(files_meta.get('user_data', BACKUP_BUNDLE_USER_DATA_NAME) or BACKUP_BUNDLE_USER_DATA_NAME)
+        notes_name = str(files_meta.get('notes', BACKUP_BUNDLE_NOTES_JSON_NAME) or BACKUP_BUNDLE_NOTES_JSON_NAME)
+        notes_docx_name = str(files_meta.get('notes_docx', BACKUP_BUNDLE_NOTES_DOCX_NAME) or BACKUP_BUNDLE_NOTES_DOCX_NAME)
+        user_data_file = bundle_dir / user_data_name
+        notes_file = bundle_dir / notes_name
+        notes_docx_file = bundle_dir / notes_docx_name
+        found_files = []
+        missing_files = []
+        user_data_payload = None
+        notes_payload = None
+        if manifest_path.exists():
+            found_files.append(BACKUP_BUNDLE_MANIFEST_NAME)
+        else:
+            missing_files.append(BACKUP_BUNDLE_MANIFEST_NAME)
+        if user_data_file.exists():
+            raw_user_data_payload = _read_json(user_data_file, None)
+            if raw_user_data_payload is None:
+                raise ValueError(f'Unable to read backup file: {user_data_file.name}')
+            user_data_payload = _validate_backup_payload(raw_user_data_payload, preserve_existing_notes=True)
+            found_files.append(user_data_file.name)
+        else:
+            missing_files.append(user_data_file.name)
+        if notes_file.exists():
+            notes_payload = load_notes_backup(notes_file)
+            found_files.append(notes_file.name)
+        elif notes_docx_file.exists():
+            notes_payload = load_notes_backup(notes_docx_file)
+            found_files.append(notes_docx_file.name)
+            missing_files.append(notes_file.name)
+        else:
+            missing_files.extend([notes_name, notes_docx_name])
+        if notes_docx_file.exists() and notes_docx_file.name not in found_files:
+            found_files.append(notes_docx_file.name)
+        supported_scopes = []
+        if user_data_payload is not None and notes_payload is not None:
+            supported_scopes.append('full')
+        if user_data_payload is not None:
+            supported_scopes.append('user_data_only')
+        if notes_payload is not None:
+            supported_scopes.append('notes_only')
+        if not supported_scopes:
+            raise ValueError('Backup bundle is missing both user_data and notes backups.')
+        counts = dict(manifest.get('counts', {})) if isinstance(manifest, dict) else {}
+        user_summary = _summarize_user_data_payload(raw_user_data_payload) if user_data_payload is not None else {'portfolios': 0, 'notes': 0, 'note_images': 0, 'exported_at': '', 'app_version': ''}
+        notes_summary = _summarize_notes_payload(notes_payload) if notes_payload is not None else {'notes': 0, 'note_images': 0, 'exported_at': '', 'app_version': ''}
+        return {
+            'source_kind': 'bundle',
+            'source_path': str(source_path),
+            'display_name': str(bundle_dir),
+            'manifest': manifest if isinstance(manifest, dict) else {},
+            'user_data_payload': user_data_payload,
+            'notes_payload': notes_payload,
+            'supported_scopes': supported_scopes,
+            'exported_at': str((manifest.get('exported_at') if isinstance(manifest, dict) else '') or user_summary.get('exported_at', '') or notes_summary.get('exported_at', '')),
+            'app_version': str((manifest.get('app_version') if isinstance(manifest, dict) else '') or user_summary.get('app_version', '')),
+            'portfolio_count': int(counts.get('portfolios', user_summary.get('portfolios', 0)) or 0),
+            'notes_count': int(counts.get('notes', notes_summary.get('notes', 0)) or 0),
+            'image_count': int(counts.get('note_images', notes_summary.get('note_images', 0)) or 0),
+            'found_files': found_files,
+            'missing_files': missing_files,
+        }
+
+    if source_path.suffix.lower() == '.docx':
+        notes_payload = load_notes_backup(source_path)
+        notes_summary = _summarize_notes_payload(notes_payload)
+        return {
+            'source_kind': 'notes',
+            'source_path': str(source_path),
+            'display_name': str(source_path),
+            'manifest': {},
+            'user_data_payload': None,
+            'notes_payload': notes_payload,
+            'supported_scopes': ['notes_only'],
+            'exported_at': str(notes_summary.get('exported_at', '')),
+            'app_version': '',
+            'portfolio_count': 0,
+            'notes_count': int(notes_summary.get('notes', 0) or 0),
+            'image_count': int(notes_summary.get('note_images', 0) or 0),
+            'found_files': [source_path.name],
+            'missing_files': [],
+        }
+
+    payload = _read_json(source_path, None)
+    if payload is None:
+        raise ValueError('Unable to read backup file.')
+    if source_path.name.lower() == BACKUP_BUNDLE_MANIFEST_NAME:
+        return inspect_import_source(source_path.parent)
+    if isinstance(payload, dict) and isinstance(payload.get('notes'), list) and not isinstance(payload.get('portfolios'), dict) and not any((key in payload for key in ('portfolio', 'portfolio_tracker', 'options_tracker'))):
+        notes_payload = _validate_notes_backup_payload(payload)
+        notes_summary = _summarize_notes_payload(notes_payload)
+        return {
+            'source_kind': 'notes',
+            'source_path': str(source_path),
+            'display_name': str(source_path),
+            'manifest': {},
+            'user_data_payload': None,
+            'notes_payload': notes_payload,
+            'supported_scopes': ['notes_only'],
+            'exported_at': str(notes_summary.get('exported_at', '')),
+            'app_version': '',
+            'portfolio_count': 0,
+            'notes_count': int(notes_summary.get('notes', 0) or 0),
+            'image_count': int(notes_summary.get('note_images', 0) or 0),
+            'found_files': [source_path.name],
+            'missing_files': [],
+        }
+    user_data_payload = _validate_backup_payload(payload, preserve_existing_notes=True)
+    user_summary = _summarize_user_data_payload(payload)
+    supported_scopes = ['full', 'user_data_only']
+    extracted_notes_payload = None
+    try:
+        extracted_notes_payload = _extract_notes_payload_from_user_data(payload)
+    except Exception:
+        extracted_notes_payload = None
+    if extracted_notes_payload is not None and _summarize_notes_payload(extracted_notes_payload).get('notes', 0):
+        supported_scopes.append('notes_only')
+    return {
+        'source_kind': 'user_data',
+        'source_path': str(source_path),
+        'display_name': str(source_path),
+        'manifest': {},
+        'user_data_payload': user_data_payload,
+        'notes_payload': extracted_notes_payload,
+        'supported_scopes': supported_scopes,
+        'exported_at': str(user_summary.get('exported_at', '')),
+        'app_version': str(user_summary.get('app_version', '')),
+        'portfolio_count': int(user_summary.get('portfolios', 0) or 0),
+        'notes_count': int(user_summary.get('notes', 0) or 0),
+        'image_count': int(user_summary.get('note_images', 0) or 0),
+        'found_files': [source_path.name],
+        'missing_files': [],
+    }
+
+
 def load_user_data_backup(path: Any) -> Any:
     """Load and validate a single-file backup payload."""
     payload = _read_json(path, None)
@@ -1431,6 +1699,33 @@ def apply_user_data_backup(payload: Any) -> Any:
     return _save_user_data_document(normalized)
 
 
+def apply_import_source(import_source: Any, *, scope: str='full') -> Any:
+    """Apply an inspected import source and return the current normalized user-data state."""
+    source = import_source if isinstance(import_source, dict) else {}
+    user_data_payload = source.get('user_data_payload')
+    notes_payload = source.get('notes_payload')
+    supported_scopes = list(source.get('supported_scopes', [])) if isinstance(source.get('supported_scopes', []), list) else []
+    if scope not in supported_scopes:
+        raise ValueError(f'Import scope "{scope}" is not available for this backup source.')
+    if scope == 'full':
+        if user_data_payload is None:
+            raise ValueError('Full restore requires user data.')
+        apply_user_data_backup(user_data_payload)
+        if notes_payload is not None:
+            apply_notes_backup(notes_payload)
+        return _load_user_data_document()
+    if scope == 'user_data_only':
+        if user_data_payload is None:
+            raise ValueError('This backup source does not include user data.')
+        return apply_user_data_backup(user_data_payload)
+    if scope == 'notes_only':
+        if notes_payload is None:
+            raise ValueError('This backup source does not include notes.')
+        apply_notes_backup(notes_payload)
+        return _load_user_data_document()
+    raise ValueError(f'Unknown import scope: {scope}')
+
+
 def reset_user_data(chart_slots: Any=None) -> Any:
     """Persist a cleared user-data state while preserving chart slots."""
     normalized = {
@@ -1440,6 +1735,7 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'portfolios': {
             DEFAULT_MAIN_PORTFOLIO_ID: _default_portfolio_entry(DEFAULT_MAIN_PORTFOLIO_ID, chart_slots)
         },
+        'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -1466,6 +1762,7 @@ def load_app_config() -> Any:
             'portfolios': {portfolio_id: {'name': entry.get('name')} for portfolio_id, entry in document.get('portfolios', {}).items()},
         },
         'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
+        'fundamentals_page': dict(document.get('fundamentals_page', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS)),
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
@@ -1505,6 +1802,8 @@ def save_app_config(data: Any) -> None:
             current['portfolios'][portfolio_id] = entry
     if 'theme' in saved:
         current['theme'] = _normalize_theme_payload(saved.get('theme'))
+    if 'fundamentals_page' in saved:
+        current['fundamentals_page'] = _normalize_fundamentals_page_settings(saved.get('fundamentals_page'))
     if 'chart_page' in saved:
         current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
     if 'dashboard_chart' in saved:
@@ -1570,6 +1869,15 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         raw_compare_symbols = []
     compare_symbols = _normalize_unique_symbol_list(raw_compare_symbols)
     compare_presets = _normalize_compare_presets(saved.get('compare_presets', []))
+    raw_multi_interval_labels = saved.get('multi_interval_labels', [])
+    if not isinstance(raw_multi_interval_labels, list):
+        raw_multi_interval_labels = []
+    multi_interval_labels = []
+    valid_multi_interval_labels = {'1 Minute', '5 Minutes', '15 Minutes', '1 Hour', '1 Day', '1 Week', '1 Month'}
+    for value in raw_multi_interval_labels:
+        label = str(value or '').strip()
+        if label in valid_multi_interval_labels and label not in multi_interval_labels:
+            multi_interval_labels.append(label)
     indicators = _normalize_indicator_list(saved.get('indicators'), DEFAULT_CHART_PAGE_SETTINGS['indicators'])
     auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
@@ -1581,8 +1889,80 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         'watchlist': watchlist,
         'compare_symbols': compare_symbols,
         'compare_presets': compare_presets,
+        'multi_interval_labels': multi_interval_labels,
         'indicators': indicators,
         'auto': auto_enabled,
+    }
+
+
+def _normalize_fundamentals_selection_rows(values: Any) -> list[str]:
+    """Normalize one ordered Fundamentals row-selection list."""
+    rows = []
+    if not isinstance(values, list):
+        return rows
+    for value in values:
+        row = str(value or '').strip()
+        if row and row not in rows:
+            rows.append(row)
+    return rows
+
+
+def _normalize_fundamentals_custom_selections(values: Any, *, last_ticker: str='', legacy_custom_panels: Any=None) -> dict[str, dict[str, list[str]]]:
+    """Normalize per-ticker Fundamentals checklist selections, with migration support."""
+    normalized = {}
+    raw = values if isinstance(values, dict) else {}
+    for ticker_key, selection in raw.items():
+        ticker = str(ticker_key or '').upper().strip()
+        if not ticker or not isinstance(selection, dict):
+            continue
+        family_map = {
+            'financials': _normalize_fundamentals_selection_rows(selection.get('financials', [])),
+            'cashflow': _normalize_fundamentals_selection_rows(selection.get('cashflow', [])),
+            'balance_sheet': _normalize_fundamentals_selection_rows(selection.get('balance_sheet', [])),
+        }
+        if any(family_map.values()):
+            normalized[ticker] = family_map
+    if normalized:
+        return normalized
+    ticker = str(last_ticker or '').upper().strip()
+    if not ticker or not isinstance(legacy_custom_panels, list):
+        return {}
+    migrated = {
+        'financials': [],
+        'cashflow': [],
+        'balance_sheet': [],
+    }
+    for entry in legacy_custom_panels:
+        panel = entry if isinstance(entry, dict) else {}
+        if str(panel.get('source', '') or '').strip().lower() != 'statement_row':
+            continue
+        family = str(panel.get('statement_family', 'financials') or 'financials').strip().lower()
+        if family not in migrated:
+            continue
+        row = str(panel.get('statement_row', '') or '').strip()
+        if row and row not in migrated[family]:
+            migrated[family].append(row)
+    return {ticker: migrated} if any(migrated.values()) else {}
+
+
+def _normalize_fundamentals_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the Fundamentals page."""
+    saved = settings if isinstance(settings, dict) else {}
+    last_ticker = str(saved.get('last_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['last_ticker']) or '').upper().strip()
+    selected_configuration = str(
+        saved.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
+        or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
+    ).strip().lower()
+    if selected_configuration not in {'default', 'custom'}:
+        selected_configuration = DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
+    return {
+        'last_ticker': last_ticker,
+        'selected_configuration': selected_configuration,
+        'custom_selections_by_ticker': _normalize_fundamentals_custom_selections(
+            saved.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker']),
+            last_ticker=last_ticker,
+            legacy_custom_panels=saved.get('custom_panels'),
+        ),
     }
 
 
@@ -1803,6 +2183,21 @@ def save_chart_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_chart_page_settings(settings)
     current['chart_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_fundamentals_page_settings() -> Any:
+    """Load persisted state for the Fundamentals page."""
+    config = load_app_config()
+    return _normalize_fundamentals_page_settings(config.get('fundamentals_page', {}))
+
+
+def save_fundamentals_page_settings(settings: Any) -> Any:
+    """Persist state for the Fundamentals page."""
+    current = load_app_config()
+    state = _normalize_fundamentals_page_settings(settings)
+    current['fundamentals_page'] = state
     save_app_config(current)
     return state
 

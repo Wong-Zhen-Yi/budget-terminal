@@ -80,34 +80,31 @@ class PoliticsWorker(QObject):
         if idx < 0:
             return [], 0
         push_start = html.rfind('self.__next_f.push', 0, idx)
-        next_push = html.find('self.__next_f.push', idx)
-        if next_push < 0:
-            next_push = len(html)
-        chunk = html[push_start:next_push]
-
-        m = re.search(r'push\(\[1,"(.*)', chunk, re.DOTALL)
-        if not m:
+        if push_start < 0:
             return [], 0
 
-        unesc = m.group(1).replace('\\"', '"')
-        data_idx = unesc.find('"data":[{')
+        payload = self._extract_next_push_payload(html, push_start)
+        if not payload:
+            return [], 0
+
+        data_idx = payload.find('"data":[{')
         if data_idx < 0:
             return [], 0
 
-        arr_start = unesc.index('[', data_idx)
+        arr_start = payload.index('[', data_idx)
         depth = 0
         arr_end = arr_start
-        for i in range(arr_start, len(unesc)):
-            if unesc[i] == '[':
+        for i in range(arr_start, len(payload)):
+            if payload[i] == '[':
                 depth += 1
-            elif unesc[i] == ']':
+            elif payload[i] == ']':
                 depth -= 1
             if depth == 0:
                 arr_end = i + 1
                 break
 
         try:
-            raw_trades = json.loads(unesc[arr_start:arr_end])
+            raw_trades = json.loads(payload[arr_start:arr_end])
         except json.JSONDecodeError:
             return [], 0
 
@@ -158,8 +155,52 @@ class PoliticsWorker(QObject):
         normalized['ticker'] = ticker
         normalized['asset_description'] = asset_description
         normalized['amount_value'] = amount_value or 0
+        normalized['trade_type'] = self._normalize_type(str(normalized.get('trade_type', '') or ''))
         normalized['theme'] = str(normalized.get('theme', '') or '').strip() or self._infer_theme(ticker, asset_description)
         return normalized
+
+    @staticmethod
+    def _extract_next_push_payload(html: str, push_start: int) -> str:
+        chunk = html[push_start:]
+        args_start = chunk.find('push(')
+        if args_start < 0:
+            return ''
+
+        text = chunk[args_start + 5:]
+        depth = 0
+        in_string = False
+        escaped = False
+        end = None
+        for i, ch in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    if depth == 0:
+                        end = i
+                        break
+                    depth -= 1
+
+        if end is None:
+            return ''
+
+        try:
+            payload = json.loads(text[:end])
+        except json.JSONDecodeError:
+            return ''
+
+        if not isinstance(payload, list) or len(payload) < 2 or not isinstance(payload[1], str):
+            return ''
+        return payload[1]
 
     @staticmethod
     def _parse_party(value: str) -> str:
@@ -177,9 +218,9 @@ class PoliticsWorker(QObject):
         v = value.strip().lower()
         if 'purchase' in v or 'buy' in v:
             return 'Purchase'
-        if 'sale' in v and 'partial' in v:
+        if 'partial' in v and ('sale' in v or 'sell' in v):
             return 'Sale (Partial)'
-        if 'sale' in v:
+        if 'sale' in v or 'sell' in v:
             return 'Sale (Full)'
         if 'exchange' in v:
             return 'Exchange'

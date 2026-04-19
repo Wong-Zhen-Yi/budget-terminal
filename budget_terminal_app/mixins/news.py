@@ -191,10 +191,40 @@ class NewsMixin:
                 if meta:
                     lines.append('  ' + ' | '.join(meta))
                 lines.append('')
+        compare_presets = []
+        if hasattr(self, 'p10_compare_presets'):
+            compare_presets = list(getattr(self, 'p10_compare_presets', []))
+        if not compare_presets:
+            chart_page_state = load_chart_page_settings()
+            compare_presets = list(chart_page_state.get('compare_presets', []))
+        if compare_presets:
+            lines.append('--- CHARTS COMPARE PRESETS ---')
+            lines.append('')
+            for preset in compare_presets:
+                if not isinstance(preset, dict):
+                    continue
+                name = str(preset.get('name', '') or '').strip()
+                symbols = list(preset.get('symbols', [])) if isinstance(preset.get('symbols', []), list) else []
+                interval_label = str(preset.get('interval_label', '') or '').strip()
+                range_label = str(preset.get('range_label', '') or '').strip()
+                if not name:
+                    continue
+                lines.append(f'[{name}] {", ".join(symbols)}')
+                meta = []
+                if interval_label:
+                    meta.append(f'Interval: {interval_label}')
+                if range_label:
+                    meta.append(f'Range: {range_label}')
+                if meta:
+                    lines.append('  ' + ' | '.join(meta))
+                lines.append('')
         text = '\n'.join(lines)
         total = len(portfolio_articles) + len(macro_articles)
         QApplication.clipboard().setText(text)
-        self.p3_summary_status.setText(f'Exported {total} articles to clipboard')
+        self.p3_summary_status.setText(
+            f'Exported {total} articles to clipboard'
+            + (f' with {len(compare_presets)} compare preset(s)' if compare_presets else '')
+        )
 
     def _run_summarizer(self, articles: Any, auto_trigger: bool=False) -> None:
         """Handle run summarizer."""

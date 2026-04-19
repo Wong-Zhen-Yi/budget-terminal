@@ -590,6 +590,9 @@ class WindowLifecycleMixin:
         compare_executor = getattr(self, '_p10_compare_executor', None)
         if compare_executor is not None:
             compare_executor.shutdown(wait=False, cancel_futures=True)
+        multi_interval_executor = getattr(self, '_p10_multi_interval_executor', None)
+        if multi_interval_executor is not None:
+            multi_interval_executor.shutdown(wait=False, cancel_futures=True)
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

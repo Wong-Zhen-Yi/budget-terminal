@@ -29,6 +29,11 @@ P10_AUTO_ANCHOR = 0.85
 P10_DEFAULT_STARTUP_SPAN = 80.0
 P10_MIN_REUSABLE_SPAN = 10.0
 P10_COMPARE_MAX_WORKERS = 4
+P10_MULTI_INTERVAL_MAX_WORKERS = 4
+P10_MULTI_INTERVAL_RSI_OVERBOUGHT = 70.0
+P10_MULTI_INTERVAL_RSI_OVERSOLD = 30.0
+P10_MULTI_INTERVAL_MFI_OVERBOUGHT = 80.0
+P10_MULTI_INTERVAL_MFI_OVERSOLD = 20.0
 P10_COMPARE_LABEL_MIN_PIXEL_GAP = 18.0
 P10_CACHE_PERIOD_DAY_MAP = {
     'd': 1.0,
@@ -166,6 +171,7 @@ class ChartsPageMixin:
         self._p10_update_auto_button_style()
         self._p10_update_indicator_button_styles()
         self._p10_update_timeframe_button_styles()
+        self._p10_update_multi_interval_button_styles()
         self._p10_render_indicator_panels()
         self._p10_refresh_active_subtab()
 
@@ -179,6 +185,7 @@ class ChartsPageMixin:
         self.p10_custom_watchlist = list(state.get('watchlist', []))
         self.p10_compare_symbols = list(state.get('compare_symbols', []))
         self.p10_compare_presets = list(state.get('compare_presets', []))
+        self.p10_multi_interval_labels = self._p10_initial_multi_interval_labels(state.get('multi_interval_labels', []))
         self.p10_active_indicators = list(state.get('indicators', ['Volume', '200 MA']))
         if '200 MA' not in self.p10_active_indicators:
             self.p10_active_indicators.append('200 MA')
@@ -190,6 +197,7 @@ class ChartsPageMixin:
         self._p10_chart_rows = []
         self.p10_chart_stats = {}
         self.p10_rsi_series = None
+        self.p10_rsi_ma_series = None
         self.p10_ma200_series = None
         self.p10_crosshair_proxy = None
         self._p10_request_seq = 0
@@ -198,6 +206,7 @@ class ChartsPageMixin:
         self._p10_compare_active_request = 0
         self._p10_timeframe_buttons = {}
         self._p10_compare_timeframe_buttons = {}
+        self._p10_multi_interval_buttons = {}
         self._p10_compare_range_combo = None
         self.p10_compare_preset_combo = None
         self._p10_indicator_buttons = {}
@@ -217,11 +226,17 @@ class ChartsPageMixin:
         self._p10_compare_zero_line = None
         self._p10_compare_render_signature = None
         self._p10_compare_executor = ThreadPoolExecutor(max_workers=P10_COMPARE_MAX_WORKERS)
+        self._p10_multi_interval_executor = ThreadPoolExecutor(max_workers=P10_MULTI_INTERVAL_MAX_WORKERS)
+        self._p10_multi_interval_request_token = 0
+        self._p10_multi_interval_cache = {}
+        self.p10_multi_interval_frames = {}
         self.p10_candle_item = None
         self.p10_ma_line_item = None
+        self.p10_avg_cost_line = None
         self.p10_last_price_line = None
         self.p10_volume_item = None
         self.p10_rsi_line_item = None
+        self.p10_rsi_ma_line_item = None
         self.p10_rsi_upper_line = None
         self.p10_rsi_lower_line = None
         self._p10_timeframe_group = QButtonGroup(self)
@@ -257,6 +272,7 @@ class ChartsPageMixin:
         self._p10_update_timeframe_button_styles()
         self._p10_update_auto_button_style()
         self._p10_update_indicator_button_styles()
+        self._p10_update_multi_interval_button_styles()
         self._p10_rebuild_watchlists()
         self._p10_refresh_compare_symbol_list()
         self._p10_render_indicator_panels()
@@ -281,7 +297,7 @@ class ChartsPageMixin:
         self.p10_load_btn.clicked.connect(self._p10_load_from_input)
         self.p10_refresh_btn = QPushButton('Refresh')
         self.set_theme_variant(self.p10_refresh_btn, 'accent')
-        self.p10_refresh_btn.clicked.connect(self._p10_refresh_chart)
+        self.p10_refresh_btn.clicked.connect(lambda: self._p10_refresh_chart(force_refresh=True))
         self.p10_auto_btn = QPushButton('Auto')
         self.p10_auto_btn.setCheckable(True)
         self.p10_auto_btn.clicked.connect(self._p10_toggle_auto_follow)
@@ -326,6 +342,8 @@ class ChartsPageMixin:
         self.p10_price_label.setStyleSheet('font-size: 20px; font-weight: bold;')
         self.p10_change_label = QLabel('--')
         self.p10_change_label.setStyleSheet('font-size: 13px; font-weight: bold;')
+        self.p10_position_label = QLabel('Avg --  Gain --')
+        self.p10_position_label.setStyleSheet('font-size: 12px; font-weight: bold;')
         self.p10_ohlc_label = QLabel('O --  H --  L --  C --')
         self.p10_ohlc_label.setStyleSheet('font-size: 12px;')
         self.p10_status_label = QLabel('Ready')
@@ -334,6 +352,7 @@ class ChartsPageMixin:
         info_strip.addSpacing(16)
         info_strip.addWidget(self.p10_price_label)
         info_strip.addWidget(self.p10_change_label)
+        info_strip.addWidget(self.p10_position_label)
         info_strip.addSpacing(20)
         info_strip.addWidget(self.p10_ohlc_label, 1)
         info_strip.addWidget(self.p10_status_label)
@@ -384,26 +403,6 @@ class ChartsPageMixin:
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(8)
-        watchlist_title = QLabel('Watchlist')
-        self.set_theme_role(watchlist_title, 'section_title')
-        watchlist_help = QLabel('Your custom chart symbols.')
-        self.set_theme_role(watchlist_help, 'muted')
-        watchlist_help.setWordWrap(True)
-        add_row = QHBoxLayout()
-        self.p10_watchlist_input = QLineEdit()
-        self.p10_watchlist_input.setPlaceholderText('Add symbol')
-        self.p10_watchlist_input.returnPressed.connect(self._p10_add_watchlist_symbol)
-        add_btn = QPushButton('+')
-        add_btn.setFixedWidth(32)
-        add_btn.clicked.connect(self._p10_add_watchlist_symbol)
-        rm_btn = QPushButton('Remove')
-        self.set_theme_variant(rm_btn, 'danger')
-        rm_btn.clicked.connect(self._p10_remove_watchlist_symbol)
-        add_row.addWidget(self.p10_watchlist_input, 1)
-        add_row.addWidget(add_btn)
-        add_row.addWidget(rm_btn)
-        self.p10_watchlist = QListWidget()
-        self.p10_watchlist.currentItemChanged.connect(self._p10_watchlist_selection_changed)
         portfolio_title = QLabel('Portfolio')
         self.set_theme_role(portfolio_title, 'section_title')
         portfolio_help = QLabel('Read-only symbols from your Portfolio page.')
@@ -414,14 +413,86 @@ class ChartsPageMixin:
         sidebar_layout.addWidget(portfolio_title)
         sidebar_layout.addWidget(portfolio_help)
         sidebar_layout.addWidget(self.p10_portfolio_list, 1)
-        sidebar_layout.addWidget(watchlist_title)
-        sidebar_layout.addWidget(watchlist_help)
-        sidebar_layout.addLayout(add_row)
-        sidebar_layout.addWidget(self.p10_watchlist, 1)
         body_splitter.addWidget(sidebar)
         body_splitter.setStretchFactor(0, 5)
         body_splitter.setStretchFactor(1, 2)
         layout.addWidget(body_splitter, 1)
+
+    def _p10_build_multi_interval_tab(self) -> None:
+        """Build the multi-interval subtab for one symbol."""
+        layout = QVBoxLayout(self.p10_multi_interval_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        toolbar = QHBoxLayout()
+        title = QLabel('<b>Multi Intervals</b>')
+        self.set_theme_role(title, 'page_title')
+        self.p10_multi_interval_symbol_input = QLineEdit(self.p10_symbol)
+        self.p10_multi_interval_symbol_input.setPlaceholderText('Ticker')
+        self.p10_multi_interval_symbol_input.setFixedWidth(120)
+        self.p10_multi_interval_symbol_input.returnPressed.connect(self._p10_load_multi_interval_from_input)
+        self.p10_multi_interval_load_btn = QPushButton('Load')
+        self.set_theme_variant(self.p10_multi_interval_load_btn, 'accent')
+        self.p10_multi_interval_load_btn.clicked.connect(self._p10_load_multi_interval_from_input)
+        self.p10_multi_interval_refresh_btn = QPushButton('Refresh')
+        self.set_theme_variant(self.p10_multi_interval_refresh_btn, 'accent')
+        self.p10_multi_interval_refresh_btn.clicked.connect(lambda: self._p10_refresh_multi_interval_views(force=True))
+        toolbar.addWidget(title)
+        toolbar.addSpacing(10)
+        toolbar.addWidget(self.p10_multi_interval_symbol_input)
+        toolbar.addWidget(self.p10_multi_interval_load_btn)
+        toolbar.addSpacing(16)
+        interval_label = QLabel('Timeframes')
+        self.set_theme_role(interval_label, 'muted')
+        toolbar.addWidget(interval_label)
+        for label, _, _ in P10_TIMEFRAME_OPTIONS:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(26)
+            btn.clicked.connect(partial(self._p10_toggle_multi_interval, label))
+            self._p10_multi_interval_buttons[label] = btn
+            toolbar.addWidget(btn)
+        self.p10_multi_interval_all_btn = QPushButton('All')
+        self.set_theme_variant(self.p10_multi_interval_all_btn, 'accent')
+        self.p10_multi_interval_all_btn.clicked.connect(self._p10_select_all_multi_intervals)
+        toolbar.addWidget(self.p10_multi_interval_all_btn)
+        self.p10_multi_interval_clear_btn = QPushButton('Clear')
+        self.p10_multi_interval_clear_btn.clicked.connect(self._p10_clear_multi_interval_selection)
+        toolbar.addWidget(self.p10_multi_interval_clear_btn)
+        toolbar.addStretch()
+        self.p10_multi_interval_status_label = QLabel('Loading available timeframes.')
+        self.set_theme_role(self.p10_multi_interval_status_label, 'status_muted')
+        toolbar.addWidget(self.p10_multi_interval_status_label)
+        toolbar.addWidget(self.p10_multi_interval_refresh_btn)
+        layout.addLayout(toolbar)
+
+        summary_row = QHBoxLayout()
+        self.p10_multi_interval_symbol_label = QLabel(self.p10_symbol)
+        self.p10_multi_interval_symbol_label.setStyleSheet('font-size: 22px; font-weight: bold;')
+        self.p10_multi_interval_selection_label = QLabel('Showing RSI, MFI, and MACD panels for the selected timeframes.')
+        self.set_theme_role(self.p10_multi_interval_selection_label, 'muted')
+        summary_row.addWidget(self.p10_multi_interval_symbol_label)
+        summary_row.addSpacing(14)
+        summary_row.addWidget(self.p10_multi_interval_selection_label, 1)
+        layout.addLayout(summary_row)
+
+        self.p10_multi_interval_empty_label = QLabel('Select one or more timeframes to load RSI, MFI, and MACD panels.')
+        self.set_theme_role(self.p10_multi_interval_empty_label, 'muted')
+        self.p10_multi_interval_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.p10_multi_interval_empty_label)
+
+        self.p10_multi_interval_scroll = QScrollArea()
+        self.p10_multi_interval_scroll.setWidgetResizable(True)
+        self.p10_multi_interval_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.p10_multi_interval_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.p10_multi_interval_panel_host = QWidget()
+        self.p10_multi_interval_panel_layout = QVBoxLayout(self.p10_multi_interval_panel_host)
+        self.p10_multi_interval_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.p10_multi_interval_panel_layout.setSpacing(10)
+        self.p10_multi_interval_panel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.p10_multi_interval_scroll.setWidget(self.p10_multi_interval_panel_host)
+        self.p10_multi_interval_panel_widgets = {}
+        layout.addWidget(self.p10_multi_interval_scroll, 1)
 
     def _p10_build_compare_tab(self) -> None:
         """Build the multi-symbol comparison subtab."""
@@ -566,6 +637,12 @@ class ChartsPageMixin:
         if self._p10_active_subtab_key() == 'compare' and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
+    def _p10_set_multi_interval_status(self, text: Any, status: Any='muted') -> None:
+        """Set multi-interval subtab status text."""
+        self.set_status_text(self.p10_multi_interval_status_label, text, status=str(status))
+        if self._p10_active_subtab_key() == 'multiintervals' and hasattr(self, 'status_bar'):
+            self.set_status_text(self.status_bar, text, status=str(status))
+
     def _p10_sync_active_status_to_status_bar(self) -> None:
         """Mirror the visible subtab status label into the shared window status bar."""
         if not hasattr(self, 'status_bar'):
@@ -573,6 +650,8 @@ class ChartsPageMixin:
         active_key = self._p10_active_subtab_key()
         if active_key == 'compare':
             source = self.p10_compare_status_label
+        elif active_key == 'multiintervals':
+            source = self.p10_multi_interval_status_label
         elif active_key == 'multicharts' and hasattr(self, '_mc_status'):
             source = self._mc_status
         else:
@@ -590,6 +669,8 @@ class ChartsPageMixin:
         current = self.p10_tabs.currentWidget()
         if current is getattr(self, 'p10_compare_tab', None):
             return 'compare'
+        if current is getattr(self, 'p10_multi_interval_tab', None):
+            return 'multiintervals'
         if current is getattr(self, 'p10_multi_tab', None):
             return 'multicharts'
         return 'chart'
@@ -609,6 +690,7 @@ class ChartsPageMixin:
             'watchlist': self.p10_custom_watchlist,
             'compare_symbols': self.p10_compare_symbols,
             'compare_presets': self.p10_compare_presets,
+            'multi_interval_labels': self.p10_multi_interval_labels,
             'indicators': self.p10_active_indicators,
             'auto': self.p10_auto_follow,
         })
@@ -619,6 +701,9 @@ class ChartsPageMixin:
         active_key = self._p10_active_subtab_key()
         if active_key == 'compare':
             self._p10_refresh_compare_view(force=force)
+            return
+        if active_key == 'multiintervals':
+            self._p10_refresh_multi_interval_views(force=force)
             return
         if active_key == 'multicharts':
             self._mc_on_show()
@@ -1171,6 +1256,641 @@ class ChartsPageMixin:
                 combo.blockSignals(True)
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
+        self._p10_update_multi_interval_button_styles()
+
+    def _p10_normalize_multi_interval_labels(self, values: Any) -> list[str]:
+        """Normalize saved extra-timeframe selections into a stable ordered list."""
+        normalized = []
+        valid_labels = {label for label, _, _ in P10_TIMEFRAME_OPTIONS}
+        for value in list(values or []):
+            label = str(value or '').strip()
+            if label in valid_labels and label not in normalized:
+                normalized.append(label)
+        return normalized
+
+    def _p10_initial_multi_interval_labels(self, values: Any) -> list[str]:
+        """Return saved multi-interval selections, defaulting to all available timeframes."""
+        normalized = self._p10_normalize_multi_interval_labels(values)
+        if normalized:
+            return normalized
+        return [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+
+    def _p10_update_multi_interval_button_styles(self) -> None:
+        """Refresh checked-state styling for the multi-interval selector buttons."""
+        self.p10_multi_interval_labels = self._p10_normalize_multi_interval_labels(self.p10_multi_interval_labels)
+        all_labels = [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+        for label, btn in getattr(self, '_p10_multi_interval_buttons', {}).items():
+            is_active = label in self.p10_multi_interval_labels
+            btn.blockSignals(True)
+            btn.setChecked(is_active)
+            btn.blockSignals(False)
+            self.set_theme_variant(btn, 'positive' if is_active else None)
+            btn.setProperty('bt_checked', 'true' if is_active else 'false')
+            self._repolish_widget(btn)
+        selection_label = getattr(self, 'p10_multi_interval_selection_label', None)
+        if selection_label is not None:
+            if self.p10_multi_interval_labels:
+                selection_label.setText(
+                    f'Showing {len(self.p10_multi_interval_labels)} timeframe panel(s): {", ".join(self.p10_multi_interval_labels)}'
+                )
+            else:
+                selection_label.setText('Showing RSI, MFI, and MACD panels for the selected timeframes.')
+        clear_btn = getattr(self, 'p10_multi_interval_clear_btn', None)
+        if clear_btn is not None:
+            clear_btn.setEnabled(bool(self.p10_multi_interval_labels))
+        all_btn = getattr(self, 'p10_multi_interval_all_btn', None)
+        if all_btn is not None:
+            all_btn.setEnabled(self.p10_multi_interval_labels != all_labels)
+        symbol_label = getattr(self, 'p10_multi_interval_symbol_label', None)
+        if symbol_label is not None:
+            symbol_label.setText(str(self.p10_symbol or 'SPY').upper().strip() or 'SPY')
+        symbol_input = getattr(self, 'p10_multi_interval_symbol_input', None)
+        if symbol_input is not None:
+            text = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
+            if symbol_input.text().upper().strip() != text:
+                symbol_input.setText(text)
+
+    def _p10_select_all_multi_intervals(self) -> None:
+        """Select every available timeframe for the multi-interval panel view."""
+        all_labels = [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+        if all_labels == self.p10_multi_interval_labels:
+            self._p10_update_multi_interval_button_styles()
+            self._p10_refresh_multi_interval_views()
+            return
+        self.p10_multi_interval_labels = list(all_labels)
+        self._p10_update_multi_interval_button_styles()
+        self._p10_save_state()
+        self._p10_refresh_multi_interval_views()
+
+    def _p10_clear_multi_interval_selection(self) -> None:
+        """Clear all selected extra intervals."""
+        if not self.p10_multi_interval_labels:
+            self._p10_update_multi_interval_button_styles()
+            self._p10_refresh_multi_interval_views()
+            return
+        self.p10_multi_interval_labels = []
+        self._p10_update_multi_interval_button_styles()
+        self._p10_save_state()
+        self._p10_refresh_multi_interval_views()
+
+    def _p10_toggle_multi_interval(self, label: Any, checked: Any=False) -> None:
+        """Toggle one timeframe in the multi-interval panel view."""
+        text = str(label or '').strip()
+        if text not in self._p10_timeframe_map:
+            self._p10_update_multi_interval_button_styles()
+            return
+        current = list(self.p10_multi_interval_labels)
+        if checked:
+            if text not in current:
+                current.append(text)
+        else:
+            current = [value for value in current if value != text]
+        normalized = self._p10_normalize_multi_interval_labels(current)
+        if normalized == self.p10_multi_interval_labels:
+            self._p10_update_multi_interval_button_styles()
+            return
+        self.p10_multi_interval_labels = normalized
+        self._p10_update_multi_interval_button_styles()
+        self._p10_save_state()
+        self._p10_refresh_multi_interval_views()
+
+    def _p10_load_multi_interval_from_input(self) -> None:
+        """Load the symbol for the multi-interval subtab."""
+        symbol_input = getattr(self, 'p10_multi_interval_symbol_input', None)
+        symbol = str(symbol_input.text() if symbol_input is not None else self.p10_symbol).upper().strip()
+        if not symbol:
+            return
+        self.p10_symbol = symbol
+        if hasattr(self, 'p10_symbol_input'):
+            self.p10_symbol_input.setText(symbol)
+        self._p10_chart_dirty = True
+        self._p10_update_multi_interval_button_styles()
+        self._p10_save_state()
+        self._p10_refresh_multi_interval_views(force=True)
+
+    def _p10_multi_interval_cache_key(self, symbol: Any, label: Any) -> tuple[str, str]:
+        """Build one stable cache key for a symbol/timeframe indicator payload."""
+        return (str(symbol or '').upper().strip(), str(label or '').strip())
+
+    def _p10_build_multi_interval_indicator_frame(
+        self,
+        symbol: Any,
+        labels: Any,
+        key: str,
+        fresh_payloads: Any=None,
+    ) -> Any:
+        """Build one aligned indicator frame for the selected timeframes."""
+        ordered_series = []
+        payload_map = fresh_payloads if isinstance(fresh_payloads, dict) else {}
+        for raw_label in list(labels or []):
+            label = str(raw_label or '').strip()
+            if not label:
+                continue
+            payload = payload_map.get(label)
+            if payload is None:
+                payload = self._p10_multi_interval_cache.get(self._p10_multi_interval_cache_key(symbol, label))
+            series = payload.get(key) if isinstance(payload, dict) else None
+            if series is None:
+                continue
+            normalized = pd.Series(series).astype(float).copy()
+            normalized.index = self._p10_normalize_datetime_index(normalized.index)
+            normalized = normalized[~normalized.index.duplicated(keep='last')].sort_index()
+            normalized.name = label
+            if normalized.empty:
+                continue
+            ordered_series.append(normalized)
+        if not ordered_series:
+            return pd.DataFrame()
+        frame = pd.concat(ordered_series, axis=1, join='outer').sort_index()
+        ordered_columns = [
+            str(label or '').strip()
+            for label in list(labels or [])
+            if str(label or '').strip() in frame.columns
+        ]
+        return frame.loc[:, ordered_columns]
+
+    def _p10_multi_interval_axis_mode(self, labels: Any) -> str:
+        """Return the best-fit axis label mode for the selected timeframes."""
+        labels_set = {str(label or '').strip() for label in list(labels or [])}
+        if labels_set.issubset({'1 Minute', '5 Minutes', '15 Minutes', '1 Hour'}):
+            return '1h'
+        return '1d'
+
+    def _p10_multi_interval_has_data(self, frames: dict[str, Any]) -> bool:
+        """Return whether any multi-interval indicator frame has data."""
+        for frame in list((frames or {}).values()):
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                return True
+        return False
+
+    def _p10_multi_interval_dates(self, frames: dict[str, Any]) -> list[Any]:
+        """Return one ordered union of timestamps across indicator frames."""
+        dates = None
+        for frame in list((frames or {}).values()):
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                continue
+            frame_index = self._p10_normalize_datetime_index(frame.index)
+            dates = frame_index if dates is None else dates.union(frame_index)
+        return [] if dates is None else list(dates.sort_values())
+
+    def _p10_clear_multi_interval_plot(self) -> None:
+        """Clear all rendered multi-interval timeframe panels."""
+        layout = getattr(self, 'p10_multi_interval_panel_layout', None)
+        if layout is not None:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+        self.p10_multi_interval_panel_widgets = {}
+        self.p10_multi_interval_frames = {}
+
+    def _p10_set_multi_interval_plot_title(self, plot: Any, title: str) -> None:
+        """Apply themed HTML titles to multi-interval plots."""
+        if plot is None:
+            return
+        plot.setTitle(f'<span style="color: {self.theme_color("text_primary")};">{title}</span>')
+
+    def _p10_create_multi_interval_plot_widget(self, title: str, *, minimum_height: int) -> tuple[Any, Any]:
+        """Create one themed plot widget used inside a timeframe panel."""
+        axis = DateAxisItem(orientation='bottom')
+        plot = pg.PlotWidget(axisItems={'bottom': axis})
+        self.style_plot_widget(plot)
+        plot.getPlotItem().setMenuEnabled(False)
+        plot.getPlotItem().hideAxis('left')
+        plot.getPlotItem().showAxis('right')
+        plot.getPlotItem().hideButtons()
+        plot.setMinimumHeight(minimum_height)
+        self._p10_set_multi_interval_plot_title(plot, title)
+        return plot, axis
+
+    def _p10_create_multi_interval_panel(self, symbol: Any, label: str) -> dict[str, Any]:
+        """Create one timeframe card containing RSI, MFI, and MACD panels."""
+        frame = QFrame()
+        self.set_theme_role(frame, 'panel')
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(10, 10, 10, 10)
+        frame_layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        title_label = QLabel(label)
+        self.set_theme_role(title_label, 'card_title')
+        period, interval = self._p10_timeframe_map.get(label, ('', ''))
+        detail_label = QLabel(f'{str(symbol or "").upper().strip() or "SPY"} • {period} / {interval}')
+        self.set_theme_role(detail_label, 'muted')
+        header_row.addWidget(title_label)
+        header_row.addStretch()
+        header_row.addWidget(detail_label)
+        frame_layout.addLayout(header_row)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
+        rsi_plot, rsi_axis = self._p10_create_multi_interval_plot_widget('RSI', minimum_height=118)
+        mfi_plot, mfi_axis = self._p10_create_multi_interval_plot_widget('MFI', minimum_height=118)
+        macd_plot, macd_axis = self._p10_create_multi_interval_plot_widget('MACD', minimum_height=132)
+        mfi_plot.setXLink(rsi_plot)
+        macd_plot.setXLink(rsi_plot)
+        splitter.addWidget(rsi_plot)
+        splitter.addWidget(mfi_plot)
+        splitter.addWidget(macd_plot)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 4)
+        splitter.setSizes([150, 150, 180])
+        frame_layout.addWidget(splitter)
+
+        self.p10_multi_interval_panel_layout.addWidget(frame)
+        entry = {
+            'frame': frame,
+            'title_label': title_label,
+            'detail_label': detail_label,
+            'splitter': splitter,
+            'rsi_plot': rsi_plot,
+            'rsi_axis': rsi_axis,
+            'mfi_plot': mfi_plot,
+            'mfi_axis': mfi_axis,
+            'macd_plot': macd_plot,
+            'macd_axis': macd_axis,
+        }
+        self.p10_multi_interval_panel_widgets[label] = entry
+        return entry
+
+    def _p10_multi_interval_single_label_frame(self, frame: Any, label: str) -> Any:
+        """Return one indicator frame reduced to a single timeframe column."""
+        if not isinstance(frame, pd.DataFrame) or frame.empty or label not in frame.columns:
+            return pd.DataFrame()
+        return frame.loc[:, [label]].copy()
+
+    def _p10_multi_interval_x_values(self, series: Any, date_to_index: dict[Any, int]) -> tuple[list[float], list[float]]:
+        """Map one dated indicator series onto the shared x-axis positions."""
+        x_values = []
+        y_values = []
+        normalized = pd.Series(series).astype(float)
+        normalized.index = self._p10_normalize_datetime_index(normalized.index)
+        for idx, value in normalized.items():
+            if pd.isna(value) or idx not in date_to_index:
+                continue
+            x_values.append(float(date_to_index[idx]))
+            y_values.append(float(value))
+        return x_values, y_values
+
+    def _p10_render_multi_interval_oscillator_plot(
+        self,
+        plot: Any,
+        axis: Any,
+        frame: Any,
+        ma_frame: Any,
+        dates: list[Any],
+        labels: Any,
+        *,
+        upper_line: float,
+        lower_line: float,
+    ) -> None:
+        """Render one oscillator panel for the provided timeframe list."""
+        if plot is None or axis is None:
+            return
+        axis.set_dates(dates, self._p10_multi_interval_axis_mode(labels))
+        plot_item = plot.getPlotItem()
+        try:
+            plot_item.addLegend(offset=(8, 8))
+        except Exception:
+            pass
+        date_to_index = {stamp: index for index, stamp in enumerate(dates)}
+        for row, label in enumerate(list(labels or [])):
+            if not isinstance(frame, pd.DataFrame) or frame.empty or label not in frame.columns:
+                continue
+            x_values, y_values = self._p10_multi_interval_x_values(frame[label], date_to_index)
+            if not x_values or not y_values:
+                continue
+            color = self.theme_series_color(row)
+            plot.plot(
+                x_values,
+                y_values,
+                pen=pg.mkPen(color=color, width=2),
+                name=label,
+                antialias=False,
+            )
+            if isinstance(ma_frame, pd.DataFrame) and not ma_frame.empty and label in ma_frame.columns:
+                ma_x_values, ma_y_values = self._p10_multi_interval_x_values(ma_frame[label], date_to_index)
+                if ma_x_values and ma_y_values:
+                    plot.plot(
+                        ma_x_values,
+                        ma_y_values,
+                        pen=pg.mkPen(color=color, width=1.5, style=Qt.PenStyle.DashLine),
+                        name=f'{label} MA',
+                        antialias=False,
+                    )
+        plot.addItem(pg.InfiniteLine(pos=upper_line, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine)))
+        plot.addItem(pg.InfiniteLine(pos=lower_line, angle=0, pen=self.theme_pen('accent_positive', width=1, style=Qt.PenStyle.DashLine)))
+        if dates:
+            plot.setXRange(-0.5, float(len(dates) - 1) + 0.5, padding=0)
+        plot.setYRange(0, 100, padding=0.02)
+
+    def _p10_render_multi_interval_macd_plot(
+        self,
+        plot: Any,
+        axis: Any,
+        macd_frame: Any,
+        signal_frame: Any,
+        dates: list[Any],
+        labels: Any,
+    ) -> None:
+        """Render one MACD panel for the provided timeframe list."""
+        if plot is None or axis is None:
+            return
+        axis.set_dates(dates, self._p10_multi_interval_axis_mode(labels))
+        plot_item = plot.getPlotItem()
+        try:
+            plot_item.addLegend(offset=(8, 8))
+        except Exception:
+            pass
+        date_to_index = {stamp: index for index, stamp in enumerate(dates)}
+        valid_min = None
+        valid_max = None
+        for row, label in enumerate(list(labels or [])):
+            color = self.theme_series_color(row)
+            if isinstance(macd_frame, pd.DataFrame) and not macd_frame.empty and label in macd_frame.columns:
+                x_values, y_values = self._p10_multi_interval_x_values(macd_frame[label], date_to_index)
+                if x_values and y_values:
+                    plot.plot(
+                        x_values,
+                        y_values,
+                        pen=pg.mkPen(color=color, width=2),
+                        name=f'{label} MACD',
+                        antialias=False,
+                    )
+                    series_min = min(y_values)
+                    series_max = max(y_values)
+                    valid_min = series_min if valid_min is None else min(valid_min, series_min)
+                    valid_max = series_max if valid_max is None else max(valid_max, series_max)
+            if isinstance(signal_frame, pd.DataFrame) and not signal_frame.empty and label in signal_frame.columns:
+                x_values, y_values = self._p10_multi_interval_x_values(signal_frame[label], date_to_index)
+                if x_values and y_values:
+                    plot.plot(
+                        x_values,
+                        y_values,
+                        pen=pg.mkPen(color=color, width=1.5, style=Qt.PenStyle.DashLine),
+                        name=f'{label} Signal',
+                        antialias=False,
+                    )
+                    series_min = min(y_values)
+                    series_max = max(y_values)
+                    valid_min = series_min if valid_min is None else min(valid_min, series_min)
+                    valid_max = series_max if valid_max is None else max(valid_max, series_max)
+        plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine)))
+        if dates:
+            plot.setXRange(-0.5, float(len(dates) - 1) + 0.5, padding=0)
+        if valid_min is None or valid_max is None:
+            plot.setYRange(-1, 1, padding=0.05)
+            return
+        span = valid_max - valid_min
+        padding = max(0.2, span * 0.10) if span > 0 else max(abs(valid_max) * 0.15, 0.5)
+        plot.setYRange(valid_min - padding, valid_max + padding, padding=0)
+
+    def _p10_render_multi_interval_chart(self, symbol: Any, frames: dict[str, Any], labels: Any) -> None:
+        """Render one RSI/MFI/MACD card per selected timeframe."""
+        self._p10_clear_multi_interval_plot()
+        if not self._p10_multi_interval_has_data(frames):
+            self.p10_multi_interval_empty_label.show()
+            return
+        requested_labels = list(labels or [])
+        rendered_labels = []
+        normalized_frames = {
+            'rsi': frames.get('rsi').copy() if isinstance(frames.get('rsi'), pd.DataFrame) else pd.DataFrame(),
+            'rsi_ma': frames.get('rsi_ma').copy() if isinstance(frames.get('rsi_ma'), pd.DataFrame) else pd.DataFrame(),
+            'mfi': frames.get('mfi').copy() if isinstance(frames.get('mfi'), pd.DataFrame) else pd.DataFrame(),
+            'macd': frames.get('macd').copy() if isinstance(frames.get('macd'), pd.DataFrame) else pd.DataFrame(),
+            'signal': frames.get('signal').copy() if isinstance(frames.get('signal'), pd.DataFrame) else pd.DataFrame(),
+        }
+        for label in requested_labels:
+            label_frames = {
+                'rsi': self._p10_multi_interval_single_label_frame(normalized_frames['rsi'], label),
+                'rsi_ma': self._p10_multi_interval_single_label_frame(normalized_frames['rsi_ma'], label),
+                'mfi': self._p10_multi_interval_single_label_frame(normalized_frames['mfi'], label),
+                'macd': self._p10_multi_interval_single_label_frame(normalized_frames['macd'], label),
+                'signal': self._p10_multi_interval_single_label_frame(normalized_frames['signal'], label),
+            }
+            if not self._p10_multi_interval_has_data(label_frames):
+                continue
+            dates = self._p10_multi_interval_dates(label_frames)
+            if not dates:
+                continue
+            panel = self._p10_create_multi_interval_panel(symbol, label)
+            self._p10_render_multi_interval_oscillator_plot(
+                panel['rsi_plot'],
+                panel['rsi_axis'],
+                label_frames['rsi'],
+                label_frames['rsi_ma'],
+                dates,
+                [label],
+                upper_line=P10_MULTI_INTERVAL_RSI_OVERBOUGHT,
+                lower_line=P10_MULTI_INTERVAL_RSI_OVERSOLD,
+            )
+            self._p10_render_multi_interval_oscillator_plot(
+                panel['mfi_plot'],
+                panel['mfi_axis'],
+                label_frames['mfi'],
+                pd.DataFrame(),
+                dates,
+                [label],
+                upper_line=P10_MULTI_INTERVAL_MFI_OVERBOUGHT,
+                lower_line=P10_MULTI_INTERVAL_MFI_OVERSOLD,
+            )
+            self._p10_render_multi_interval_macd_plot(
+                panel['macd_plot'],
+                panel['macd_axis'],
+                label_frames['macd'],
+                label_frames['signal'],
+                dates,
+                [label],
+            )
+            rendered_labels.append(label)
+        if not rendered_labels:
+            self.p10_multi_interval_empty_label.show()
+            return
+        self.p10_multi_interval_frames = {
+            'symbol': str(symbol or '').upper().strip(),
+            'labels': rendered_labels,
+            'rsi': normalized_frames['rsi'],
+            'rsi_ma': normalized_frames['rsi_ma'],
+            'mfi': normalized_frames['mfi'],
+            'macd': normalized_frames['macd'],
+            'signal': normalized_frames['signal'],
+        }
+        self.p10_multi_interval_empty_label.hide()
+
+    def _p10_refresh_multi_interval_views(self, *, force: bool=False) -> None:
+        """Refresh the selected timeframe indicators for the active symbol."""
+        if not hasattr(self, 'p10_multi_interval_panel_layout'):
+            return
+        self.p10_multi_interval_labels = self._p10_normalize_multi_interval_labels(self.p10_multi_interval_labels)
+        self._p10_update_multi_interval_button_styles()
+        labels = list(self.p10_multi_interval_labels)
+        self._p10_multi_interval_request_token += 1
+        request_token = self._p10_multi_interval_request_token
+        symbol_input = getattr(self, 'p10_multi_interval_symbol_input', None)
+        input_text = symbol_input.text() if symbol_input is not None else ''
+        symbol = str(self.p10_symbol or input_text or 'SPY').upper().strip() or 'SPY'
+        self.p10_symbol = symbol
+        self._p10_update_multi_interval_button_styles()
+        if not labels:
+            self._p10_clear_multi_interval_plot()
+            self.p10_multi_interval_empty_label.setText('Select one or more timeframes to load RSI, MFI, and MACD panels.')
+            self.p10_multi_interval_empty_label.show()
+            self._p10_set_multi_interval_status('Select one or more timeframes.', 'muted')
+            return
+        cached_payloads = {}
+        refresh_labels = []
+        for label in labels:
+            cache_key = self._p10_multi_interval_cache_key(symbol, label)
+            cached_payload = self._p10_multi_interval_cache.get(cache_key)
+            if isinstance(cached_payload, dict):
+                cached_payloads[label] = cached_payload
+            if force or not isinstance(cached_payload, dict):
+                refresh_labels.append(label)
+        frames = {
+            'rsi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi', cached_payloads),
+            'rsi_ma': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi_ma', cached_payloads),
+            'mfi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'mfi', cached_payloads),
+            'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd', cached_payloads),
+            'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal', cached_payloads),
+        }
+        if self._p10_multi_interval_has_data(frames):
+            self._p10_render_multi_interval_chart(symbol, frames, labels)
+            self.p10_multi_interval_empty_label.setText('Select one or more timeframes to load RSI, MFI, and MACD panels.')
+        else:
+            self._p10_clear_multi_interval_plot()
+            self.p10_multi_interval_empty_label.setText('Loading selected timeframe panels...')
+            self.p10_multi_interval_empty_label.show()
+        if not refresh_labels:
+            self._p10_set_multi_interval_status(
+                f'Loaded RSI, MFI, and MACD panels for {len(labels)} timeframe(s) from memory cache.',
+                'positive',
+            )
+            return
+        self._p10_set_multi_interval_status(
+            f'Loading indicator panels for {len(refresh_labels)} timeframe(s)...',
+            'info',
+        )
+        executor = getattr(self, '_p10_multi_interval_executor', None)
+        if executor is None:
+            return
+        for label in refresh_labels:
+            executor.submit(self._p10_request_multi_interval_payload, request_token, symbol, label, force)
+
+    def _p10_request_multi_interval_payload(self, request_token: int, symbol: str, label: str, force_refresh: bool=False) -> None:
+        """Background worker that fetches one selected indicator payload."""
+        try:
+            payload = self._p10_fetch_multi_interval_payload(symbol, label, force_refresh=force_refresh)
+            self._invoke_main.emit(
+                lambda token=request_token, sym=symbol, lbl=label, data=payload: self._p10_apply_multi_interval_payload(token, sym, lbl, data)
+            )
+        except Exception as exc:
+            self._invoke_main.emit(
+                lambda token=request_token, sym=symbol, lbl=label, err=str(exc): self._p10_handle_multi_interval_error(token, sym, lbl, err)
+            )
+
+    def _p10_fetch_multi_interval_payload(self, symbol: Any, label: Any, *, force_refresh: bool=False) -> Any:
+        """Fetch one timeframe dataset for the multi-interval indicator view."""
+        period, interval = self._p10_timeframe_map.get(label, self._p10_timeframe_map['1 Day'])
+        payload = self._chart_fetch_payload(
+            symbol,
+            period=period,
+            interval=interval,
+            timeframe_label=label,
+            include_rsi=False,
+            include_ma200=False,
+            force_refresh=force_refresh,
+        )
+        df = payload.get('df') if isinstance(payload, dict) else None
+        close_series = df['Close'] if isinstance(df, pd.DataFrame) and 'Close' in df else pd.Series(dtype=float)
+        macd_line, signal_line, _ = self._p10_calculate_macd(close_series)
+        payload['rsi'] = self._p10_calculate_rsi(close_series)
+        payload['rsi_ma'] = self._p10_calculate_rsi_ma(payload['rsi'])
+        payload['mfi'] = self._p10_calculate_mfi(df)
+        payload['macd'] = macd_line
+        payload['macd_signal'] = signal_line
+        return payload
+
+    def _p10_apply_multi_interval_payload(self, request_token: int, symbol: str, label: str, payload: Any) -> None:
+        """Merge one fetched timeframe payload into the indicator view."""
+        active_symbol = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
+        if request_token != self._p10_multi_interval_request_token or label not in self.p10_multi_interval_labels or symbol != active_symbol:
+            return
+        if isinstance(payload, dict):
+            self._p10_multi_interval_cache[self._p10_multi_interval_cache_key(symbol, label)] = payload
+        labels = list(self.p10_multi_interval_labels)
+        frames = {
+            'rsi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi'),
+            'rsi_ma': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi_ma'),
+            'mfi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'mfi'),
+            'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd'),
+            'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal'),
+        }
+        if self._p10_multi_interval_has_data(frames):
+            self._p10_render_multi_interval_chart(symbol, frames, labels)
+            loaded_count = sum(
+                1
+                for current_label in labels
+                if isinstance(self._p10_multi_interval_cache.get(self._p10_multi_interval_cache_key(symbol, current_label)), dict)
+            )
+            self._p10_set_multi_interval_status(
+                f'Loaded timeframe panels for {loaded_count}/{len(labels)} timeframe(s).',
+                'positive' if loaded_count >= len(labels) else 'info',
+            )
+            return
+        self._p10_clear_multi_interval_plot()
+        self.p10_multi_interval_empty_label.setText('No timeframe panel data could be loaded.')
+        self.p10_multi_interval_empty_label.show()
+        self._p10_set_multi_interval_status('No multi-interval timeframe data was available.', 'warning')
+
+    def _p10_handle_multi_interval_error(self, request_token: int, symbol: str, label: str, message: str) -> None:
+        """Show a fetch failure for one selected indicator timeframe."""
+        active_symbol = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
+        if request_token != self._p10_multi_interval_request_token or label not in self.p10_multi_interval_labels or symbol != active_symbol:
+            return
+        labels = list(self.p10_multi_interval_labels)
+        frames = {
+            'rsi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi'),
+            'rsi_ma': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi_ma'),
+            'mfi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'mfi'),
+            'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd'),
+            'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal'),
+        }
+        if self._p10_multi_interval_has_data(frames):
+            self._p10_render_multi_interval_chart(symbol, frames, labels)
+        else:
+            self._p10_clear_multi_interval_plot()
+            self.p10_multi_interval_empty_label.setText('No timeframe panel data could be loaded.')
+            self.p10_multi_interval_empty_label.show()
+        self._p10_set_multi_interval_status(f'{label} timeframe load failed: {message}', 'negative')
+
+    def _p10_apply_multi_interval_theme(self) -> None:
+        """Restyle the multi-interval timeframe panels after a theme change."""
+        if hasattr(self, 'p10_multi_interval_symbol_label'):
+            self.p10_multi_interval_symbol_label.setStyleSheet(
+                f'font-size: 22px; font-weight: bold; color: {self.theme_color("text_primary")};'
+            )
+        if hasattr(self, 'p10_multi_interval_status_label'):
+            self._p10_set_multi_interval_status(
+                self.p10_multi_interval_status_label.text(),
+                self.p10_multi_interval_status_label.property('bt_status') or 'muted',
+            )
+        self._p10_update_multi_interval_button_styles()
+        frames = getattr(self, 'p10_multi_interval_frames', {})
+        if self._p10_multi_interval_has_data(frames):
+            self._p10_render_multi_interval_chart(
+                frames.get('symbol', self.p10_symbol),
+                {
+                    'rsi': frames.get('rsi'),
+                    'rsi_ma': frames.get('rsi_ma'),
+                    'mfi': frames.get('mfi'),
+                    'macd': frames.get('macd'),
+                    'signal': frames.get('signal'),
+                },
+                frames.get('labels', self.p10_multi_interval_labels),
+            )
 
     def _p10_update_indicator_button_styles(self) -> None:
         """Highlight active indicator buttons."""
@@ -1251,6 +1971,12 @@ class ChartsPageMixin:
             return
         self.p10_symbol = symbol
         self.p10_symbol_input.setText(symbol)
+        if hasattr(self, 'p10_multi_interval_symbol_input'):
+            self.p10_multi_interval_symbol_input.setText(symbol)
+        if self._p10_active_subtab_key() == 'multiintervals':
+            self._p10_chart_dirty = True
+            self._p10_refresh_multi_interval_views(force=True)
+            return
         self._p10_refresh_chart()
 
     def _p10_add_watchlist_symbol(self) -> None:
@@ -1297,33 +2023,47 @@ class ChartsPageMixin:
         """Rebuild custom watchlist and portfolio list sections."""
         self._p10_watchlist_sync_guard = True
         try:
-            self.p10_watchlist.clear()
-            self.p10_portfolio_list.clear()
+            watchlist_widget = getattr(self, 'p10_watchlist', None)
+            portfolio_widget = getattr(self, 'p10_portfolio_list', None)
+            if watchlist_widget is not None:
+                watchlist_widget.clear()
+            if portfolio_widget is None:
+                return
+            portfolio_widget.clear()
             portfolio_symbols = []
             for ticker in self.tickers:
                 text = str(ticker or '').upper().strip()
                 if text and text not in portfolio_symbols:
                     portfolio_symbols.append(text)
-            watchlist_row = 0
-            for row, symbol in enumerate(self.p10_custom_watchlist):
-                item = QListWidgetItem(symbol)
-                item.setData(Qt.ItemDataRole.UserRole, symbol)
-                item.setForeground(self.theme_qcolor('text_secondary'))
-                self.p10_watchlist.addItem(item)
-                if symbol == self.p10_symbol:
-                    watchlist_row = row
-            if self.p10_watchlist.count():
-                self.p10_watchlist.setCurrentRow(watchlist_row)
+            portfolio_symbols = sorted(
+                portfolio_symbols,
+                key=lambda symbol: (
+                    self._p10_portfolio_gain_pct(symbol) is None,
+                    -(self._p10_portfolio_gain_pct(symbol) or 0.0),
+                    symbol,
+                ),
+            )
+            if watchlist_widget is not None:
+                watchlist_row = 0
+                for row, symbol in enumerate(self.p10_custom_watchlist):
+                    item = QListWidgetItem(symbol)
+                    item.setData(Qt.ItemDataRole.UserRole, symbol)
+                    item.setForeground(self.theme_qcolor('text_secondary'))
+                    watchlist_widget.addItem(item)
+                    if symbol == self.p10_symbol:
+                        watchlist_row = row
+                if watchlist_widget.count():
+                    watchlist_widget.setCurrentRow(watchlist_row)
             portfolio_row = 0
             for row, symbol in enumerate(portfolio_symbols):
-                item = QListWidgetItem(symbol)
+                item = QListWidgetItem(self._p10_portfolio_list_label(symbol))
                 item.setData(Qt.ItemDataRole.UserRole, symbol)
                 item.setForeground(self.theme_qcolor('accent'))
-                self.p10_portfolio_list.addItem(item)
+                portfolio_widget.addItem(item)
                 if symbol == self.p10_symbol:
                     portfolio_row = row
-            if self.p10_portfolio_list.count():
-                self.p10_portfolio_list.setCurrentRow(portfolio_row)
+            if portfolio_widget.count():
+                portfolio_widget.setCurrentRow(portfolio_row)
         finally:
             self._p10_watchlist_sync_guard = False
         if getattr(self, '_mc_initialized', False):
@@ -1331,7 +2071,7 @@ class ChartsPageMixin:
             if self._p10_active_subtab_key() == 'multicharts':
                 self._mc_on_show()
 
-    def _p10_refresh_chart(self) -> None:
+    def _p10_refresh_chart(self, force_refresh: bool=False) -> None:
         """Refresh the dedicated chart page for the active symbol/timeframe."""
         symbol = str(self.p10_symbol or self.p10_symbol_input.text() or 'SPY').upper().strip()
         if not symbol:
@@ -1353,7 +2093,7 @@ class ChartsPageMixin:
         def _run() -> None:
             """Fetch chart data in the background."""
             try:
-                data = self._p10_fetch_chart_payload(symbol, self.p10_timeframe_label)
+                data = self._p10_fetch_chart_payload(symbol, self.p10_timeframe_label, force_refresh=bool(force_refresh))
                 self._invoke_main.emit(lambda payload=data, req=request_id: self._p10_apply_chart_payload(req, payload))
             except Exception as exc:
                 self._invoke_main.emit(lambda err=str(exc), req=request_id: self._p10_handle_chart_error(req, err))
@@ -1711,6 +2451,7 @@ class ChartsPageMixin:
         df = self._chart_fetch_base_frame(symbol, period=period, interval=interval, force_refresh=force_refresh)
         ma200_series = self._p10_fetch_daily_ma200(symbol, df) if include_ma200 else None
         rsi_series = self._p10_calculate_rsi(df['Close']) if include_rsi else None
+        rsi_ma_series = self._p10_calculate_rsi_ma(rsi_series) if include_rsi else None
         latest = df.iloc[-1]
         prev_close = float(df['Close'].iloc[-2]) if len(df) > 1 else float(latest['Close'])
         last_close = float(latest['Close'])
@@ -1732,10 +2473,11 @@ class ChartsPageMixin:
                 'change_pct': change_pct,
             },
             'rsi': rsi_series,
+            'rsi_ma': rsi_ma_series,
             'ma200': ma200_series,
         }
 
-    def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any) -> Any:
+    def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any, *, force_refresh: bool=False) -> Any:
         """Fetch a single chart dataset plus summary stats."""
         period, interval = self._p10_timeframe_map.get(timeframe_label, self._p10_timeframe_map['1 Day'])
         return self._chart_fetch_payload(
@@ -1745,6 +2487,7 @@ class ChartsPageMixin:
             timeframe_label=timeframe_label,
             include_rsi=True,
             include_ma200=True,
+            force_refresh=force_refresh,
         )
 
     def _p10_calculate_rsi(self, close_series: Any, period: Any=14) -> Any:
@@ -1758,6 +2501,58 @@ class ChartsPageMixin:
         rs = avg_gain / avg_loss.replace(0, pd.NA)
         rsi = 100 - 100 / (1 + rs)
         return rsi.bfill().clip(lower=0, upper=100)
+
+    def _p10_calculate_rsi_ma(self, rsi_series: Any, period: int=14) -> Any:
+        """Calculate a simple moving average over an RSI series."""
+        rsi = pd.Series(rsi_series).astype(float)
+        if rsi.empty:
+            return pd.Series(dtype=float)
+        return rsi.rolling(period, min_periods=period).mean().bfill().clip(lower=0, upper=100)
+
+    def _p10_calculate_mfi(self, df: Any, period: int=14) -> Any:
+        """Calculate an MFI series from OHLCV data."""
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.Series(dtype=float)
+        required = ('High', 'Low', 'Close', 'Volume')
+        if any(column not in df.columns for column in required):
+            return pd.Series(index=getattr(df, 'index', pd.Index([])), dtype=float)
+        high = pd.Series(df['High'], index=df.index).astype(float)
+        low = pd.Series(df['Low'], index=df.index).astype(float)
+        close = pd.Series(df['Close'], index=df.index).astype(float)
+        volume = pd.Series(df['Volume'], index=df.index).fillna(0.0).astype(float)
+        typical_price = (high + low + close) / 3.0
+        raw_money_flow = typical_price * volume
+        price_delta = typical_price.diff()
+        positive_flow = raw_money_flow.where(price_delta > 0, 0.0)
+        negative_flow = raw_money_flow.where(price_delta < 0, 0.0).abs()
+        positive_sum = positive_flow.rolling(period, min_periods=period).sum()
+        negative_sum = negative_flow.rolling(period, min_periods=period).sum()
+        money_ratio = positive_sum / negative_sum.replace(0.0, float('nan'))
+        mfi = 100.0 - (100.0 / (1.0 + money_ratio))
+        mfi = pd.Series(mfi, index=df.index, dtype=float)
+        mfi = mfi.where(~((negative_sum == 0) & (positive_sum > 0)), 100.0)
+        mfi = mfi.where(~((positive_sum == 0) & (negative_sum > 0)), 0.0)
+        mfi = mfi.where(~((positive_sum == 0) & (negative_sum == 0)), 50.0)
+        return mfi.clip(lower=0.0, upper=100.0)
+
+    def _p10_calculate_macd(
+        self,
+        close_series: Any,
+        fast_period: int=12,
+        slow_period: int=26,
+        signal_period: int=9,
+    ) -> tuple[Any, Any, Any]:
+        """Calculate MACD, signal, and histogram series from closes."""
+        closes = pd.Series(close_series).astype(float)
+        if closes.empty:
+            empty = pd.Series(dtype=float)
+            return empty, empty, empty
+        fast_ema = closes.ewm(span=fast_period, adjust=False, min_periods=fast_period).mean()
+        slow_ema = closes.ewm(span=slow_period, adjust=False, min_periods=slow_period).mean()
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean()
+        histogram = macd_line - signal_line
+        return macd_line, signal_line, histogram
 
     def _p10_fetch_daily_ma200(self, symbol: Any, source_df: Any) -> Any:
         """Build a 200-day moving average aligned to the active chart index."""
@@ -1791,6 +2586,82 @@ class ChartsPageMixin:
         aligned.index = source_df.index
         return aligned
 
+    def _p10_portfolio_avg_price(self, symbol: Any) -> Any:
+        """Return the user's tracked average purchase price for one symbol."""
+        tracker = getattr(self, 'tracker_data', {})
+        if not isinstance(tracker, dict):
+            return None
+        symbol_text = str(symbol or '').upper().strip()
+        entry = tracker.get(symbol_text)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            shares = float(entry.get('shares', 0) or 0)
+            avg_price = float(entry.get('avg_price', 0) or 0)
+        except Exception:
+            return None
+        if not math.isfinite(shares) or not math.isfinite(avg_price) or shares <= 0 or avg_price <= 0:
+            return None
+        return avg_price
+
+    def _p10_portfolio_current_price(self, symbol: Any) -> Any:
+        """Return the latest known price for one tracked portfolio symbol."""
+        symbol_text = str(symbol or '').upper().strip()
+        if not symbol_text:
+            return None
+        last_data = getattr(self, 'last_data', None)
+        portfolio_quotes = last_data.get('portfolio', {}) if isinstance(last_data, dict) else {}
+        quote = portfolio_quotes.get(symbol_text) if isinstance(portfolio_quotes, dict) else None
+        if not isinstance(quote, dict):
+            return None
+        try:
+            price = float(quote.get('price', 0) or 0)
+        except Exception:
+            return None
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return price
+
+    def _p10_portfolio_gain_pct(self, symbol: Any) -> Any:
+        """Return the current gain percentage for one tracked portfolio symbol."""
+        avg_price = self._p10_portfolio_avg_price(symbol)
+        current_price = self._p10_portfolio_current_price(symbol)
+        if avg_price is None or current_price is None or avg_price <= 0:
+            return None
+        gain_pct = ((current_price / avg_price) - 1.0) * 100.0
+        if not math.isfinite(gain_pct):
+            return None
+        return gain_pct
+
+    def _p10_portfolio_list_label(self, symbol: Any) -> str:
+        """Return one portfolio sidebar label."""
+        return str(symbol or '').upper().strip()
+
+    def _p10_refresh_avg_cost_line(self, symbol: Any, last_close: Any) -> None:
+        """Render or remove the user's tracked average-cost line on the main chart."""
+        avg_price = self._p10_portfolio_avg_price(symbol)
+        if avg_price is None:
+            self._p10_remove_chart_item(self.p10_main_plot, getattr(self, 'p10_avg_cost_line', None))
+            self.p10_avg_cost_line = None
+            return
+        color_key = 'accent_positive'
+        try:
+            if float(last_close) < float(avg_price):
+                color_key = 'accent_negative'
+        except Exception:
+            pass
+        avg_cost_line = getattr(self, 'p10_avg_cost_line', None)
+        if avg_cost_line is None:
+            avg_cost_line = pg.InfiniteLine(
+                pos=float(avg_price),
+                angle=0,
+                pen=self.theme_pen(color_key, width=1.5, style=Qt.PenStyle.DashLine),
+            )
+            self.p10_main_plot.addItem(avg_cost_line)
+            self.p10_avg_cost_line = avg_cost_line
+        avg_cost_line.setPen(self.theme_pen(color_key, width=1.5, style=Qt.PenStyle.DashLine))
+        avg_cost_line.setValue(float(avg_price))
+
     def _p10_apply_chart_payload(self, request_id: Any, payload: Any) -> None:
         """Render fetched chart payload if it is the latest request."""
         if request_id != self._p10_active_request:
@@ -1802,12 +2673,17 @@ class ChartsPageMixin:
         self.p10_chart_stats = stats
         self.p10_chart_df = df
         self.p10_rsi_series = payload.get('rsi')
+        self.p10_rsi_ma_series = payload.get('rsi_ma')
         self.p10_ma200_series = payload.get('ma200')
         self.p10_symbol = symbol
         self.p10_symbol_input.setText(symbol)
         self.p10_symbol_label.setText(symbol)
+        if hasattr(self, 'p10_multi_interval_symbol_input'):
+            self.p10_multi_interval_symbol_input.setText(symbol)
+        if hasattr(self, 'p10_multi_interval_symbol_label'):
+            self.p10_multi_interval_symbol_label.setText(symbol)
         self._p10_chart_rows = list(df.itertuples())
-        self._p10_render_main_chart(stats, interval, payload.get('rsi'), payload.get('ma200'))
+        self._p10_render_main_chart(stats, interval, payload.get('rsi'), payload.get('rsi_ma'), payload.get('ma200'))
         if self.p10_auto_follow:
             self._p10_apply_auto_x_range(self._p10_pending_x_range)
         else:
@@ -1823,7 +2699,7 @@ class ChartsPageMixin:
         self._set_data_collection_info(['yfinance'])
         self._p10_set_status(f'Loaded {symbol} {self.p10_timeframe_label}.', 'positive')
 
-    def _p10_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, ma200_series: Any=None) -> None:
+    def _p10_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, rsi_ma_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main candlestick chart and lower indicator panels."""
         points = []
         volume_brushes = []
@@ -1862,6 +2738,7 @@ class ChartsPageMixin:
             self.p10_main_plot.addItem(last_price_line)
             self.p10_last_price_line = last_price_line
         last_price_line.setValue(last_close)
+        self._p10_refresh_avg_cost_line(getattr(self, 'p10_symbol', ''), last_close)
         dates = self.p10_chart_df.index.to_list()
         self.p10_chart_axis.set_dates(dates, interval)
         self.p10_volume_axis.set_dates(dates, interval)
@@ -1885,6 +2762,16 @@ class ChartsPageMixin:
                 rsi_line_item = self.p10_rsi_plot.plot([], [], pen=self.theme_pen('chart_rsi', width=2.0), antialias=True)
                 self.p10_rsi_line_item = rsi_line_item
             rsi_line_item.setData(x_values, y_values)
+            if rsi_ma_series is not None:
+                rsi_ma_values = [float(value) if not pd.isna(value) else float('nan') for value in rsi_ma_series]
+                rsi_ma_line_item = getattr(self, 'p10_rsi_ma_line_item', None)
+                if rsi_ma_line_item is None:
+                    rsi_ma_line_item = self.p10_rsi_plot.plot([], [], pen=self.theme_pen('chart_reference', width=1.5, style=Qt.PenStyle.DashLine), antialias=True)
+                    self.p10_rsi_ma_line_item = rsi_ma_line_item
+                rsi_ma_line_item.setData(x_values, rsi_ma_values)
+            else:
+                self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_ma_line_item', None))
+                self.p10_rsi_ma_line_item = None
             rsi_upper_line = getattr(self, 'p10_rsi_upper_line', None)
             if rsi_upper_line is None:
                 rsi_upper_line = pg.InfiniteLine(pos=70, angle=0, pen=self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
@@ -1898,9 +2785,11 @@ class ChartsPageMixin:
             self.p10_rsi_plot.setYRange(0, 100, padding=0.02)
         else:
             self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_line_item', None))
+            self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_ma_line_item', None))
             self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_upper_line', None))
             self._p10_remove_chart_item(self.p10_rsi_plot, getattr(self, 'p10_rsi_lower_line', None))
             self.p10_rsi_line_item = None
+            self.p10_rsi_ma_line_item = None
             self.p10_rsi_upper_line = None
             self.p10_rsi_lower_line = None
         self._p10_refresh_chart_presentation()
@@ -1930,6 +2819,8 @@ class ChartsPageMixin:
             self.p10_price_label.setText('--')
             self.p10_change_label.setText('--')
             self.p10_change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {self.theme_color("text_muted")};')
+            self.p10_position_label.setText('Avg --  Gain --')
+            self.p10_position_label.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {self.theme_color("text_muted")};')
             return
         close_value = float(stats.get('close', 0.0))
         change_value = float(stats.get('change_value', 0.0))
@@ -1939,6 +2830,16 @@ class ChartsPageMixin:
         self.p10_price_label.setText(f'${close_value:,.2f}')
         self.p10_change_label.setText(f'{sign}${change_value:,.2f} ({sign}{change_pct:.2f}%)')
         self.p10_change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {change_color};')
+        avg_price = self._p10_portfolio_avg_price(getattr(self, 'p10_symbol', ''))
+        if avg_price is None:
+            self.p10_position_label.setText('Avg --  Gain --')
+            self.p10_position_label.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {self.theme_color("text_muted")};')
+            return
+        gain_pct = ((close_value / avg_price) - 1.0) * 100.0 if avg_price > 0 else 0.0
+        gain_color = self.theme_color('accent_positive' if gain_pct >= 0 else 'accent_negative')
+        gain_sign = '+' if gain_pct >= 0 else ''
+        self.p10_position_label.setText(f'Avg ${avg_price:,.2f}  Gain {gain_sign}{gain_pct:.2f}%')
+        self.p10_position_label.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {gain_color};')
 
     def _p10_set_overlay_text(self, key: Any, plot: Any, text: Any, color: Any) -> None:
         """Render a top-right overlay label inside a plot."""
@@ -1964,14 +2865,11 @@ class ChartsPageMixin:
     def _p10_refresh_overlay_positions(self, *_: Any) -> None:
         """Keep indicator overlay labels pinned near the top-right of each plot."""
         config = (
-            ('ma200', self.p10_main_plot),
-            ('volume', self.p10_volume_plot),
-            ('rsi', self.p10_rsi_plot),
+            (self.p10_main_plot, ('ma200', 'avg_cost')),
+            (self.p10_volume_plot, ('volume',)),
+            (self.p10_rsi_plot, ('rsi', 'rsi_ma')),
         )
-        for key, plot in config:
-            item = self._p10_overlay_items.get(key)
-            if item is None:
-                continue
+        for plot, keys in config:
             try:
                 x_range, y_range = plot.getPlotItem().vb.viewRange()
             except Exception:
@@ -1979,8 +2877,13 @@ class ChartsPageMixin:
             x_left, x_right = x_range
             y_bottom, y_top = y_range
             x_pos = float(x_right) - (float(x_right) - float(x_left)) * 0.02
-            y_pos = float(y_top) - (float(y_top) - float(y_bottom)) * 0.04
-            item.setPos(x_pos, y_pos)
+            visible_keys = [key for key in keys if self._p10_overlay_items.get(key) is not None]
+            for index, key in enumerate(visible_keys):
+                item = self._p10_overlay_items.get(key)
+                if item is None:
+                    continue
+                y_pos = float(y_top) - (float(y_top) - float(y_bottom)) * (0.04 + (index * 0.08))
+                item.setPos(x_pos, y_pos)
 
     def _p10_update_indicator_panel_labels(self) -> None:
         """Show latest indicator outputs inside their respective chart panels."""
@@ -1993,6 +2896,13 @@ class ChartsPageMixin:
                         latest_ma = float(value)
                         break
             ma_text = f"MA200 ${latest_ma:,.2f}" if latest_ma is not None else 'MA200 --'
+        avg_text = ''
+        avg_price = self._p10_portfolio_avg_price(getattr(self, 'p10_symbol', ''))
+        close_value = float(getattr(self, 'p10_chart_stats', {}).get('close', 0.0) or 0.0)
+        if avg_price is not None:
+            gain_pct = ((close_value / avg_price) - 1.0) * 100.0 if avg_price > 0 else 0.0
+            gain_sign = '+' if gain_pct >= 0 else ''
+            avg_text = f'Avg ${avg_price:,.2f} | Gain {gain_sign}{gain_pct:.2f}%'
         volume_text = ''
         if 'Volume' in self.p10_active_indicators:
             if self._p10_chart_rows:
@@ -2009,9 +2919,25 @@ class ChartsPageMixin:
                         latest_rsi = float(value)
                         break
             rsi_text = f"RSI(14) {latest_rsi:.2f}" if latest_rsi is not None else 'RSI(14) --'
+        rsi_ma_text = ''
+        if 'RSI' in self.p10_active_indicators:
+            latest_rsi_ma = None
+            if self.p10_rsi_ma_series is not None and len(self.p10_rsi_ma_series):
+                for value in reversed(list(self.p10_rsi_ma_series)):
+                    if not pd.isna(value):
+                        latest_rsi_ma = float(value)
+                        break
+            rsi_ma_text = f"RSI MA(14) {latest_rsi_ma:.2f}" if latest_rsi_ma is not None else 'RSI MA(14) --'
         self._p10_set_overlay_text('ma200', self.p10_main_plot, ma_text, self.theme_color('chart_ma'))
+        self._p10_set_overlay_text(
+            'avg_cost',
+            self.p10_main_plot,
+            avg_text,
+            self.theme_color('accent_positive' if avg_price is not None and close_value >= avg_price else 'accent_negative'),
+        )
         self._p10_set_overlay_text('volume', self.p10_volume_plot, volume_text, self.theme_color('chart_reference'))
         self._p10_set_overlay_text('rsi', self.p10_rsi_plot, rsi_text, self.theme_color('chart_rsi'))
+        self._p10_set_overlay_text('rsi_ma', self.p10_rsi_plot, rsi_ma_text, self.theme_color('chart_reference'))
         self._p10_refresh_overlay_positions()
 
     def _p10_remove_chart_item(self, plot: Any, item: Any) -> None:
@@ -2048,6 +2974,10 @@ class ChartsPageMixin:
         if last_price_line is not None:
             last_price_line.setPen(self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
             last_price_line.setValue(float(getattr(self, 'p10_chart_stats', {}).get('close', 0.0)))
+        self._p10_refresh_avg_cost_line(
+            getattr(self, 'p10_symbol', ''),
+            float(getattr(self, 'p10_chart_stats', {}).get('close', 0.0) or 0.0),
+        )
         volume_item = getattr(self, 'p10_volume_item', None)
         if volume_item is not None and self._p10_chart_rows:
             try:
@@ -2057,6 +2987,11 @@ class ChartsPageMixin:
         rsi_line_item = getattr(self, 'p10_rsi_line_item', None)
         if rsi_line_item is not None:
             rsi_line_item.setPen(self.theme_pen('chart_rsi', width=2.0))
+            rsi_line_item.setVisible(self.p10_rsi_series is not None and 'RSI' in self.p10_active_indicators)
+        rsi_ma_line_item = getattr(self, 'p10_rsi_ma_line_item', None)
+        if rsi_ma_line_item is not None:
+            rsi_ma_line_item.setPen(self.theme_pen('chart_reference', width=1.5, style=Qt.PenStyle.DashLine))
+            rsi_ma_line_item.setVisible(self.p10_rsi_ma_series is not None and 'RSI' in self.p10_active_indicators)
         rsi_upper_line = getattr(self, 'p10_rsi_upper_line', None)
         if rsi_upper_line is not None:
             rsi_upper_line.setPen(self.theme_pen('warning', width=1, style=Qt.PenStyle.DashLine))
@@ -2072,10 +3007,12 @@ class ChartsPageMixin:
         self.style_plot_widget(self.p10_volume_plot, show_y_grid=False)
         self.style_plot_widget(self.p10_rsi_plot)
         self.style_plot_widget(self.p10_compare_plot)
+        self._p10_apply_multi_interval_theme()
         if getattr(self, '_mc_initialized', False):
             self._mc_apply_theme()
         self.p10_symbol_label.setStyleSheet(f'font-size: 22px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.p10_price_label.setStyleSheet(f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.p10_position_label.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {self.theme_color("text_secondary")};')
         self.p10_ohlc_label.setStyleSheet(f'font-size: 12px; color: {self.theme_color("text_secondary")};')
         self._p10_set_status(self.p10_status_label.text(), self.p10_status_label.property('bt_status') or 'muted')
         self._p10_set_compare_status(
