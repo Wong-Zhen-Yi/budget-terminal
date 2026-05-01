@@ -158,13 +158,6 @@ class MultiChartsMixin:
         self._mc_reorder_btn.clicked.connect(self._mc_open_reorder_dialog)
         toolbar.addWidget(self._mc_reorder_btn)
 
-        refresh_btn = QPushButton('Refresh All')
-        self.set_theme_variant(refresh_btn, 'accent')
-        refresh_btn.setFixedHeight(28)
-        refresh_btn.clicked.connect(self._mc_refresh_all)
-        self._mc_refresh_btn = refresh_btn
-        toolbar.addWidget(refresh_btn)
-
         toolbar.addStretch()
         self._mc_status = QLabel('')
         self.set_theme_role(self._mc_status, 'status_muted')

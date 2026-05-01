@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0\.."
 
 set "VENV_DIR=.venv"
 
@@ -28,7 +28,7 @@ set "APP_ZIP=%APP_BASE%-windows.zip"
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 
-pyinstaller --noconfirm budget_terminal.spec
+pyinstaller --noconfirm packaging\budget_terminal.spec
 if errorlevel 1 exit /b 1
 
 if not exist "dist\%APP_EXE%" (

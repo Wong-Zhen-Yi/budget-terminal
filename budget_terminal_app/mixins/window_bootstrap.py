@@ -510,10 +510,11 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=deleted_main)
         return True
 
-    def __init__(self, startup_profiler: Any=None) -> None:
+    def __init__(self, startup_profiler: Any=None, data_service_client: Any=None) -> None:
         """Initialize the object."""
         super().__init__()
         self._startup_profiler = startup_profiler
+        self._data_service_client = data_service_client
         self._invoke_main.connect(self._on_invoke_main)
         with self._startup_profiler_step('window_init'):
             self._init_session_log_capture()
@@ -578,7 +579,6 @@ class WindowBootstrapMixin:
             self._active_momentum_timeframe = '1mo'
             self._portfolio_analytics_cache = {}
             self._portfolio_analytics_fetching = {}
-            self._news_auto_summarized = False
             self._data_collection_ts = None
             self._data_collection_sources = []
             self._portfolio_persist_timer = QTimer(self)
@@ -602,6 +602,9 @@ class WindowBootstrapMixin:
             self._lazy_page_warmup_timer = QTimer(self)
             self._lazy_page_warmup_timer.setSingleShot(True)
             self._lazy_page_warmup_timer.timeout.connect(self._warm_next_page)
+            self._p14_auto_refresh_timer = QTimer(self)
+            self._p14_auto_refresh_timer.setInterval(int(getattr(self, '_P14_AUTO_REFRESH_INTERVAL_MS', 15 * 60 * 1000)))
+            self._p14_auto_refresh_timer.timeout.connect(self._p14_auto_refresh_tick)
             self._options_fetch_executor = None
             self._option_chain_memory_cache = {}
             self._option_chain_memory_cache_ttl = 60.0

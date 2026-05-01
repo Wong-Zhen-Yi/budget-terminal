@@ -165,6 +165,7 @@ net_worth.json
 budget_terminal_app/config.json
 budget_terminal_app/mixins/p9_config.json
 *.png
+!budget_terminal_app/assets/app_icon.png
 !requirements.txt
 screenshots/
 release/*.zip

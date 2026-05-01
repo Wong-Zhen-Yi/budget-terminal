@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
+import importlib.util
+import sys
 from concurrent.futures import as_completed
 from typing import Any
 
@@ -16,6 +18,7 @@ YOUTUBE_MAX_AGE_DAYS = 90
 YOUTUBE_RESULTS_PER_TICKER = 3
 YOUTUBE_SEARCH_POOL = 10
 YOUTUBE_FETCH_MAX_WORKERS = 4
+YOUTUBE_MISSING_DEPENDENCY_MESSAGE = 'yt-dlp is not installed. Install requirements.txt to enable the YouTube tab.'
 
 
 class YouTubeWorker(QObject):
@@ -115,21 +118,35 @@ class YouTubeWorker(QObject):
                 'tickers_total': total,
             })
         except Exception as exc:
-            logger.exception('YouTubeWorker error.')
+            if isinstance(exc, RuntimeError) and str(exc) == YOUTUBE_MISSING_DEPENDENCY_MESSAGE:
+                logger.warning('YouTubeWorker unavailable: %s', exc)
+            else:
+                logger.exception('YouTubeWorker error.')
             self.error.emit(str(exc))
+
+    @staticmethod
+    def is_available() -> bool:
+        """Return whether the optional yt-dlp dependency can be imported."""
+        spec = importlib.util.find_spec('yt_dlp')
+        if spec is None:
+            logger.warning('yt-dlp dependency not found for Python executable: %s', sys.executable)
+            return False
+        return True
 
     @staticmethod
     def _load_yt_dlp() -> Any:
         try:
             import yt_dlp
         except Exception as exc:
-            raise RuntimeError('yt-dlp is not installed. Install requirements.txt to enable the YouTube tab.') from exc
+            logger.warning('yt-dlp import failed for Python executable %s: %s', sys.executable, exc)
+            raise RuntimeError(YOUTUBE_MISSING_DEPENDENCY_MESSAGE) from exc
         return yt_dlp
 
     def _fetch_ticker(self, yt_dlp: Any, ticker: str) -> tuple[list[dict[str, Any]], str]:
         options = {
             'quiet': True,
             'no_warnings': True,
+            'ignoreerrors': True,
             'skip_download': True,
             'noplaylist': True,
             'socket_timeout': 20,
@@ -137,7 +154,7 @@ class YouTubeWorker(QObject):
         }
         query = f'ytsearch{YOUTUBE_SEARCH_POOL}:{ticker} stock'
         with yt_dlp.YoutubeDL(options) as ydl:
-            result = ydl.extract_info(query, download=False)
+            result = self._extract_search_info_with_retry(ydl, query)
         entries = result.get('entries', []) if isinstance(result, dict) else []
         candidates = [candidate for candidate in entries if isinstance(candidate, dict)]
         if not candidates:
@@ -163,7 +180,21 @@ class YouTubeWorker(QObject):
             return self._fetch_ticker(yt_dlp, ticker)
         except Exception as exc:
             logger.warning('YouTube search failed for %s: %s', ticker, exc)
-            return ([], f'{ticker}: {exc}')
+            return ([], f'{ticker}: YouTube search temporarily failed. Try refreshing again later.')
+
+    @staticmethod
+    def _extract_search_info_with_retry(ydl: Any, query: str) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                return ydl.extract_info(query, download=False)
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1)
+        if last_exc is not None:
+            raise last_exc
+        return None
 
     def _normalize_entry(self, ticker: str, entry: dict[str, Any]) -> dict[str, Any]:
         video_id = str(entry.get('id', '') or '').strip()

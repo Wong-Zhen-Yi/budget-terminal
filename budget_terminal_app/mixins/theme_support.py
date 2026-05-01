@@ -39,7 +39,6 @@ class ThemeSupportMixin:
             ("_apply_options_chain_theme", "page5"),
             ("_apply_politics_theme", "page15"),
             ("_apply_youtube_theme", "page16"),
-            ("_apply_notes_theme", "page17"),
         ):
             if page_attr and not self._page_initialized(page_attr=page_attr):
                 continue

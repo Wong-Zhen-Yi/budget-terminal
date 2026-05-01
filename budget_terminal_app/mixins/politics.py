@@ -11,9 +11,14 @@ class PoliticsMixin:
 
     def init_page15(self) -> None:
         self._p15_thread: QThread | None = None
+        self._p15_worker = None
         self._p15_export_thread: QThread | None = None
+        self._p15_export_worker = None
         self._p15_all_trades: list[dict] = []
         self._p15_current_page: int = 1
+        self._p15_current_raw_count: int = 0
+        self._p15_current_fetched_at: Any = None
+        self._p15_loaded_once: bool = False
 
         layout = QVBoxLayout(self.page15)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -41,10 +46,6 @@ class PoliticsMixin:
         self.p15_export_btn.setFixedWidth(120)
         self.p15_export_btn.clicked.connect(self._p15_export_trades)
         title_row.addWidget(self.p15_export_btn)
-        self.p15_refresh_btn = QPushButton('Refresh')
-        self.p15_refresh_btn.setFixedWidth(90)
-        self.p15_refresh_btn.clicked.connect(lambda: self._p15_load_page(self._p15_current_page, force=True))
-        title_row.addWidget(self.p15_refresh_btn)
         container_layout.addLayout(title_row)
 
         # Status
@@ -264,15 +265,19 @@ class PoliticsMixin:
 
     # -- Data fetching --
 
+    def _p15_on_show(self) -> None:
+        if not self._p15_loaded_once and (self._p15_thread is None or not self._p15_thread.isRunning()):
+            self._p15_refresh(force=False)
+
     def _p15_refresh(self, force: bool = False) -> None:
         self._p15_load_page(1, force=force)
 
     def _p15_load_page(self, page: int, force: bool = False) -> None:
         if self._p15_thread is not None and self._p15_thread.isRunning():
             return
+        self._p15_loaded_once = True
         self._p15_current_page = page
         self._p15_update_page_buttons()
-        self.p15_refresh_btn.setEnabled(False)
         self.p15_btn_prev.setEnabled(False)
         self.p15_btn_next.setEnabled(False)
         self.set_status_text(self.p15_status_lbl, f'Fetching page {page}...', status='muted')
@@ -284,24 +289,111 @@ class PoliticsMixin:
         worker.finished.connect(thread.quit)
         worker.error.connect(self._p15_on_error)
         worker.error.connect(thread.quit)
+        thread.finished.connect(self._p15_on_thread_finished)
         self._p15_thread = thread
         self._p15_worker = worker
         thread.start()
 
-    def _p15_on_data(self, result: dict) -> None:
-        self.p15_refresh_btn.setEnabled(True)
-        self._p15_all_trades = result.get('trades', [])
+    def _p15_normalize_trades(self, trades: Any) -> list[dict[str, Any]]:
+        normalized = []
+        if not isinstance(trades, list):
+            return normalized
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            item = dict(trade)
+            item['politician'] = str(item.get('politician', '') or '')
+            item['chamber'] = str(item.get('chamber', '') or '')
+            item['party'] = str(item.get('party', '') or 'Unknown') or 'Unknown'
+            item['ticker'] = str(item.get('ticker', '') or '').upper().strip()
+            item['trade_type'] = str(item.get('trade_type', '') or '')
+            item['amount'] = str(item.get('amount', '') or '')
+            item['transaction_date'] = str(item.get('transaction_date', '') or '')
+            item['disclosure_date'] = str(item.get('disclosure_date', '') or '')
+            item['asset_description'] = str(item.get('asset_description', '') or '')
+            item['theme'] = str(item.get('theme', '') or 'Other').strip() or 'Other'
+            try:
+                item['amount_value'] = int(item.get('amount_value') or 0)
+            except (TypeError, ValueError):
+                item['amount_value'] = 0
+            normalized.append(item)
+        return normalized
+
+    def _p15_normalize_result(self, result: Any) -> dict[str, Any]:
+        payload = result if isinstance(result, dict) else {}
+        try:
+            page = int(payload.get('page', self._p15_current_page) or self._p15_current_page)
+        except (TypeError, ValueError):
+            page = 1
+        trades = self._p15_normalize_trades(deserialize_session_value(payload.get('trades')))
+        try:
+            raw_count = int(payload.get('raw_count', len(trades)) or len(trades))
+        except (TypeError, ValueError):
+            raw_count = len(trades)
+        return {
+            'page': max(page, 1),
+            'trades': trades,
+            'raw_count': raw_count,
+            'fetched_at': deserialize_session_value(payload.get('fetched_at')),
+        }
+
+    def _p15_session_snapshot(self) -> dict[str, Any] | None:
+        if int(getattr(self, '_p15_current_page', 1) or 1) != 1:
+            return None
+        trades = self._p15_normalize_trades(getattr(self, '_p15_all_trades', []))
+        if not trades:
+            return None
+        return {
+            'page': 1,
+            'trades': serialize_session_value(trades),
+            'raw_count': int(getattr(self, '_p15_current_raw_count', len(trades)) or len(trades)),
+            'fetched_at': serialize_session_value(getattr(self, '_p15_current_fetched_at', None)),
+        }
+
+    def _p15_save_session_snapshot(self, *, immediate: bool = False) -> None:
+        if hasattr(self, '_set_tab_session_snapshot'):
+            snapshot = self._p15_session_snapshot()
+            if snapshot is not None:
+                self._set_tab_session_snapshot('politics', snapshot, immediate=immediate)
+
+    def _p15_apply_result(self, result: Any, *, restored: bool = False) -> None:
+        payload = self._p15_normalize_result(result)
+        self._p15_current_page = int(payload.get('page', 1) or 1)
+        self._p15_all_trades = payload.get('trades', [])
+        self._p15_current_raw_count = int(payload.get('raw_count', len(self._p15_all_trades)) or len(self._p15_all_trades))
+        self._p15_current_fetched_at = payload.get('fetched_at')
         count = len(self._p15_all_trades)
-        self.set_status_text(self.p15_status_lbl,
-            f'Page {self._p15_current_page} — {count} trades',
-            status='positive')
+        status_text = f'Page {self._p15_current_page} - {count} trades'
+        if restored:
+            status_text = f'Restored last Politics session: {status_text}'
+        self.set_status_text(self.p15_status_lbl, status_text, status='muted' if restored else 'positive')
         self._p15_populate_politician_combo()
         self._p15_populate_theme_combo()
         self._p15_apply_filters()
         self._p15_update_page_buttons()
-        # Disable next if server returned fewer than a full page
-        if result.get('raw_count', count) < 100:
+        if self._p15_current_raw_count < 100:
             self.p15_btn_next.setEnabled(False)
+
+    def _p15_restore_session_snapshot(self, snapshot: Any) -> bool:
+        payload = self._p15_normalize_result(snapshot)
+        if int(payload.get('page', 0) or 0) != 1 or not payload.get('trades'):
+            return False
+        self._p15_loaded_once = True
+        self._p15_apply_result(payload, restored=True)
+        return True
+
+    def _p15_restore_startup_session(self, snapshot: Any) -> None:
+        if self._p15_thread is not None and self._p15_thread.isRunning():
+            return
+        if self._p15_loaded_once:
+            return
+        self._p15_restore_session_snapshot(snapshot)
+        self._p15_refresh(force=False)
+
+    def _p15_on_data(self, result: dict) -> None:
+        self._p15_apply_result(result)
+        if int(getattr(self, '_p15_current_page', 1) or 1) == 1:
+            self._p15_save_session_snapshot()
 
     def _p15_populate_politician_combo(self) -> None:
         current = self.p15_politician_combo.currentText()
@@ -325,9 +417,16 @@ class PoliticsMixin:
         self.p15_theme_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _p15_on_error(self, msg: str) -> None:
-        self.p15_refresh_btn.setEnabled(True)
         self._p15_update_page_buttons()
         self.set_status_text(self.p15_status_lbl, f'Error: {msg}', status='negative')
+
+    def _p15_on_thread_finished(self) -> None:
+        if self._p15_worker is not None:
+            self._p15_worker.deleteLater()
+            self._p15_worker = None
+        if self._p15_thread is not None:
+            self._p15_thread.deleteLater()
+            self._p15_thread = None
 
     # -- Export --
 
@@ -346,6 +445,7 @@ class PoliticsMixin:
         worker.finished.connect(thread.quit)
         worker.error.connect(self._p15_on_export_error)
         worker.error.connect(thread.quit)
+        thread.finished.connect(self._p15_on_export_thread_finished)
         self._p15_export_thread = thread
         self._p15_export_worker = worker
         thread.start()
@@ -372,6 +472,14 @@ class PoliticsMixin:
     def _p15_on_export_error(self, msg: str) -> None:
         self.p15_export_btn.setEnabled(True)
         self.set_status_text(self.p15_status_lbl, f'Export error: {msg}', status='negative')
+
+    def _p15_on_export_thread_finished(self) -> None:
+        if self._p15_export_worker is not None:
+            self._p15_export_worker.deleteLater()
+            self._p15_export_worker = None
+        if self._p15_export_thread is not None:
+            self._p15_export_thread.deleteLater()
+            self._p15_export_thread = None
 
     def _p15_apply_filters(self) -> None:
         politician_q = self.p15_politician_combo.currentText().strip()

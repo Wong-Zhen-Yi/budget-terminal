@@ -138,16 +138,12 @@ class PortfolioMetricsMixin:
         for key, label in _P4_METRICS_LOOKBACK_OPTIONS:
             self.p4_metrics_lookback_combo.addItem(label, key)
         self.p4_metrics_lookback_combo.currentIndexChanged.connect(self._p4_on_metrics_lookback_changed)
-        self.p4_metrics_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p4_metrics_refresh_btn, 'accent')
-        self.p4_metrics_refresh_btn.clicked.connect(self._p4_on_metrics_refresh_clicked)
         controls_row.addWidget(controls_title)
         controls_row.addStretch()
         controls_row.addWidget(benchmark_label)
         controls_row.addWidget(self.p4_metrics_benchmark_input)
         controls_row.addWidget(lookback_label)
         controls_row.addWidget(self.p4_metrics_lookback_combo)
-        controls_row.addWidget(self.p4_metrics_refresh_btn)
         controls_layout.addLayout(controls_row)
 
         self.p4_metrics_status_label = QLabel('')
@@ -631,22 +627,47 @@ class PortfolioMetricsMixin:
             self._p4_set_portfolio_metrics_status('Refreshing portfolio metrics...', status='info')
             return
         shares_map = self._p4_active_momentum_shares_map()
-        worker = PortfolioAnalyticsWorker(
-            list(self._p4_active_tickers()),
-            shares_map,
-            prices_map=self._p4_metrics_price_map(),
-            benchmark_symbol=benchmark_symbol,
-            lookback_key=lookback_key,
-        )
+        tickers = list(self._p4_active_tickers())
+        prices_map = self._p4_metrics_price_map()
         self._portfolio_analytics_fetching[cache_key] = True
         self._p4_set_portfolio_metrics_status(
             f'Loading {lookback_key.upper()} metrics versus {benchmark_symbol}...',
             status='info',
         )
-        worker.finished.connect(
-            lambda payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, payload)
-        )
-        threading.Thread(target=worker.run, daemon=True).start()
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                if client is not None:
+                    payload = client.fetch_portfolio_analytics(
+                        tickers,
+                        shares_map,
+                        prices_map=prices_map,
+                        benchmark_symbol=benchmark_symbol,
+                        lookback_key=lookback_key,
+                    )
+                else:
+                    payload = PortfolioAnalyticsWorker(
+                        tickers,
+                        shares_map,
+                        prices_map=prices_map,
+                        benchmark_symbol=benchmark_symbol,
+                        lookback_key=lookback_key,
+                    ).fetch()
+            except Exception as exc:
+                logger.warning('Embedded data service analytics request failed; falling back to direct worker: %s', exc)
+                payload = PortfolioAnalyticsWorker(
+                    tickers,
+                    shares_map,
+                    prices_map=prices_map,
+                    benchmark_symbol=benchmark_symbol,
+                    lookback_key=lookback_key,
+                ).fetch()
+            self._invoke_main.emit(
+                lambda result=payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, result)
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_portfolio_analytics_ready(self, cache_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle one portfolio-analytics worker result becoming ready."""
@@ -730,8 +751,8 @@ class PortfolioMetricsMixin:
                 weight = m.get('weight', 0)
                 gain = m.get('dollar_gain', 0)
                 growth = m.get('growth', 0)
-                mc = self._mktcap_cache.get(ticker)
-                mc_str = self._format_market_cap(mc) if mc is not None else 'N/A'
+                mc = self._mktcap_cache.get(str(ticker or '').strip().upper())
+                mc_str = self._format_market_cap(mc)
                 sign = '+' if change >= 0 else ''
                 gain_sign = '+' if gain >= 0 else ''
                 growth_sign = '+' if growth >= 0 else ''
@@ -884,19 +905,6 @@ class PortfolioMetricsMixin:
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart({symbol: item['weight'] for symbol, item in metrics_map.items()})
 
-    def _p4_on_tracker_delete_clicked(self) -> None:
-        """Remove the ticker assigned to a reused page-4 action button."""
-        sender = self.sender()
-        if not isinstance(sender, QPushButton):
-            return
-        ticker = str(sender.property('portfolio_ticker') or '').strip().upper()
-        if not ticker:
-            return
-        if bool(sender.property('remove_from_main_portfolio')):
-            self.remove_ticker(ticker)
-        else:
-            self._p4_remove_active_ticker(ticker)
-
     def _p4_ensure_tracker_item(self, row: Any, col: Any, flags: Any) -> Any:
         """Return an existing tracker cell item or create it once."""
         item = self.p4_table.item(row, col)
@@ -911,21 +919,8 @@ class PortfolioMetricsMixin:
         """Clear stale market-cap text when a reused row has no cached value yet."""
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
-        item.setText('')
+        item.setText('--')
         item.setForeground(self.theme_qcolor('text_muted'))
-
-    def _p4_ensure_tracker_delete_button(self, row: Any) -> Any:
-        """Return an existing per-row action button or create it once."""
-        widget = self.p4_table.cellWidget(row, P4_PORTFOLIO_COL_ACTION)
-        if isinstance(widget, QPushButton):
-            return widget
-        del_btn = QPushButton('X')
-        del_btn.setFixedSize(22, 22)
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        del_btn.clicked.connect(self._p4_on_tracker_delete_clicked)
-        self.p4_table.setCellWidget(row, P4_PORTFOLIO_COL_ACTION, del_btn)
-        return del_btn
 
     def _set_tracker_row(
         self,
@@ -966,32 +961,36 @@ class PortfolioMetricsMixin:
         _update_item(P4_PORTFOLIO_COL_DOLLAR_GAIN, f'{gain_sign}${dollar_gain:,.2f}', color=gain_color)
         growth_sign = '+' if growth >= 0 else ''
         _update_item(P4_PORTFOLIO_COL_GROWTH, f'{growth_sign}{growth:.1f}%', color=gain_color)
-        del_btn = self._p4_ensure_tracker_delete_button(row)
-        del_btn.setStyleSheet(
-            f'background-color: {self.theme_color("accent_negative_bg")}; '
-            f'color: {self.theme_color("text_primary")}; '
-            f'border-radius: 11px; font-weight: bold; '
-            f'border: 1px solid {self.theme_color("accent_negative")};'
-        )
-        del_btn.setProperty('portfolio_ticker', ticker)
-        del_btn.setProperty('remove_from_main_portfolio', self.active_portfolio_id == self.main_portfolio_id)
 
     def _p4_remove_active_ticker(self, ticker: Any) -> None:
         """Remove a ticker from the currently selected page-4 portfolio."""
-        tickers = self._p4_active_tickers()
-        if ticker not in tickers:
+        clean_ticker = str(ticker or '').strip().upper()
+        if not clean_ticker:
             return
-        tickers.remove(ticker)
+        tickers = self._p4_active_tickers()
+        matched_ticker = None
+        for saved_ticker in list(tickers):
+            if str(saved_ticker or '').strip().upper() == clean_ticker:
+                matched_ticker = saved_ticker
+                break
+        if matched_ticker is None:
+            return
+        tickers.remove(matched_ticker)
         tracker_data = self._p4_active_tracker_data()
-        tracker_data.pop(ticker, None)
+        tracker_data.pop(matched_ticker, None)
+        tracker_data.pop(clean_ticker, None)
         self._p4_invalidate_returns_cache()
         self._p4_invalidate_momentum_cache()
         self._p4_invalidate_portfolio_analytics_cache()
         self._persist_all_portfolios()
-        if getattr(self, '_dashboard_showing_all', False) and hasattr(self, '_dashboard_apply_local_portfolio_membership'):
+        if (
+            (getattr(self, '_dashboard_showing_all', False) or self.active_portfolio_id == self.main_portfolio_id)
+            and hasattr(self, '_dashboard_apply_local_portfolio_membership')
+        ):
             self._dashboard_apply_local_portfolio_membership(self.last_data)
         if self.last_data and self.active_portfolio_id == self.main_portfolio_id and 'portfolio' in self.last_data:
-            self.last_data['portfolio'].pop(ticker, None)
+            self.last_data['portfolio'].pop(matched_ticker, None)
+            self.last_data['portfolio'].pop(clean_ticker, None)
         if self.last_data:
             self.update_page4(self.last_data)
         else:
@@ -1201,17 +1200,40 @@ class PortfolioMetricsMixin:
             return
         config = self._get_return_timeframe_config(timeframe_key)
         self._momentum_metrics_fetching[cache_key] = True
-        worker = PortfolioMomentumWorker(
-            tickers,
-            shares_map,
-            period=config.get('period', '1mo'),
-            interval=config.get('interval', '1d'),
-            start=config.get('start'),
-        )
-        worker.finished.connect(
-            lambda payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, payload)
-        )
-        threading.Thread(target=worker.run, daemon=True).start()
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                if client is not None:
+                    payload = client.fetch_portfolio_momentum(
+                        tickers,
+                        shares_map,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    )
+                else:
+                    payload = PortfolioMomentumWorker(
+                        tickers,
+                        shares_map,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    ).fetch()
+            except Exception as exc:
+                logger.warning('Embedded data service momentum request failed; falling back to direct worker: %s', exc)
+                payload = PortfolioMomentumWorker(
+                    tickers,
+                    shares_map,
+                    period=config.get('period', '1mo'),
+                    interval=config.get('interval', '1d'),
+                    start=config.get('start'),
+                ).fetch()
+            self._invoke_main.emit(
+                lambda result=payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, result)
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_momentum_ready(self, timeframe_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle portfolio momentum data becoming ready."""
@@ -1266,16 +1288,37 @@ class PortfolioMetricsMixin:
             return
         config = self._get_return_timeframe_config(timeframe_key)
         self._return_metrics_fetching[cache_key] = True
-        worker = MonthReturnWorker(
-            tickers,
-            period=config.get('period', '1mo'),
-            interval=config.get('interval', '1d'),
-            start=config.get('start'),
-        )
-        worker.finished.connect(
-            lambda results, key=timeframe_key, pid=portfolio_id: self._on_returns_ready(key, pid, results)
-        )
-        threading.Thread(target=worker.run, daemon=True).start()
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                if client is not None:
+                    results = client.fetch_month_returns(
+                        tickers,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    )
+                else:
+                    results = MonthReturnWorker(
+                        tickers,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    ).fetch()
+            except Exception as exc:
+                logger.warning('Embedded data service returns request failed; falling back to direct worker: %s', exc)
+                results = MonthReturnWorker(
+                    tickers,
+                    period=config.get('period', '1mo'),
+                    interval=config.get('interval', '1d'),
+                    start=config.get('start'),
+                ).fetch()
+            self._invoke_main.emit(
+                lambda payload=results, key=timeframe_key, pid=portfolio_id: self._on_returns_ready(key, pid, payload)
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_returns_ready(self, timeframe_key: Any, portfolio_id: Any, results: Any) -> None:
         """Handle return metrics ready."""
@@ -1299,29 +1342,57 @@ class PortfolioMetricsMixin:
 
     def _format_market_cap(self, mc: Any) -> Any:
         """Handle format market cap."""
+        value = self._p4_market_cap_value(mc)
+        if value is None:
+            return '--'
+        if value >= 200000000000:
+            bucket = 'Mega'
+        elif value >= 10000000000:
+            bucket = 'Large'
+        elif value >= 2000000000:
+            bucket = 'Mid'
+        elif value >= 300000000:
+            bucket = 'Small'
+        else:
+            bucket = 'Micro'
+        return f'{bucket} ${self._p4_format_market_cap_value(value)}'
+
+    def _p4_market_cap_value(self, mc: Any) -> Any:
+        """Return a positive finite market-cap number or None."""
         if mc is None:
-            return '-'
-        if mc >= 200000000000:
-            return f'Mega  ${mc / 1000000000000.0:.2f}T'
-        if mc >= 10000000000:
-            return f'Large  ${mc / 1000000000.0:.1f}B'
-        if mc >= 2000000000:
-            return f'Mid  ${mc / 1000000000.0:.1f}B'
-        if mc >= 300000000:
-            return f'Small  ${mc / 1000000.0:.0f}M'
-        return f'Micro  ${mc / 1000000.0:.0f}M'
+            return None
+        try:
+            value = float(str(mc).replace(',', '').strip())
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value
+
+    def _p4_format_market_cap_value(self, value: float) -> str:
+        """Format a market-cap value with a compact suffix."""
+        if value >= 1000000000000.0:
+            return f'{value / 1000000000000.0:.2f}T'
+        if value >= 1000000000.0:
+            return f'{value / 1000000000.0:.2f}B'
+        if value >= 1000000.0:
+            return f'{value / 1000000.0:.2f}M'
+        if value >= 1000.0:
+            return f'{value / 1000.0:.1f}K'
+        return f'{value:.2f}'
 
     def _mktcap_color(self, mc: Any) -> Any:
         """Handle mktcap color."""
-        if mc is None:
+        value = self._p4_market_cap_value(mc)
+        if value is None:
             return self.theme_color('text_muted')
-        if mc >= 200000000000:
+        if value >= 200000000000:
             return self.theme_color('warning')
-        if mc >= 10000000000:
+        if value >= 10000000000:
             return self.theme_series_color(0)
-        if mc >= 2000000000:
+        if value >= 2000000000:
             return self.theme_color('accent_positive')
-        if mc >= 300000000:
+        if value >= 300000000:
             return self.theme_series_color(3)
         return self.theme_color('accent_negative')
 
@@ -1363,11 +1434,19 @@ class PortfolioMetricsMixin:
         symbols = [symbol for symbol in symbols if symbol]
         if not symbols:
             return False
-        worker = MarketCapWorker(symbols)
         self._mktcap_fetching = True
         self._mktcap_inflight_tickers = set(symbols)
-        worker.finished.connect(self._on_market_caps_ready)
-        threading.Thread(target=worker.run, daemon=True).start()
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                results = client.fetch_market_caps(symbols) if client is not None else MarketCapWorker(symbols).fetch()
+            except Exception as exc:
+                logger.warning('Embedded data service market-cap request failed; falling back to direct worker: %s', exc)
+                results = MarketCapWorker(symbols).fetch()
+            self._invoke_main.emit(lambda payload=results: self._on_market_caps_ready(payload))
+
+        threading.Thread(target=_run, daemon=True).start()
         return True
 
     def _update_mktcap_item(self, row: Any, ticker: Any, mc: Any) -> None:
@@ -1403,22 +1482,25 @@ class PortfolioMetricsMixin:
         self._mktcap_fetching = False
         request_tickers = set(getattr(self, '_mktcap_inflight_tickers', set()))
         self._mktcap_inflight_tickers = set()
+        normalized_results = {}
         if isinstance(results, dict) and results:
             fetched_at = self._p4_mktcap_cache_now()
             for ticker, mc in results.items():
                 symbol = str(ticker or '').strip().upper()
                 if not symbol:
                     continue
+                normalized_results[symbol] = mc
                 self._mktcap_cache[symbol] = mc
                 self._mktcap_cache_ts[symbol] = fetched_at
         for row in range(self.p4_table.rowCount()):
             item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
-            if item and item.text() in results:
-                self._update_mktcap_item(row, item.text(), results[item.text()])
+            symbol = str(item.text() if item else '').strip().upper()
+            if symbol and symbol in normalized_results:
+                self._update_mktcap_item(row, symbol, normalized_results[symbol])
         queued = list(getattr(self, '_mktcap_queued_tickers', set()))
         self._mktcap_queued_tickers = set()
         if queued:
-            remaining = [ticker for ticker in queued if ticker not in request_tickers]
+            remaining = [ticker for ticker in queued if str(ticker or '').strip().upper() not in request_tickers]
             self._fetch_market_caps(remaining)
 
     def update_page4(self, data: Any) -> None:
@@ -1452,13 +1534,16 @@ class PortfolioMetricsMixin:
                     metrics.get('dollar_gain', 0),
                     metrics.get('growth', 0),
                 )
-                if ticker in self._mktcap_cache:
-                    self._update_mktcap_item(i, ticker, self._mktcap_cache[ticker])
+                cache_symbol = str(ticker or '').strip().upper()
+                if cache_symbol in self._mktcap_cache:
+                    self._update_mktcap_item(i, ticker, self._mktcap_cache[cache_symbol])
                 else:
                     self._p4_clear_mktcap_item(i)
         finally:
             self.p4_table.setUpdatesEnabled(True)
             self.p4_table.blockSignals(False)
+        if hasattr(self, '_p4_update_remove_stock_button_state'):
+            self._p4_update_remove_stock_button_state()
         if hasattr(self, '_p4_apply_table_width_preferences'):
             self._p4_apply_table_width_preferences('stock')
         self._p4_update_stock_positions_label(len(tickers))

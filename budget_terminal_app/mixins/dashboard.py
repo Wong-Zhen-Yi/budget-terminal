@@ -204,7 +204,7 @@ class DashboardMixin:
                     continue
                 category = str(article.get('category', '') or '').strip().lower()
                 ticker = str(article.get('ticker', '') or '').upper().strip()
-                if category == 'macro' or ticker in visible_tickers:
+                if category in ('macro', 'other') or ticker in visible_tickers:
                     news_items.append(dict(article))
         snapshot['targets'] = targets
         snapshot['news'] = news_items
@@ -253,7 +253,7 @@ class DashboardMixin:
             [
                 article
                 for article in snapshot.get('news', [])
-                if article.get('category') != 'macro' and article.get('ticker') in self.tickers
+                if article.get('category') == 'portfolio' and article.get('ticker') in self.tickers
             ]
         )
         self._populate_news_table(self.news_table, portfolio_news)
@@ -843,8 +843,17 @@ class DashboardMixin:
         self._dashboard_show_row_details(0)
         self._dashboard_update_indicator_panel_labels()
 
+    def _dashboard_clear_chart_items_for_render(self) -> None:
+        """Remove prior symbol-specific plot items before drawing a fresh chart."""
+        self.dashboard_main_plot.clear()
+        self.dashboard_volume_plot.clear()
+        self.dashboard_rsi_plot.clear()
+        self._dashboard_reset_chart_item_refs()
+        self.dashboard_overlay_items = {}
+
     def _dashboard_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, rsi_ma_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main dashboard candlestick chart and lower indicator panels."""
+        self._dashboard_clear_chart_items_for_render()
         points = []
         volume_brushes = []
         volumes = []
@@ -1000,12 +1009,6 @@ class DashboardMixin:
         allow_non_chart_reuse = refresh_reason == 'portfolio_row_click'
         membership_only_refresh = refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON
         self._dashboard_pending_refresh_reason = 'full'
-        if not allow_non_chart_reuse:
-            self._news_auto_summarized = False
-            if hasattr(self, 'p3_summary_status'):
-                self.p3_summary_status.setText('Refreshing news...')
-            if hasattr(self, 'p3_summary_text') and not self._p3_summarizing:
-                self.p3_summary_text.setPlainText('Refreshing loaded headlines...')
         self.dashboard_symbol = str(self.dashboard_symbol_input.text() or self.dashboard_chart_state.get('symbol') or 'SPY').upper().strip()
         if not self.dashboard_symbol:
             self.dashboard_symbol = 'SPY'
@@ -1018,10 +1021,16 @@ class DashboardMixin:
         self._dashboard_request_seq += 1
         request_id = self._dashboard_request_seq
         self._dashboard_latest_request_id = request_id
+        self._dashboard_latest_request_context = {
+            'request_id': request_id,
+            'symbol': self.dashboard_symbol,
+            'timeframe_label': self.dashboard_timeframe_label,
+            'period': period,
+            'interval': interval,
+        }
         self.dashboard_pending_x_range = self._dashboard_get_current_x_range() if self.dashboard_auto_follow else (self._dashboard_get_current_x_range() or self.dashboard_manual_x_range)
         chart_configs_snapshot = list(self.chart_configs)
         self.dashboard_load_btn.setEnabled(False)
-        self.dashboard_refresh_btn.setEnabled(False)
         if membership_only_refresh:
             self._dashboard_set_status('Refreshing portfolio holdings...', 'info')
         else:
@@ -1035,6 +1044,20 @@ class DashboardMixin:
 
     def run_worker(self, request_id: int, chart_configs_snapshot: Any, refresh_reason: str, allow_non_chart_reuse: bool) -> None:
         """Run the shared market data worker."""
+        client = getattr(self, '_data_service_client', None)
+        if client is not None:
+            try:
+                data = client.fetch_dashboard(
+                    self._get_fetch_tickers(),
+                    chart_configs_snapshot,
+                    request_id=request_id,
+                    refresh_reason=refresh_reason,
+                    allow_non_chart_reuse=allow_non_chart_reuse,
+                )
+                self._invoke_main.emit(lambda payload=data: self.update_ui(payload))
+                return
+            except Exception as exc:
+                logger.warning('Embedded data service request failed; falling back to direct worker: %s', exc)
         worker = DataWorker(
             self._get_fetch_tickers(),
             chart_configs_snapshot,
@@ -1052,7 +1075,6 @@ class DashboardMixin:
         """Handle data refresh errors."""
         logger.error('UI received error: %s', error_msg)
         self.dashboard_load_btn.setEnabled(True)
-        self.dashboard_refresh_btn.setEnabled(True)
         self._dashboard_set_status(f'Refresh failed: {error_msg}', 'negative')
 
     def open_news_link(self, item: Any) -> None:
@@ -1345,7 +1367,7 @@ class DashboardMixin:
                 self.target_table.setItem(i, 3, upside_item)
         finally:
             self.target_table.setUpdatesEnabled(True)
-        portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') != 'macro' and article.get('ticker') in self.tickers])
+        portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') == 'portfolio' and article.get('ticker') in self.tickers])
         self._populate_news_table(self.news_table, portfolio_news)
         self._call_if_page_initialized('update_page3', data, page_attr='page3')
         self._call_if_page_initialized('update_page4', data, page_attr='page4')
@@ -1354,13 +1376,13 @@ class DashboardMixin:
 
     def _dashboard_apply_chart_data(self, symbol: Any, data: Any) -> bool:
         """Apply the selected dashboard symbol chart and options payload."""
+        symbol = str(symbol or '').upper().strip()
         self._dashboard_populate_option_tables(symbol, data)
         df = data.get('charts', {}).get(symbol)
         if df is None or df.empty:
             logger.warning('Dashboard chart has no validated data for %s.', symbol)
             self._dashboard_clear_chart(symbol)
             self.dashboard_load_btn.setEnabled(True)
-            self.dashboard_refresh_btn.setEnabled(True)
             self.dashboard_pending_x_range = None
             self._dashboard_set_status(f'Chart unavailable for {symbol}.', 'negative')
             return False
@@ -1401,17 +1423,59 @@ class DashboardMixin:
         self._dashboard_update_quote_header(self.dashboard_chart_stats)
         self._dashboard_show_row_details(len(self.dashboard_chart_rows) - 1)
         self.dashboard_load_btn.setEnabled(True)
-        self.dashboard_refresh_btn.setEnabled(True)
         self.dashboard_pending_x_range = None
         self._dashboard_update_indicator_panel_labels()
         self._dashboard_set_status(f'Loaded {symbol} {self.dashboard_timeframe_label}.', 'positive')
         return True
 
+    def _dashboard_response_chart_symbol(self, data: Any) -> str:
+        """Return the immutable chart symbol carried by one dashboard response."""
+        if not isinstance(data, dict):
+            return ''
+        refresh_meta = data.get('_dashboard_refresh_meta', {})
+        if isinstance(refresh_meta, dict):
+            symbol = str(refresh_meta.get('chart_symbol') or '').upper().strip()
+            if symbol:
+                return symbol
+        chart_configs = data.get('chart_configs', [])
+        if isinstance(chart_configs, (list, tuple)) and chart_configs:
+            first_config = chart_configs[0]
+            if isinstance(first_config, (list, tuple)) and first_config:
+                return str(first_config[0] or '').upper().strip()
+        charts = data.get('charts', {})
+        if isinstance(charts, dict) and charts:
+            return str(next(iter(charts.keys())) or '').upper().strip()
+        return ''
+
+    def _dashboard_response_matches_latest_request(self, request_id: int, response_symbol: str) -> bool:
+        """Return whether one dashboard response still belongs to the latest chart request."""
+        latest_request_id = int(getattr(self, '_dashboard_latest_request_id', 0) or 0)
+        context = getattr(self, '_dashboard_latest_request_context', {}) or {}
+        expected_symbol = str(context.get('symbol') or getattr(self, 'dashboard_symbol', '') or '').upper().strip()
+        if request_id and request_id != latest_request_id:
+            logger.info(
+                'Ignoring stale dashboard response request_id=%s symbol=%s; latest request_id=%s symbol=%s.',
+                request_id,
+                response_symbol or '--',
+                latest_request_id,
+                expected_symbol or '--',
+            )
+            return False
+        if response_symbol and expected_symbol and response_symbol != expected_symbol:
+            logger.info(
+                'Ignoring dashboard response request_id=%s for symbol=%s; latest symbol=%s.',
+                request_id or '--',
+                response_symbol,
+                expected_symbol,
+            )
+            return False
+        return True
+
     def update_ui(self, data: Any) -> Any:
         """Update the dashboard and shared pages with new data."""
         request_id = int(data.get('request_id', 0)) if isinstance(data, dict) else 0
-        if request_id and request_id != getattr(self, '_dashboard_latest_request_id', 0):
-            logger.info('Ignoring stale dashboard response %s; latest request is %s.', request_id, getattr(self, '_dashboard_latest_request_id', 0))
+        response_symbol = self._dashboard_response_chart_symbol(data)
+        if not self._dashboard_response_matches_latest_request(request_id, response_symbol):
             return
         refresh_meta = data.get('_dashboard_refresh_meta', {}) if isinstance(data, dict) else {}
         refresh_reason = str(refresh_meta.get('refresh_reason', 'full') or 'full')
@@ -1426,7 +1490,7 @@ class DashboardMixin:
         had_previous_data = bool(getattr(self, 'last_data', None))
         self.last_data = data
         self._set_data_collection_info(['yfinance'])
-        symbol = self.dashboard_symbol
+        symbol = response_symbol or str(getattr(self, 'dashboard_symbol', '') or '').upper().strip()
         apply_non_chart = (not non_chart_reused) or (not had_previous_data)
         ui_non_chart_ms = 0.0
         if apply_non_chart:
@@ -1441,7 +1505,6 @@ class DashboardMixin:
             logger.info('Skipping non-chart UI apply for dashboard request %s (reason=%s).', request_id, refresh_reason)
         if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
             self.dashboard_load_btn.setEnabled(True)
-            self.dashboard_refresh_btn.setEnabled(True)
             self.dashboard_pending_x_range = None
             self._dashboard_set_status('Portfolio holdings refreshed.', 'positive')
             logger.info(

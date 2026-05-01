@@ -258,6 +258,7 @@ class FundamentalsSetupMixin:
         editor_layout.addWidget(editor_title)
         editor_layout.addWidget(self.p2_custom_editor_hint)
         editor_layout.addWidget(self.p2_custom_editor_scroll, 1)
+        self.p2_custom_editor_frame.setVisible(self.p2_selected_configuration == 'custom')
         self.p2_workspace_splitter.addWidget(self.p2_custom_editor_frame)
         self.p2_workspace_splitter.setStretchFactor(0, 5)
         self.p2_workspace_splitter.setStretchFactor(1, 2)
@@ -267,6 +268,7 @@ class FundamentalsSetupMixin:
         self.p2_configuration_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
         self._p2_rebuild_custom_checklist()
         self._p2_rebuild_custom_panels()
+        self._p2_refresh_workspace_mode()
         self._apply_fundamentals_theme()
         self._p2_relayout_charts()
 

@@ -56,10 +56,6 @@ class YouTubeMixin:
         self.set_theme_role(title_lbl, 'page_title')
         title_row.addWidget(title_lbl)
         title_row.addStretch()
-        self.p16_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p16_refresh_btn, 'accent')
-        self.p16_refresh_btn.clicked.connect(lambda: self._p16_refresh(force=False, auto_trigger=False))
-        title_row.addWidget(self.p16_refresh_btn)
         layout.addLayout(title_row)
 
         self.p16_status_lbl = QLabel('Open the tab to load YouTube results.')
@@ -180,6 +176,20 @@ class YouTubeMixin:
 
     def _p16_refresh(self, *, force: bool, auto_trigger: bool) -> None:
         if self._p16_thread is not None and self._p16_thread.isRunning():
+            return
+        if not YouTubeWorker.is_available():
+            self._p16_loaded_once = True
+            message = 'yt-dlp is not installed. Install requirements.txt to enable the YouTube tab.'
+            self._p16_warnings = [message]
+            self._p16_last_summary = self._p16_normalize_summary({'tickers_total': 0, 'from_cache_count': 0, 'fetched_count': 0})
+            self._p16_render_table()
+            self._p16_apply_warnings(self._p16_warnings)
+            self._p16_clear_detail_panel(
+                title='YouTube tab unavailable',
+                description='Install project requirements to enable YouTube video results.',
+            )
+            self.set_status_text(self.p16_status_lbl, message, status='warning')
+            self._p16_save_session_snapshot()
             return
         tickers = list(self._get_fetch_tickers()) if hasattr(self, '_get_fetch_tickers') else []
         if not tickers:
@@ -311,7 +321,7 @@ class YouTubeMixin:
             self._p16_thread = None
 
     def _p16_set_busy(self, busy: bool) -> None:
-        self.p16_refresh_btn.setEnabled(not busy)
+        return
 
     def _p16_normalize_items(self, items: Any) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []

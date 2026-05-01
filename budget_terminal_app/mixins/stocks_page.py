@@ -60,6 +60,7 @@ class StocksPageMixin:
         self._stocks_info = {}
         self._stocks_metric_name_labels = []
         self._stocks_metric_value_labels = []
+        self._stocks_metric_row_lines = []
         self._stocks_target_name_labels = []
         self._stocks_target_value_labels = []
         self.stocks_auto_follow = bool(state.get('auto', True))
@@ -135,8 +136,9 @@ class StocksPageMixin:
         fundamentals_layout.addWidget(self.stocks_company_label)
         fundamentals_grid = QGridLayout()
         fundamentals_grid.setHorizontalSpacing(12)
-        fundamentals_grid.setVerticalSpacing(6)
+        fundamentals_grid.setVerticalSpacing(4)
         for row_index, (label_text, field_key) in enumerate(STOCKS_FUNDAMENTAL_FIELDS):
+            grid_row = row_index * 2
             name_label = QLabel(label_text)
             value_label = QLabel('—')
             value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -148,8 +150,15 @@ class StocksPageMixin:
                 value_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             else:
                 value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            fundamentals_grid.addWidget(name_label, row_index, 0, 1, 1)
-            fundamentals_grid.addWidget(value_label, row_index, 1, 1, 1)
+            fundamentals_grid.addWidget(name_label, grid_row, 0, 1, 1)
+            fundamentals_grid.addWidget(value_label, grid_row, 1, 1, 1)
+            if row_index < len(STOCKS_FUNDAMENTAL_FIELDS) - 1:
+                row_line = QFrame()
+                row_line.setFrameShape(QFrame.Shape.HLine)
+                row_line.setFrameShadow(QFrame.Shadow.Plain)
+                row_line.setFixedHeight(1)
+                self._stocks_metric_row_lines.append(row_line)
+                fundamentals_grid.addWidget(row_line, grid_row + 1, 0, 1, 2)
         fundamentals_grid.setColumnStretch(1, 1)
         fundamentals_layout.addLayout(fundamentals_grid)
         price_targets_frame = QFrame()
@@ -581,28 +590,45 @@ class StocksPageMixin:
     def _stocks_fetch_payload(self, symbol: str) -> dict[str, Any]:
         chart_payload = self._chart_fetch_payload(symbol, period=STOCKS_CHART_PERIOD, interval=STOCKS_CHART_INTERVAL, timeframe_label='3 Years', include_rsi=False, include_ma200=False)
         ticker_obj = yf.Ticker(symbol)
-        info = ticker_obj.info or {}
+        try:
+            info = ticker_obj.info or {}
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks metadata for %s; continuing with chart data.', symbol)
+            else:
+                logger.info('Stocks metadata fetch failed for %s: %s', symbol, exc)
+            info = {}
         if not isinstance(info, dict):
             info = {}
         try:
             financials = ticker_obj.financials
-        except Exception:
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks financials for %s.', symbol)
             financials = None
         try:
             quarterly_financials = ticker_obj.quarterly_financials
-        except Exception:
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks quarterly financials for %s.', symbol)
             quarterly_financials = None
         try:
             balance_sheet = ticker_obj.balance_sheet
-        except Exception:
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks balance sheet for %s.', symbol)
             balance_sheet = None
         try:
             quarterly_balance_sheet = ticker_obj.quarterly_balance_sheet
-        except Exception:
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks quarterly balance sheet for %s.', symbol)
             quarterly_balance_sheet = None
         try:
             earnings_dates = ticker_obj.earnings_dates
-        except Exception:
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional stocks earnings dates for %s.', symbol)
             earnings_dates = None
         return {
             'symbol': symbol,
@@ -1494,6 +1520,8 @@ class StocksPageMixin:
             label.setStyleSheet(f'color: {self.theme_color("text_secondary")}; font-size: 12px;')
         for label in self._stocks_metric_value_labels:
             label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px;')
+        for line in self._stocks_metric_row_lines:
+            line.setStyleSheet(f'background-color: {self.theme_color("panel_border")}; border: 0;')
         for label in self._stocks_target_name_labels:
             label.setStyleSheet(f'color: {self.theme_color("text_secondary")}; font-size: 12px;')
         for label in self._stocks_target_value_labels:

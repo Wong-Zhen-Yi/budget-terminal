@@ -11,7 +11,7 @@ from .paths import user_data_path
 
 SESSION_CACHE_VERSION = 1
 SESSION_CACHE_FILE = user_data_path('tab_session_cache.json')
-_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'youtube')
+_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube')
 _DATAFRAME_MARKER = '__bt_dataframe__'
 
 

@@ -267,8 +267,6 @@ class CalendarPageMixin:
         self.p7_next_btn = QPushButton('▶')
         self.p7_next_btn.setFixedSize(30, 26)
         self.p7_next_btn.clicked.connect(partial(self._p7_change_month, 1))
-        refresh_cal_btn = QPushButton('Refresh')
-        refresh_cal_btn.clicked.connect(self._p7_fetch_events)
         self.p7_tz_combo = QComboBox()
         self.p7_tz_combo.setFixedWidth(120)
         self.p7_tz_combo.setStyleSheet('QComboBox { font-size: 11px; }')
@@ -282,7 +280,6 @@ class CalendarPageMixin:
         header.addWidget(QLabel('Ref TZ'))
         header.addWidget(self.p7_tz_combo)
         header.addSpacing(8)
-        header.addWidget(refresh_cal_btn)
         export_btn = QPushButton('Export for LLM')
         export_btn.clicked.connect(self._p7_export_for_llm)
         header.addWidget(export_btn)
@@ -739,7 +736,7 @@ class CalendarPageMixin:
                 for event_date, market, event_name, detail in market_holiday_events:
                     if event_date is None:
                         continue
-                    suffix = '  (timed event)' if event_name == 'Early Close' else ''
+                    suffix = '  (timed event)' if 'close' in str(detail or '').lower() else ''
                     lines.append(f'  {event_date.strftime("%Y-%m-%d")}  {market}  {event_name}  {detail}{suffix}')
             else:
                 lines.append('  (none)')

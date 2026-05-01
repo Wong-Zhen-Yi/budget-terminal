@@ -78,21 +78,12 @@ class OptionsTableRowsMixin:
         t.setItem(row, 11, _item('$0.00', editable=False))
         t.setItem(row, 12, _item('0.0%', editable=False))
         t.setItem(row, 13, _item('0.0%', editable=False))
-        status_combo = QComboBox()
-        status_combo.addItems(list(getattr(self, '_OPT_STATUSES', DEFAULT_OPT_STATUSES)))
-        status_combo.setCurrentText(pos.get('status', 'Open'))
-        status_combo.currentTextChanged.connect(partial(self._on_status_changed_item, ticker_item))
-        t.setCellWidget(row, 14, status_combo)
-        rm_btn = QPushButton('×')
-        rm_btn.setFixedSize(28, 28)
-        self.set_theme_variant(rm_btn, 'danger')
-        rm_btn.setStyleSheet(f'font-weight: bold; font-size: 14px; color: {self.theme_color("accent_negative")};')
-        rm_btn.clicked.connect(partial(self._remove_options_row, row))
-        t.setCellWidget(row, 15, rm_btn)
         t.blockSignals(False)
         self._recalc_options_row(row)
         if hasattr(self, '_p4_apply_table_width_preferences'):
             self._p4_apply_table_width_preferences('options')
+        if hasattr(self, '_p4_update_remove_options_button_state'):
+            self._p4_update_remove_options_button_state()
         if ticker_val:
             self._fetch_option_expiries(row_id, ticker_val)
 
@@ -119,13 +110,6 @@ class OptionsTableRowsMixin:
         t.blockSignals(True)
         t.removeRow(row)
         for r in range(t.rowCount()):
-            rm_btn = t.cellWidget(r, 15)
-            if isinstance(rm_btn, QPushButton):
-                try:
-                    rm_btn.clicked.disconnect()
-                except:
-                    pass
-                rm_btn.clicked.connect(partial(self._remove_options_row, r))
             ticker_item = t.item(r, 0)
             s_combo = t.cellWidget(r, 1)
             if isinstance(s_combo, QComboBox) and ticker_item:
@@ -141,14 +125,43 @@ class OptionsTableRowsMixin:
                 except:
                     pass
                 e_combo.currentIndexChanged.connect(partial(self._on_expiry_combo_changed, ticker_item, e_combo))
-            st_combo = t.cellWidget(r, 14)
-            if isinstance(st_combo, QComboBox) and ticker_item:
-                try:
-                    st_combo.currentTextChanged.disconnect()
-                except:
-                    pass
-                st_combo.currentTextChanged.connect(partial(self._on_status_changed_item, ticker_item))
         t.blockSignals(False)
         if hasattr(self, '_p4_apply_table_width_preferences'):
             self._p4_apply_table_width_preferences('options')
+        if hasattr(self, '_p4_update_remove_options_button_state'):
+            self._p4_update_remove_options_button_state()
         self._update_total_pl_label()
+
+    def _p4_selected_options_row(self) -> int:
+        """Return the currently selected options row, or -1 if none is selected."""
+        table = getattr(self, 'p4_opt_table', None)
+        if table is None:
+            return -1
+        selection_model = table.selectionModel()
+        row_candidates = []
+        if selection_model is not None:
+            row_candidates.extend(index.row() for index in selection_model.selectedRows())
+            if not row_candidates:
+                row_candidates.extend(index.row() for index in selection_model.selectedIndexes())
+        row_candidates.append(table.currentRow())
+        for row in row_candidates:
+            if 0 <= row < table.rowCount() and row < len(self.options_data):
+                return int(row)
+        return -1
+
+    def _p4_update_remove_options_button_state(self) -> None:
+        """Enable options removal only when an options row exists."""
+        button = getattr(self, 'p4_remove_options_btn', None)
+        if button is None:
+            return
+        table = getattr(self, 'p4_opt_table', None)
+        button.setEnabled(bool(table is not None and table.rowCount() > 0))
+
+    def _p4_remove_selected_options_position(self) -> None:
+        """Remove the selected options position from the active portfolio."""
+        row = self._p4_selected_options_row()
+        if row < 0:
+            QMessageBox.information(self, 'Remove Position', 'Select an options position to remove.')
+            self._p4_update_remove_options_button_state()
+            return
+        self._remove_options_row(row)

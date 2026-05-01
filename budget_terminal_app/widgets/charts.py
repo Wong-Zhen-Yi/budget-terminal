@@ -3,6 +3,19 @@ from typing import Any
 from ..dependencies import *
 from ..persistence import fmt_num
 
+
+def _coerce_axis_datetime(value: Any) -> Any:
+    """Return a datetime-like value for chart axis labels when possible."""
+    if hasattr(value, 'strftime'):
+        return value
+    try:
+        parsed = pd.to_datetime(value, errors='coerce')
+        if not pd.isna(parsed) and hasattr(parsed, 'strftime'):
+            return parsed
+    except Exception:
+        pass
+    return None
+
 class CandlestickItem(pg.GraphicsObject):
 
     def __init__(self, data: Any, up_color: Any='#4caf50', down_color: Any='#f44336') -> None:
@@ -64,7 +77,10 @@ class DateAxisItem(pg.AxisItem):
         for v in values:
             idx = int(round(v))
             if 0 <= idx < len(self.dates):
-                d = self.dates[idx]
+                d = _coerce_axis_datetime(self.dates[idx])
+                if d is None:
+                    strings.append(str(self.dates[idx])[:10])
+                    continue
                 if self.date_interval in ('1d', '1wk', '1mo'):
                     strings.append(d.strftime('%m/%d/%y'))
                 else:

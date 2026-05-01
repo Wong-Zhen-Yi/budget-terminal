@@ -62,8 +62,6 @@ class WindowSetupMixin:
         self.btn_page15.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
         self.btn_page16.setCheckable(True)
-        self.btn_page17 = QPushButton('Notes')
-        self.btn_page17.setCheckable(True)
         self.btn_page9 = QPushButton('Settings')
         self.btn_page9.setCheckable(True)
         self.btn_page10 = QPushButton('Charts')
@@ -87,14 +85,11 @@ class WindowSetupMixin:
             self.btn_page14,
             self.btn_page15,
             self.btn_page16,
-            self.btn_page17,
             self.btn_page9,
         ]
-        refresh_btn = QPushButton('Refresh')
-        refresh_btn.clicked.connect(lambda checked=False: self.refresh_data(force=True))
-        snap_btn = QPushButton('Screenshot')
-        snap_btn.clicked.connect(self.take_screenshot)
-
+        self.top_refresh_btn = QPushButton('Reload (F5)')
+        self.top_refresh_btn.setToolTip('Reload the current page (F5)')
+        self.top_refresh_btn.clicked.connect(self._refresh_current_page)
         nav_scroll_left = QPushButton('<')
         nav_scroll_left.setFixedWidth(24)
         nav_scroll_left.setFixedHeight(38)
@@ -161,28 +156,21 @@ class WindowSetupMixin:
         self._nav_next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         self._nav_next_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._nav_next_shortcut.activated.connect(lambda: self._handle_main_tab_arrow_shortcut(1))
+        self._nav_cycle_shortcut = QShortcut(QKeySequence('Ctrl+Tab'), self)
+        self._nav_cycle_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._nav_cycle_shortcut.activated.connect(self._handle_ctrl_tab_shortcut)
+        self._page_refresh_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
+        self._page_refresh_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._page_refresh_shortcut.activated.connect(self._refresh_current_page)
         self._tab_picker_shortcut = QShortcut(QKeySequence('`'), self)
         self._tab_picker_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._tab_picker_shortcut.activated.connect(self._handle_tab_picker_shortcut)
-        self.tz_combo = QComboBox()
-        self.tz_combo.setFixedWidth(120)
         self._tz_choices = TIMEZONE_CHOICES
-        for name, _ in self._tz_choices:
-            self.tz_combo.addItem(name)
-        self.tz_combo.currentIndexChanged.connect(self.update_time)
+        self._clock_tz_index = 0
         self._time_12h = load_time_format()
-        self.time_fmt_btn = QPushButton('12h' if self._time_12h else '24h')
-        self.time_fmt_btn.setCheckable(True)
-        self.time_fmt_btn.setChecked(self._time_12h)
-        self.time_fmt_btn.setFixedWidth(46)
-        self.time_fmt_btn.setFixedHeight(26)
-        self.time_fmt_btn.clicked.connect(self._toggle_time_format)
-        self.top_bar.addWidget(self.tz_combo)
         self.top_bar.addWidget(self.time_label)
-        self.top_bar.addWidget(self.time_fmt_btn)
         self.top_bar.addSpacing(8)
-        self.top_bar.addWidget(refresh_btn)
-        self.top_bar.addWidget(snap_btn)
+        self.top_bar.addWidget(self.top_refresh_btn)
         root_layout.addLayout(self.top_bar)
         self.stacked_widget = QStackedWidget()
         root_layout.addWidget(self.stacked_widget)
@@ -353,9 +341,6 @@ class WindowSetupMixin:
         self.dashboard_export_options_btn = QPushButton('Export Top Options')
         self.set_theme_variant(self.dashboard_export_options_btn, 'accent')
         self.dashboard_export_options_btn.clicked.connect(self._dashboard_export_top_options)
-        self.dashboard_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.dashboard_refresh_btn, 'accent')
-        self.dashboard_refresh_btn.clicked.connect(lambda checked=False: self.refresh_data(force=True, reason='manual_refresh'))
         self.dashboard_auto_btn = QPushButton('Auto')
         self.dashboard_auto_btn.setCheckable(True)
         self.dashboard_auto_btn.clicked.connect(self._dashboard_toggle_auto_follow)
@@ -384,7 +369,6 @@ class WindowSetupMixin:
             toolbar.addWidget(btn)
         toolbar.addStretch()
         toolbar.addWidget(self.dashboard_auto_btn)
-        toolbar.addWidget(self.dashboard_refresh_btn)
         right_col.addLayout(toolbar)
 
         indicator_row = QHBoxLayout()
@@ -513,8 +497,7 @@ class WindowSetupMixin:
             {'index': 12, 'page_attr': 'page14', 'init_method': 'init_page14'},
             {'index': 13, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
             {'index': 14, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
-            {'index': 15, 'page_attr': 'page17', 'init_method': 'init_page17', 'theme_hook': '_apply_notes_theme'},
-            {'index': 16, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+            {'index': 15, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
         )
 
     def _register_lazy_pages(self) -> None:

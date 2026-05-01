@@ -4,6 +4,9 @@ yfinance
 PyQt6
 pyqtgraph
 requests
+fastapi
+uvicorn
+httpx
 tzdata
 beautifulsoup4
 yt-dlp

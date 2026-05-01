@@ -1,5 +1,6 @@
 from __future__ import annotations
 from copy import deepcopy
+import re
 import time
 
 from typing import Any
@@ -10,6 +11,26 @@ from ..dependencies import *
 
 DEFAULT_BATCH_SYMBOLS = ['SPY', 'DX-Y.NYB', '^VIX', 'GLD', 'CL=F']
 MACRO_TICKERS = ['SPY', 'QQQ', 'GLD', 'CL=F', '^VIX', '^TNX', 'DX-Y.NYB']
+OTHER_NEWS_QUERIES = ['market movers', 'earnings movers', 'sector rotation', 'analyst upgrades']
+OTHER_NEWS_SECTOR_TICKERS = ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLI', 'XLP', 'XLU', 'XLB', 'XLRE']
+OTHER_NEWS_FOCUS_TICKERS = [
+    'AAPL', 'MSFT', 'NVDA', 'AVGO', 'AMD', 'ORCL',
+    'JPM', 'BAC', 'GS', 'MS',
+    'LLY', 'UNH', 'JNJ', 'MRK',
+    'AMZN', 'TSLA', 'HD', 'MCD',
+    'XOM', 'CVX', 'COP', 'SLB',
+    'GOOGL', 'META', 'NFLX', 'DIS',
+    'GE', 'CAT', 'BA', 'RTX',
+    'WMT', 'COST', 'PG', 'KO',
+    'NEE', 'DUK', 'PLD', 'AMT',
+    'LIN', 'FCX', 'NEM',
+    'COIN', 'MSTR',
+]
+OTHER_NEWS_LIMIT = 12
+OTHER_NEWS_CANDIDATE_LIMIT = 80
+OTHER_NEWS_SEARCH_LIMIT = 8
+OTHER_NEWS_PER_SECTOR_LIMIT = 2
+OTHER_NEWS_PER_FOCUS_TICKER_LIMIT = 2
 OPTION_BUCKET_TEMPLATE = {'0_week': [], '2_weeks': [], '4_weeks': []}
 OPTION_BUCKET_OFFSETS = (('0_week', 0), ('2_weeks', 14), ('4_weeks', 28))
 CHART_CACHE_PERIOD_DAY_MAP = {
@@ -27,6 +48,7 @@ class DataWorker(QObject):
     _NON_CHART_SNAPSHOT_TTL_SECONDS = 30.0
     _stock_details_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     _macro_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+    _other_news_cache: tuple[float, list[dict[str, Any]]] | None = None
     _non_chart_snapshot_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
     _details_cache_lock = threading.Lock()
     _non_chart_snapshot_lock = threading.Lock()
@@ -288,6 +310,109 @@ class DataWorker(QObject):
                 continue
         return articles
 
+    def _article_dedupe_key(self, article: dict[str, Any]) -> str:
+        """Return a stable key for cross-section news dedupe."""
+        url = str(article.get('url') or '').strip().lower()
+        if url:
+            return f'url:{url}'
+        title = str(article.get('title') or '').strip().lower()
+        return f'title:{title}' if title else ''
+
+    def _dedupe_news(self, articles: list[dict[str, Any]], existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop articles already present in earlier-priority news sections."""
+        seen = {key for key in (self._article_dedupe_key(article) for article in existing) if key}
+        unique = []
+        for article in articles:
+            key = self._article_dedupe_key(article)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            unique.append(article)
+        return unique
+
+    def _article_related_tickers(self, item: Any) -> list[str]:
+        related = []
+        if isinstance(item, dict):
+            related_raw = item.get('relatedTickers') or []
+            if isinstance(related_raw, (list, tuple)):
+                related = [str(ticker or '').strip().upper() for ticker in related_raw if str(ticker or '').strip()]
+        return related
+
+    def _parse_other_news_item(self, item: Any, fallback_ticker: str = 'OTHER') -> dict[str, Any]:
+        related = self._article_related_tickers(item)
+        ticker = ', '.join(related[:3]) if related else 'OTHER'
+        if ticker == 'OTHER':
+            ticker = fallback_ticker
+        return self._parse_news_item(item, ticker, 'other')
+
+    def _article_mentions_blocked_ticker(self, article: dict[str, Any], blocked_tickers: set[str]) -> bool:
+        article_tickers = self._article_ticker_set(article)
+        if article_tickers & blocked_tickers:
+            return True
+        title = str(article.get('title') or '').upper()
+        for ticker in blocked_tickers:
+            if len(ticker) < 2 or any(ch in ticker for ch in ('^', '=', '-', '.')):
+                continue
+            if re.search(rf'(?<![A-Z0-9]){re.escape(ticker)}(?![A-Z0-9])', title):
+                return True
+        return False
+
+    def _article_ticker_set(self, article: dict[str, Any]) -> set[str]:
+        """Return normalized ticker symbols attached to a news article."""
+        ticker_text = str(article.get('ticker') or '').upper()
+        return {
+            text.strip()
+            for text in ticker_text.split(',')
+            if text.strip() and text.strip() != 'OTHER'
+        }
+
+    def _news_ticker_set(self, articles: list[dict[str, Any]]) -> set[str]:
+        """Return every normalized ticker already represented by a news section."""
+        tickers: set[str] = set()
+        for article in articles:
+            tickers.update(self._article_ticker_set(article))
+        return tickers
+
+    def _other_focus_tickers(self) -> list[str]:
+        """Return the broad ticker universe used to source the Other news panel."""
+        sector_symbols = []
+        for symbols in SECTOR_DATA.values():
+            sector_symbols.extend(list(symbols)[:3])
+        return self._dedupe_symbols(OTHER_NEWS_FOCUS_TICKERS, sector_symbols, OTHER_NEWS_SECTOR_TICKERS)
+
+    def _select_diverse_other_news(self, articles: list[dict[str, Any]], existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Pick Other articles without repeating Portfolio/Macro tickers or over-concentrating one ticker."""
+        blocked_tickers = {
+            str(ticker or '').upper().strip()
+            for ticker in self._dedupe_symbols(self.tickers, MACRO_TICKERS)
+            if str(ticker or '').strip()
+        }
+        blocked_tickers.update(self._news_ticker_set(existing))
+        filtered = [
+            article for article in articles
+            if not self._article_mentions_blocked_ticker(article, blocked_tickers)
+        ]
+        candidates = self._dedupe_news(filtered, existing)
+        ticker_buckets: dict[str, list[dict[str, Any]]] = {}
+        for article in sorted(candidates, key=lambda item: item.get('_ts', 0), reverse=True):
+            tickers = sorted(self._article_ticker_set(article))
+            bucket_key = tickers[0] if tickers else str(article.get('source') or 'OTHER')
+            ticker_buckets.setdefault(bucket_key, []).append(article)
+        selected = []
+        while len(selected) < OTHER_NEWS_LIMIT and ticker_buckets:
+            for key in list(ticker_buckets.keys()):
+                if len(selected) >= OTHER_NEWS_LIMIT:
+                    break
+                bucket = ticker_buckets.get(key, [])
+                if not bucket:
+                    ticker_buckets.pop(key, None)
+                    continue
+                selected.append(bucket.pop(0))
+                if not bucket:
+                    ticker_buckets.pop(key, None)
+        return selected
+
     def _target_payload(self, ticker: str, current_price: Any, info: Any) -> dict[str, Any]:
         return {
             'ticker': ticker,
@@ -306,22 +431,32 @@ class DataWorker(QObject):
                 }
         try:
             ticker_obj = self._ticker(ticker)
-            info = ticker_obj.info
-            payload = {
-                'targets': self._target_payload(ticker, portfolio_info.get(ticker, {}).get('price', 0), info),
-                'news': self._read_news_items(ticker_obj, ticker, 'portfolio'),
-            }
-            with self._details_cache_lock:
-                self._stock_details_cache[ticker] = (
-                    now,
-                    {
-                        'targets': dict(payload['targets']),
-                        'news': [dict(item) for item in payload['news']],
-                    },
-                )
-            return payload
-        except Exception:
+        except Exception as exc:
+            logger.info('Unable to create yfinance ticker for %s: %s', ticker, exc)
             return None
+        info = {}
+        try:
+            info = ticker_obj.info
+            if not isinstance(info, dict):
+                info = {}
+        except Exception as exc:
+            if is_yahoo_unauthorized_error(exc):
+                logger.info('Yahoo refused optional target metadata for %s; continuing with N/A target.', ticker)
+            else:
+                logger.info('Target metadata fetch failed for %s: %s', ticker, exc)
+        payload = {
+            'targets': self._target_payload(ticker, portfolio_info.get(ticker, {}).get('price', 0), info),
+            'news': self._read_news_items(ticker_obj, ticker, 'portfolio'),
+        }
+        with self._details_cache_lock:
+            self._stock_details_cache[ticker] = (
+                now,
+                {
+                    'targets': dict(payload['targets']),
+                    'news': [dict(item) for item in payload['news']],
+                },
+            )
+        return payload
 
     def _fetch_macro_news(self, ticker: str) -> list[dict[str, Any]]:
         now = time.time()
@@ -336,6 +471,57 @@ class DataWorker(QObject):
             return articles
         except Exception:
             return []
+
+    def _fetch_other_news(self) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._details_cache_lock:
+            cached = self._other_news_cache
+            if cached and (now - cached[0]) < self._DETAILS_CACHE_TTL_SECONDS:
+                return [dict(item) for item in cached[1]]
+        articles = []
+        for query in OTHER_NEWS_QUERIES:
+            if self._is_cancelled():
+                return []
+            try:
+                search = yf.Search(
+                    query,
+                    max_results=0,
+                    news_count=OTHER_NEWS_SEARCH_LIMIT,
+                    lists_count=0,
+                    include_cb=False,
+                    include_nav_links=False,
+                    include_research=False,
+                    include_cultural_assets=False,
+                    raise_errors=False,
+                    timeout=10,
+                )
+                for item in list(getattr(search, 'news', []) or [])[:OTHER_NEWS_SEARCH_LIMIT]:
+                    try:
+                        articles.append(self._parse_other_news_item(item))
+                    except Exception:
+                        continue
+            except Exception as exc:
+                logger.info('Other news search failed for %s: %s', query, exc)
+                continue
+        focus_tickers = self._other_focus_tickers()
+        with ThreadPoolExecutor(max_workers=self._executor_workers(len(focus_tickers))) as executor:
+            futures = {executor.submit(self._read_news_items, self._ticker(ticker), ticker, 'other'): ticker for ticker in focus_tickers}
+            for future, ticker in list(futures.items()):
+                if self._is_cancelled():
+                    return []
+                try:
+                    limit = OTHER_NEWS_PER_SECTOR_LIMIT if ticker in OTHER_NEWS_SECTOR_TICKERS else OTHER_NEWS_PER_FOCUS_TICKER_LIMIT
+                    articles.extend(future.result()[:limit])
+                except Exception as exc:
+                    logger.info('Other ticker news failed for %s: %s', ticker, exc)
+                    continue
+        articles = self._dedupe_news(articles, [])[:OTHER_NEWS_CANDIDATE_LIMIT]
+        with self._details_cache_lock:
+            self.__class__._other_news_cache = (now, [dict(item) for item in articles])
+        return articles
+
+    def _filter_other_news(self, articles: list[dict[str, Any]], existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._select_diverse_other_news(articles, existing)
 
     def _executor_workers(self, size: int, upper_bound: int = 8) -> int:
         return max(1, min(size, upper_bound))
@@ -356,6 +542,10 @@ class DataWorker(QObject):
                 if self._is_cancelled():
                     return [], []
                 news_list.extend(articles)
+        if self._is_cancelled():
+            return [], []
+        other_news = self._filter_other_news(self._fetch_other_news(), news_list)
+        news_list.extend(other_news)
         return targets, news_list
 
     def _normalize_chart_frame(self, symbol: str, df: Any) -> Any:
@@ -451,13 +641,67 @@ class DataWorker(QObject):
         min_acceptable_days = max(required_days - 45.0, required_days * 0.85)
         return coverage_days >= min_acceptable_days
 
-    def _load_cached_chart_frame(self, symbol: str, period: Any, interval: Any, *, max_age_hours: float = 24.0) -> Any:
+    def _chart_frame_coverage_days(self, df: Any) -> float:
+        """Return the calendar-day span covered by one OHLCV frame."""
+        if df is None or getattr(df, 'empty', True):
+            return 0.0
+        try:
+            index = pd.DatetimeIndex(pd.to_datetime(df.index))
+        except Exception:
+            return 0.0
+        if len(index) < 2:
+            return 0.0
+        if getattr(index, 'tz', None) is not None:
+            index = index.tz_localize(None)
+        return max(0.0, (index.max() - index.min()).total_seconds() / 86400.0)
+
+    def _merge_chart_frames(self, existing_df: Any, new_df: Any) -> Any:
+        """Merge cached and freshly fetched OHLCV rows without dropping older history."""
+        frames = [frame for frame in (existing_df, new_df) if frame is not None and not getattr(frame, 'empty', True)]
+        if not frames:
+            return None
+        if len(frames) == 1:
+            frame = frames[0].copy()
+            frame.index.name = 'Date'
+            return frame
+        merged = pd.concat(frames, axis=0, sort=False)
+        try:
+            merged.index = pd.to_datetime(merged.index)
+        except Exception:
+            frame = new_df.copy()
+            frame.index.name = 'Date'
+            return frame
+        merged = merged[~merged.index.duplicated(keep='last')].sort_index().copy()
+        merged.index.name = 'Date'
+        return merged
+
+    def _save_chart_frame(self, cache: CacheManager, symbol: str, interval: Any, df: Any) -> None:
+        """Save chart data while preserving any longer history already cached for the interval."""
+        if df is None or getattr(df, 'empty', True) or interval not in ('1d', '1wk', '1mo'):
+            return
+        existing_df = self._normalize_chart_frame(
+            symbol,
+            cache.get_data(symbol, interval, max_age_hours=24.0 * 365.0 * 20.0),
+        )
+        merged_df = self._merge_chart_frames(existing_df, df)
+        if merged_df is not None and not merged_df.empty:
+            cache.save_data(symbol, interval, merged_df)
+
+    def _load_cached_chart_frame(
+        self,
+        symbol: str,
+        period: Any,
+        interval: Any,
+        *,
+        max_age_hours: float = 24.0,
+        require_coverage: bool = True,
+    ) -> Any:
         """Return one normalized cached chart frame when it is still usable for the request."""
         raw_df = self._cache_manager.get_data(symbol, interval, max_age_hours=max_age_hours)
         df = self._normalize_chart_frame(symbol, raw_df)
         if df is None or df.empty:
             return None
-        if interval in ('1d', '1wk', '1mo') and not self._chart_cache_covers_period(df, period):
+        if require_coverage and interval in ('1d', '1wk', '1mo') and not self._chart_cache_covers_period(df, period):
             logger.info(
                 'Dashboard chart %s cache for interval %s does not cover requested period %s.',
                 symbol,
@@ -493,7 +737,7 @@ class DataWorker(QObject):
         if daily_df is None or daily_df.empty:
             daily_df = self._download_symbol_frame(symbol, '5y', '1d', auto_adjust=False)
             if daily_df is not None and not daily_df.empty:
-                cache.save_data(symbol, '1d', daily_df)
+                self._save_chart_frame(cache, symbol, '1d', daily_df)
         if daily_df is None or daily_df.empty or 'Close' not in daily_df.columns:
             return pd.Series(index=source_df.index, dtype=float)
         daily_ma = daily_df['Close'].astype(float).rolling(200, min_periods=200).mean().dropna()
@@ -568,11 +812,20 @@ class DataWorker(QObject):
         cache = self._cache_manager
         source_label = 'download'
         df = self._download_symbol_frame(symbol, period, interval)
-        if df is not None and not df.empty and interval in ['1d', '1wk', '1mo']:
-            cache.save_data(symbol, interval, df)
+        if df is not None and not df.empty and interval in ('1d', '1wk', '1mo') and not self._chart_cache_covers_period(df, period):
+            max_df = self._download_symbol_frame(symbol, 'max', interval)
+            if max_df is not None and not max_df.empty and self._chart_frame_coverage_days(max_df) > self._chart_frame_coverage_days(df):
+                df = max_df
+                source_label = 'download-max'
+        if df is not None and not df.empty and interval in ('1d', '1wk', '1mo'):
+            self._save_chart_frame(cache, symbol, interval, df)
         if df is None:
             source_label = 'cache'
             df = self._load_cached_chart_frame(symbol, period, interval)
+            if df is None:
+                df = self._load_cached_chart_frame(symbol, period, interval, require_coverage=False)
+                if df is not None and not df.empty:
+                    source_label = 'partial cache'
         if df is None:
             logger.warning(
                 'Dashboard chart %s unavailable after %s for period=%s interval=%s.',
@@ -647,85 +900,91 @@ class DataWorker(QObject):
             chart_rsi[symbol] = rsi_series
         return charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi
 
-    def run(self) -> Any:
-        try:
-            logger.info('Worker starting. Tickers: %s, Charts: %s', self.tickers, self.chart_configs)
-            total_started = time.perf_counter()
-            dashboard_chart_configs = self._normalize_chart_configs()
-            dashboard_chart_config = dashboard_chart_configs[0] if dashboard_chart_configs else None
-            fetch_ticker_signature = self._fetch_ticker_signature()
-            non_chart_reused = False
-            cache_age_seconds = 0.0
-            non_chart_started = time.perf_counter()
-            non_chart_payload = None
-            skip_chart_refresh = self.refresh_reason == 'portfolio_membership_change'
-            if self.allow_non_chart_reuse:
-                non_chart_payload, cache_age_seconds = self._load_cached_non_chart_snapshot(fetch_ticker_signature)
-                if non_chart_payload is not None:
-                    non_chart_reused = True
-                    logger.info(
-                        'Worker %s reused dashboard non-chart snapshot for %s (age %.1fs, reason=%s).',
-                        self.request_id,
-                        list(fetch_ticker_signature),
-                        cache_age_seconds,
-                        self.refresh_reason,
-                    )
-            if skip_chart_refresh:
-                if not non_chart_reused:
-                    non_chart_payload = self._collect_non_chart_payload()
-                non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
-                charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = ({}, {}, {}, {}, {})
-                chart_ms = 0.0
-            else:
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    fut_non_chart = None if non_chart_reused else pool.submit(self._collect_non_chart_payload)
-                    chart_started = time.perf_counter()
-                    fut_chart = pool.submit(self._collect_chart_data, dashboard_chart_config)
-                    if fut_non_chart is not None:
-                        non_chart_payload = fut_non_chart.result()
-                    non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
-                    charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = fut_chart.result()
-                    chart_ms = (time.perf_counter() - chart_started) * 1000.0
-            if non_chart_payload is None and self._is_cancelled():
-                logger.info('Worker %s cancelled during non-chart fetch.', self.request_id)
-                return
-            if not non_chart_reused and non_chart_payload is not None:
-                self._save_cached_non_chart_snapshot(fetch_ticker_signature, non_chart_payload)
+    def fetch(self) -> dict[str, Any] | None:
+        """Return the dashboard payload synchronously without emitting Qt signals."""
+        logger.info('Worker starting. Tickers: %s, Charts: %s', self.tickers, self.chart_configs)
+        total_started = time.perf_counter()
+        dashboard_chart_configs = self._normalize_chart_configs()
+        dashboard_chart_config = dashboard_chart_configs[0] if dashboard_chart_configs else None
+        fetch_ticker_signature = self._fetch_ticker_signature()
+        non_chart_reused = False
+        cache_age_seconds = 0.0
+        non_chart_started = time.perf_counter()
+        non_chart_payload = None
+        skip_chart_refresh = self.refresh_reason == 'portfolio_membership_change'
+        if self.allow_non_chart_reuse:
+            non_chart_payload, cache_age_seconds = self._load_cached_non_chart_snapshot(fetch_ticker_signature)
+            if non_chart_payload is not None:
+                non_chart_reused = True
                 logger.info(
-                    'Worker %s fetched fresh dashboard non-chart payload for %s in %.1f ms (reason=%s).',
+                    'Worker %s reused dashboard non-chart snapshot for %s (age %.1fs, reason=%s).',
                     self.request_id,
                     list(fetch_ticker_signature),
-                    non_chart_ms,
+                    cache_age_seconds,
                     self.refresh_reason,
                 )
-            if self._is_cancelled():
-                logger.info('Worker %s cancelled after parallel fetch.', self.request_id)
-                return
-            data = {
-                'request_id': self.request_id,
-                'chart_configs': list(dashboard_chart_configs),
-                'portfolio': dict((non_chart_payload or {}).get('portfolio', {})),
-                'market': dict((non_chart_payload or {}).get('market', {})),
-                'targets': list((non_chart_payload or {}).get('targets', [])),
-                'news': list((non_chart_payload or {}).get('news', [])),
-                'charts': charts,
-                'chart_options': chart_options,
-                'chart_option_expirations': chart_option_expirations,
-                'chart_ma200': chart_ma200,
-                'chart_rsi': chart_rsi,
-                '_dashboard_refresh_meta': {
-                    'refresh_reason': self.refresh_reason,
-                    'non_chart_reused': non_chart_reused,
-                    'fetch_ticker_signature': list(fetch_ticker_signature),
-                    'non_chart_cache_age_seconds': float(cache_age_seconds),
-                    'worker_timings_ms': {
-                        'non_chart': round(non_chart_ms, 1),
-                        'chart': round(chart_ms, 1),
-                        'total': round((time.perf_counter() - total_started) * 1000.0, 1),
-                    },
+        if skip_chart_refresh:
+            if not non_chart_reused:
+                non_chart_payload = self._collect_non_chart_payload()
+            non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
+            charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = ({}, {}, {}, {}, {})
+            chart_ms = 0.0
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_non_chart = None if non_chart_reused else pool.submit(self._collect_non_chart_payload)
+                chart_started = time.perf_counter()
+                fut_chart = pool.submit(self._collect_chart_data, dashboard_chart_config)
+                if fut_non_chart is not None:
+                    non_chart_payload = fut_non_chart.result()
+                non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
+                charts, chart_options, chart_option_expirations, chart_ma200, chart_rsi = fut_chart.result()
+                chart_ms = (time.perf_counter() - chart_started) * 1000.0
+        if non_chart_payload is None and self._is_cancelled():
+            logger.info('Worker %s cancelled during non-chart fetch.', self.request_id)
+            return None
+        if not non_chart_reused and non_chart_payload is not None:
+            self._save_cached_non_chart_snapshot(fetch_ticker_signature, non_chart_payload)
+            logger.info(
+                'Worker %s fetched fresh dashboard non-chart payload for %s in %.1f ms (reason=%s).',
+                self.request_id,
+                list(fetch_ticker_signature),
+                non_chart_ms,
+                self.refresh_reason,
+            )
+        if self._is_cancelled():
+            logger.info('Worker %s cancelled after parallel fetch.', self.request_id)
+            return None
+        return {
+            'request_id': self.request_id,
+            'chart_configs': list(dashboard_chart_configs),
+            'portfolio': dict((non_chart_payload or {}).get('portfolio', {})),
+            'market': dict((non_chart_payload or {}).get('market', {})),
+            'targets': list((non_chart_payload or {}).get('targets', [])),
+            'news': list((non_chart_payload or {}).get('news', [])),
+            'charts': charts,
+            'chart_options': chart_options,
+            'chart_option_expirations': chart_option_expirations,
+            'chart_ma200': chart_ma200,
+            'chart_rsi': chart_rsi,
+            '_dashboard_refresh_meta': {
+                'refresh_reason': self.refresh_reason,
+                'non_chart_reused': non_chart_reused,
+                'chart_symbol': dashboard_chart_config[0] if dashboard_chart_config else '',
+                'fetch_ticker_signature': list(fetch_ticker_signature),
+                'non_chart_cache_age_seconds': float(cache_age_seconds),
+                'worker_timings_ms': {
+                    'non_chart': round(non_chart_ms, 1),
+                    'chart': round(chart_ms, 1),
+                    'total': round((time.perf_counter() - total_started) * 1000.0, 1),
                 },
-            }
-            self.finished.emit(data)
+            },
+        }
+
+    def run(self) -> Any:
+        try:
+            data = self.fetch()
+            if data is not None:
+                self.finished.emit(data)
         except Exception as exc:
             logger.error('Worker error: %s', exc)
             self.error.emit(str(exc))

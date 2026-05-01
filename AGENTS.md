@@ -10,7 +10,7 @@ Keep changes close to the subsystem they affect:
 - `budget_terminal_app/themes/`: theme tokens and theme implementations
 - `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
 
-Root-level scripts such as `test_options_fetch.py`, `debug_yf.py`, `inspect_cache.py`, and related helpers are ad hoc diagnostics and smoke tests. Build and release artifacts live in `build/`, `dist/`, and `release/` and should be treated as generated output unless a task explicitly targets packaging.
+Scripts under `scripts/` such as `test_options_fetch.py`, `debug_yf.py`, `inspect_cache.py`, and related helpers are ad hoc diagnostics and smoke tests. Packaging files live in `packaging/`. Build and release artifacts live in `build/`, `dist/`, and `release/` and should be treated as generated output unless a task explicitly targets packaging.
 
 ## Build, Test, and Development Commands
 Create a virtual environment with `python -m venv .venv`, then install dependencies with `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`.
@@ -18,8 +18,8 @@ Create a virtual environment with `python -m venv .venv`, then install dependenc
 Common commands:
 - `python budget_terminal.py`: launch the desktop app
 - `python -m compileall budget_terminal.py budget_terminal_app`: quick syntax check for the launcher and package
-- `python test_options_fetch.py`: smoke-test Yahoo Finance options fetching
-- `.\build_exe.bat`: build the Windows executable package
+- `python scripts\test_options_fetch.py`: smoke-test Yahoo Finance options fetching
+- `.\packaging\build_exe.bat`: build the Windows executable package
 
 If a change affects a specific helper script, run that script directly as part of verification.
 
@@ -38,10 +38,10 @@ There is no formal `pytest` suite in this checkout, so validation is primarily s
 Typical verification:
 - launch the app for UI, startup, theme, or persistence changes
 - run `python -m compileall budget_terminal.py budget_terminal_app` for Python edits
-- run focused root-level test or debug scripts for data-fetching changes
+- run focused `scripts/` test or debug scripts for data-fetching changes
 - confirm modified workflows or packaging scripts execute without obvious errors when relevant
 
-Name any new ad hoc verification script `test_<feature>.py` and keep it at the repository root unless there is a clear reason to colocate it elsewhere.
+Name any new ad hoc verification script `test_<feature>.py` and keep it under `scripts/` unless there is a clear reason to colocate it elsewhere.
 
 ## Commit & Pull Request Guidelines
 Git history may not be available in every workspace snapshot, so use short, imperative commit titles such as `Fix options refresh state` or `Update theme token defaults`.

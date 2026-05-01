@@ -10,6 +10,7 @@ _ECONOMIC_EVENTS_CACHE_TTL_SECONDS = 6 * 60 * 60
 _ECONOMIC_EVENTS_MEMORY_CACHE: dict[int, tuple[float, list[tuple[datetime.date, str, str]]]] = {}
 _ECONOMIC_EVENTS_CACHE_LOCK = threading.Lock()
 _MARKET_HOLIDAY_CACHE_DIR = 'market_holiday_cache'
+_MARKET_HOLIDAY_CACHE_VERSION = 2
 _MARKET_HOLIDAY_MEMORY_CACHE: dict[int, list[dict[str, Any]]] = {}
 _MARKET_HOLIDAY_CACHE_LOCK = threading.Lock()
 _HTTP_TIMEOUT_SECONDS = 20
@@ -220,12 +221,18 @@ def _load_market_holiday_cache(year: Any) -> list[dict[str, Any]] | None:
         return None
     if not isinstance(payload, dict):
         return None
-    return _deserialize_market_holiday_events(payload.get('events', []))
+    if int(payload.get('calendar_version', 0) or 0) < _MARKET_HOLIDAY_CACHE_VERSION:
+        return None
+    events = _deserialize_market_holiday_events(payload.get('events', []))
+    if not events:
+        return None
+    return events
 
 def _save_market_holiday_cache(year: Any, events: list[dict[str, Any]]) -> None:
     """Persist one year's market holidays to disk."""
     payload = {
         'year': int(year),
+        'calendar_version': _MARKET_HOLIDAY_CACHE_VERSION,
         'generated_at': _now_timestamp(),
         'events': _serialize_market_holiday_events(events),
     }
@@ -534,6 +541,111 @@ def _market_holiday_name_lookup(nyse: Any, start_date: Any, end_date: Any) -> tu
             early_close_names.setdefault(event_date, _format_market_holiday_name(raw_name, event_date, 'Early Close'))
     return holiday_names, early_close_names
 
+def _observed_fixed_market_holiday(year: int, month: int, day: int) -> datetime.date:
+    """Return the NYSE observed date for a fixed-date holiday."""
+    event_date = datetime.date(year, month, day)
+    if event_date.weekday() == 5:
+        return event_date - datetime.timedelta(days=1)
+    if event_date.weekday() == 6:
+        return event_date + datetime.timedelta(days=1)
+    return event_date
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> datetime.date:
+    """Return the nth weekday in a month, where Monday is 0."""
+    day = datetime.date(year, month, 1)
+    offset = (weekday - day.weekday()) % 7
+    return day + datetime.timedelta(days=offset + ((occurrence - 1) * 7))
+
+def _last_weekday(year: int, month: int, weekday: int) -> datetime.date:
+    """Return the last weekday in a month, where Monday is 0."""
+    if month == 12:
+        day = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+    else:
+        day = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+    return day - datetime.timedelta(days=(day.weekday() - weekday) % 7)
+
+def _easter_sunday(year: int) -> datetime.date:
+    """Return Gregorian Easter Sunday for a year."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime.date(year, month, day)
+
+def _fallback_us_equity_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
+    """Build a deterministic NYSE holiday/early-close set when the calendar package is unavailable."""
+    year_value = int(year)
+    first_day = datetime.date(year_value, 1, 1)
+    last_day = datetime.date(year_value, 12, 31)
+    holidays: list[tuple[datetime.date, str]] = [
+        (_observed_fixed_market_holiday(year_value, 1, 1), "New Year's Day"),
+        (_nth_weekday(year_value, 1, 0, 3), 'Martin Luther King Jr. Day'),
+        (_nth_weekday(year_value, 2, 0, 3), 'Presidents Day'),
+        (_easter_sunday(year_value) - datetime.timedelta(days=2), 'Good Friday'),
+        (_last_weekday(year_value, 5, 0), 'Memorial Day'),
+        (_observed_fixed_market_holiday(year_value, 7, 4), 'Independence Day'),
+        (_nth_weekday(year_value, 9, 0, 1), 'Labor Day'),
+        (_nth_weekday(year_value, 11, 3, 4), 'Thanksgiving'),
+        (_observed_fixed_market_holiday(year_value, 12, 25), 'Christmas Day'),
+    ]
+    if year_value >= 2022:
+        holidays.append((_observed_fixed_market_holiday(year_value, 6, 19), 'Juneteenth'))
+    next_new_year_observed = _observed_fixed_market_holiday(year_value + 1, 1, 1)
+    if next_new_year_observed.year == year_value:
+        holidays.append((next_new_year_observed, "New Year's Day"))
+    holiday_by_date = {
+        day: _format_market_holiday_name(name, day, 'Holiday')
+        for day, name in holidays
+        if first_day <= day <= last_day and day.weekday() < 5
+    }
+    early_close_by_date: dict[datetime.date, str] = {}
+    black_friday = _nth_weekday(year_value, 11, 3, 4) + datetime.timedelta(days=1)
+    early_close_by_date[black_friday] = 'Black Friday'
+    christmas_eve = datetime.date(year_value, 12, 24)
+    early_close_by_date[christmas_eve] = 'Christmas Eve'
+    july_4 = datetime.date(year_value, 7, 4)
+    independence_eve = july_4 - datetime.timedelta(days=1)
+    early_close_by_date[independence_eve] = 'Independence Day Eve'
+
+    events = []
+    for day, name in sorted(holiday_by_date.items()):
+        events.append(
+            {
+                'date': day,
+                'market': 'US Equities',
+                'event': name,
+                'detail': 'Closed all day',
+                'cell_label': _market_holiday_cell_label(name, 'Holiday'),
+                'color': '#26c6da',
+            }
+        )
+    for day, name in sorted(early_close_by_date.items()):
+        if day.weekday() >= 5 or day in holiday_by_date or not (first_day <= day <= last_day):
+            continue
+        display_name = _format_market_holiday_name(name, day, 'Early Close')
+        events.append(
+            {
+                'date': day,
+                'market': 'US Equities',
+                'event': display_name,
+                'detail': '1:00 PM ET close',
+                'cell_label': _market_holiday_cell_label(display_name, 'Early Close'),
+                'color': '#8bc34a',
+            }
+        )
+    events.sort(key=lambda item: (item.get('date'), item.get('event', ''), item.get('market', '')))
+    return events
+
 def _fetch_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
     """Fetch one year's US-equity holidays and early closes from the exchange calendar."""
     global _MARKET_CALENDAR_IMPORT_WARNING_SHOWN
@@ -541,9 +653,9 @@ def _fetch_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
         import pandas_market_calendars as mcal
     except ImportError:
         if not _MARKET_CALENDAR_IMPORT_WARNING_SHOWN:
-            logger.warning('pandas_market_calendars is unavailable; market holidays disabled')
+            logger.info('pandas_market_calendars is unavailable; using built-in US market holiday fallback.')
             _MARKET_CALENDAR_IMPORT_WARNING_SHOWN = True
-        return []
+        return _fallback_us_equity_market_holiday_events_for_year(year)
     first_day = datetime.date(int(year), 1, 1)
     last_day = datetime.date(int(year), 12, 31)
     try:
@@ -552,7 +664,7 @@ def _fetch_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
         early_closes = nyse.early_closes(schedule=schedule)
     except Exception as ex:
         logger.warning(f'Market holiday fetch error {year}: {ex}')
-        return []
+        return _fallback_us_equity_market_holiday_events_for_year(year)
     holiday_names, early_close_names = _market_holiday_name_lookup(nyse, first_day, last_day)
     trading_days = {pd.Timestamp(idx).date() for idx in schedule.index}
     early_close_days = {pd.Timestamp(idx).date() for idx in early_closes.index}
@@ -588,7 +700,7 @@ def _fetch_market_holiday_events_for_year(year: Any) -> list[dict[str, Any]]:
             }
         )
     events.sort(key=lambda item: (item.get('date'), item.get('event', ''), item.get('market', '')))
-    return events
+    return events or _fallback_us_equity_market_holiday_events_for_year(year)
 
 def _market_holidays_cached_for_year(year: Any) -> bool:
     """Return whether one market-holiday year is already available in memory or on disk."""

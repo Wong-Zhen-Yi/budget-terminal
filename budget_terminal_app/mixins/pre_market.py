@@ -155,10 +155,14 @@ class _FearGreedGauge(QWidget):
 
 
 class PreMarketMixin:
+    _P14_AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 
     def init_page14(self) -> None:
         """Build the Pre-Market page UI."""
         self._p14_thread: QThread | None = None
+        self._p14_worker: PreMarketWorker | None = None
+        self._p14_loaded_once = False
+        self._p14_last_refresh_ts = 0.0
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -173,10 +177,6 @@ class PreMarketMixin:
         self.set_theme_role(title_lbl, 'page_title')
         title_row.addWidget(title_lbl)
         title_row.addStretch()
-        self.p14_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p14_refresh_btn, 'accent')
-        self.p14_refresh_btn.clicked.connect(self._p14_refresh)
-        title_row.addWidget(self.p14_refresh_btn)
         layout.addLayout(title_row)
 
         self.p14_status_lbl = QLabel('Ready')
@@ -435,10 +435,46 @@ class PreMarketMixin:
 
     # ---- worker lifecycle ----
 
-    def _p14_refresh(self) -> None:
-        if self._p14_thread is not None and self._p14_thread.isRunning():
+    def _p14_start_auto_refresh(self) -> None:
+        """Initialize the Pre-Market page and keep it refreshed in the background."""
+        if hasattr(self, '_ensure_page_initialized'):
+            self._ensure_page_initialized(12)
+        timer = getattr(self, '_p14_auto_refresh_timer', None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+        self._p14_refresh(auto_trigger=True)
+
+    def _p14_auto_refresh_tick(self) -> None:
+        """Run one scheduled Pre-Market refresh when no fetch is already active."""
+        page_initialized = True
+        if hasattr(self, '_page_initialized'):
+            page_initialized = self._page_initialized(page_attr='page14')
+        if not page_initialized:
+            if hasattr(self, '_ensure_page_initialized'):
+                self._ensure_page_initialized(12)
+        self._p14_refresh(auto_trigger=True)
+
+    def _p14_on_show(self) -> None:
+        """Refresh visible Pre-Market data only when the cached view is stale or empty."""
+        if not getattr(self, '_p14_loaded_once', False):
+            self._p14_refresh(auto_trigger=True)
             return
-        self.p14_refresh_btn.setEnabled(False)
+        now = datetime.datetime.now().timestamp()
+        last_refresh = float(getattr(self, '_p14_last_refresh_ts', 0.0) or 0.0)
+        stale_after = float(getattr(self, '_P14_AUTO_REFRESH_INTERVAL_MS', 15 * 60 * 1000)) / 1000.0
+        if now - last_refresh >= stale_after:
+            self._p14_refresh(auto_trigger=True)
+
+    def _p14_refresh(self, force: bool = False, *, auto_trigger: bool = False) -> bool:
+        thread = getattr(self, '_p14_thread', None)
+        if thread is not None and thread.isRunning():
+            return False
+        if auto_trigger and not force and getattr(self, '_p14_loaded_once', False):
+            now = datetime.datetime.now().timestamp()
+            last_refresh = float(getattr(self, '_p14_last_refresh_ts', 0.0) or 0.0)
+            stale_after = float(getattr(self, '_P14_AUTO_REFRESH_INTERVAL_MS', 15 * 60 * 1000)) / 1000.0
+            if now - last_refresh < stale_after:
+                return False
         self.set_status_text(self.p14_status_lbl, 'Fetching pre-market data...', status='muted')
         watchlist = list(getattr(self, 'tickers', []))
         worker = PreMarketWorker(watchlist)
@@ -449,13 +485,15 @@ class PreMarketMixin:
         worker.finished.connect(thread.quit)
         worker.error.connect(self._p14_on_error)
         worker.error.connect(thread.quit)
+        thread.finished.connect(self._p14_on_thread_finished)
         self._p14_thread = thread
         self._p14_worker = worker
         thread.start()
+        return True
 
     def _p14_on_data(self, result: dict) -> None:
-        self.p14_refresh_btn.setEnabled(True)
-
+        self._p14_loaded_once = True
+        self._p14_last_refresh_ts = datetime.datetime.now().timestamp()
         # Futures
         futures = result.get('futures', [])
         self.p14_futures_table.setRowCount(len(futures))
@@ -577,5 +615,14 @@ class PreMarketMixin:
             self.set_status_text(self.p14_status_lbl, 'Pre-market data unavailable.', status='warning')
 
     def _p14_on_error(self, msg: str) -> None:
-        self.p14_refresh_btn.setEnabled(True)
         self.set_status_text(self.p14_status_lbl, f'Error: {msg}', status='negative')
+
+    def _p14_on_thread_finished(self) -> None:
+        worker = getattr(self, '_p14_worker', None)
+        if worker is not None:
+            worker.deleteLater()
+            self._p14_worker = None
+        thread = getattr(self, '_p14_thread', None)
+        if thread is not None:
+            thread.deleteLater()
+            self._p14_thread = None

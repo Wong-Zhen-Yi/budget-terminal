@@ -25,7 +25,7 @@ class WindowLifecycleMixin:
         self._pages.clear()
         self._register_page(0, self.btn_page1)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
-        self._register_page(2, self.btn_page6)
+        self._register_page(2, self.btn_page6, on_show=self._p6_on_show if hasattr(self, '_p6_on_show') else None)
         self._register_page(3, self.btn_page7)
         self._register_page(4, self.btn_page3, on_show=lambda: self.p3_crawler_timer.start(40) if hasattr(self, 'p3_crawler_timer') else None, on_hide=lambda: self.p3_crawler_timer.stop() if hasattr(self, 'p3_crawler_timer') else None)
         self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
@@ -35,11 +35,10 @@ class WindowLifecycleMixin:
         self._register_page(9, self.btn_page11, on_show=self._mc_on_show)
         self._register_page(10, self.btn_page5)
         self._register_page(11, self.btn_page13)
-        self._register_page(12, self.btn_page14, on_show=self._p14_refresh)
-        self._register_page(13, self.btn_page15, on_show=self._p15_refresh)
+        self._register_page(12, self.btn_page14, on_show=self._p14_on_show)
+        self._register_page(13, self.btn_page15, on_show=self._p15_on_show)
         self._register_page(14, self.btn_page16, on_show=self._p16_on_show)
-        self._register_page(15, self.btn_page17, on_show=self._p17_on_show if hasattr(self, '_p17_on_show') else None)
-        self._register_page(16, self.btn_page9)
+        self._register_page(15, self.btn_page9)
         self._refresh_main_tab_picker_items()
 
     def _is_current_page(self, page: Any) -> bool:
@@ -64,10 +63,6 @@ class WindowLifecycleMixin:
         if hasattr(self, '_p7_apply_detail_table_widths') and hasattr(self, 'stacked_widget'):
             if self._is_current_page(getattr(self, 'page7', None)):
                 self._p7_apply_detail_table_widths()
-        if hasattr(self, '_p17_refresh_image_preview') and hasattr(self, 'stacked_widget'):
-            if self._is_current_page(getattr(self, 'page17', None)):
-                self._p17_refresh_image_preview()
-
     def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None) -> None:
         """Register a page in the nav system. Wires the button and stores lifecycle callbacks."""
         self._pages[index] = {'btn': btn, 'on_show': on_show, 'on_hide': on_hide}
@@ -121,6 +116,8 @@ class WindowLifecycleMixin:
             page_attr='page8',
             status_text='Loading sector data...',
         )
+        if hasattr(self, '_p14_start_auto_refresh'):
+            self._p14_start_auto_refresh()
 
     def _startup_session_restore_specs(self) -> list[dict[str, Any]]:
         """Return the tab-session restore tasks that should run after first paint."""
@@ -129,12 +126,13 @@ class WindowLifecycleMixin:
             {'tab_key': 'fundamentals', 'page_index': 7, 'restore_method': '_p2_restore_startup_session'},
             {'tab_key': 'options', 'page_index': 10, 'restore_method': '_p5_restore_startup_session'},
             {'tab_key': 'etf', 'page_index': 11, 'restore_method': '_p13_restore_startup_session'},
+            {'tab_key': 'politics', 'page_index': 13, 'restore_method': '_p15_restore_startup_session', 'allow_empty_snapshot': True},
             {'tab_key': 'youtube', 'page_index': 14, 'restore_method': '_p16_restore_startup_session'},
         ]
         queue = []
         for spec in specs:
             snapshot = self._get_tab_session_snapshot(spec['tab_key']) if hasattr(self, '_get_tab_session_snapshot') else None
-            if snapshot:
+            if snapshot or spec.get('allow_empty_snapshot'):
                 queue.append({**spec, 'snapshot': snapshot})
         return queue
 
@@ -192,7 +190,6 @@ class WindowLifecycleMixin:
             13: 100,
             14: 110,
             15: 120,
-            16: 130,
             8: 140,
             3: 150,
         }
@@ -354,6 +351,8 @@ class WindowLifecycleMixin:
         """Resolve a focused child widget back to an editable main-window text input."""
         current = widget
         while current is not None:
+            if not isinstance(current, QWidget):
+                return None
             if isinstance(current, (QLineEdit, QTextEdit, QPlainTextEdit)):
                 if current.window() is not self:
                     return None
@@ -367,7 +366,8 @@ class WindowLifecycleMixin:
 
     def _dismiss_main_window_text_input(self, widget: Any=None, *, focus_current_button: bool=True) -> bool:
         """Exit the active main-window text input and restore non-editing focus."""
-        target = self._resolve_main_window_text_input(widget if widget is not None else QApplication.focusWidget())
+        target_widget = widget if isinstance(widget, QWidget) else QApplication.focusWidget()
+        target = self._resolve_main_window_text_input(target_widget)
         if target is None:
             return False
         target.clearFocus()
@@ -411,17 +411,24 @@ class WindowLifecycleMixin:
 
     def _step_main_tab(self, direction: int) -> bool:
         """Move between registered main tabs with wraparound."""
+        buttons = list(getattr(self, '_nav_buttons', []))
+        if not buttons:
+            return False
         current_index = self.stacked_widget.currentIndex()
         current_pos = None
-        for pos, button in enumerate(getattr(self, '_nav_buttons', [])):
+        for pos, button in enumerate(buttons):
             page_index = self._page_index_for_button(button)
             if page_index == current_index:
                 current_pos = pos
                 break
-        if current_pos is None or not self._nav_buttons:
-            return False
-        next_pos = (current_pos + direction) % len(self._nav_buttons)
-        next_index = self._page_index_for_button(self._nav_buttons[next_pos])
+        if current_pos is None:
+            fallback_index = self._page_index_for_button(buttons[0])
+            if fallback_index is None:
+                return False
+            self.switch_page(fallback_index)
+            return True
+        next_pos = (current_pos + direction) % len(buttons)
+        next_index = self._page_index_for_button(buttons[next_pos])
         if next_index is None:
             return False
         self.switch_page(next_index)
@@ -431,6 +438,114 @@ class WindowLifecycleMixin:
         """Move between main tabs from a global shortcut when safe to do so."""
         if self._should_handle_main_tab_navigation_keys():
             self._step_main_tab(direction)
+
+    def _should_handle_ctrl_tab_navigation(self) -> bool:
+        """Allow Ctrl+Tab unless the popup tab picker is currently active."""
+        return not (hasattr(self, '_tab_picker_popup') and self._tab_picker_popup.isVisible())
+
+    def _handle_ctrl_tab_shortcut(self) -> None:
+        """Cycle forward through main tabs from the global Ctrl+Tab shortcut."""
+        if self._should_handle_ctrl_tab_navigation():
+            self._step_main_tab(1)
+
+    def _refresh_current_page(self) -> None:
+        """Run the most appropriate refresh action for the currently visible page."""
+        if not hasattr(self, 'stacked_widget'):
+            return
+        current_index = int(self.stacked_widget.currentIndex())
+        if current_index in (0, 4):
+            if hasattr(self, 'refresh_data'):
+                self.refresh_data(force=True, reason='manual_refresh')
+            return
+        if current_index == 1:
+            current_widget = self.p4_content_tabs.currentWidget() if hasattr(self, 'p4_content_tabs') else None
+            if current_widget is getattr(self, 'p4_metrics_page', None):
+                if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
+                    self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
+                if hasattr(self, '_p4_refresh_portfolio_metrics_view'):
+                    self._p4_refresh_portfolio_metrics_view(force=True)
+                return
+            if current_widget is getattr(self, 'p4_momentum_page', None):
+                if hasattr(self, '_p4_invalidate_momentum_cache'):
+                    self._p4_invalidate_momentum_cache(self.active_portfolio_id)
+                if hasattr(self, '_p4_refresh_active_momentum_view'):
+                    self._p4_refresh_active_momentum_view()
+                return
+            if hasattr(self, 'refresh_data'):
+                self.refresh_data(force=True, reason='manual_refresh')
+            return
+        if current_index == 2:
+            if hasattr(self, '_p6_populate_tables'):
+                self._p6_populate_tables()
+            if hasattr(self, '_p6_replay_progress_animation'):
+                self._p6_replay_progress_animation()
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, 'Personal finance view refreshed.', status='positive')
+            return
+        if current_index == 3:
+            if hasattr(self, '_p7_fetch_events'):
+                self._p7_fetch_events()
+            return
+        if current_index == 5:
+            if hasattr(self, '_p8_request_refresh'):
+                self._p8_request_refresh(force=True, status_text='Refreshing sector data...')
+            return
+        if current_index == 6:
+            if hasattr(self, '_stocks_load_from_input'):
+                self._stocks_load_from_input(include_global_status=True, update_collection_info=True)
+            return
+        if current_index == 7:
+            if hasattr(self, 'analyze_stock_p2'):
+                self.analyze_stock_p2(update_collection_info=True)
+            return
+        if current_index == 8:
+            active_key = self._p10_active_subtab_key() if hasattr(self, '_p10_active_subtab_key') else 'chart'
+            if active_key == 'compare':
+                if hasattr(self, '_p10_refresh_compare_view'):
+                    self._p10_refresh_compare_view(force=True)
+                return
+            if active_key == 'multiintervals':
+                if hasattr(self, '_p10_refresh_multi_interval_views'):
+                    self._p10_refresh_multi_interval_views(force=True)
+                return
+            if active_key == 'multicharts':
+                if hasattr(self, '_mc_refresh_all'):
+                    self._mc_refresh_all()
+                return
+            if hasattr(self, '_p10_refresh_chart'):
+                self._p10_refresh_chart(force_refresh=True)
+            return
+        if current_index == 9:
+            if hasattr(self, '_mc_refresh_all'):
+                self._mc_refresh_all()
+            return
+        if current_index == 10:
+            if hasattr(self, '_p5_load_active_subtab'):
+                self._p5_load_active_subtab()
+            return
+        if current_index == 11:
+            if hasattr(self, '_p13_load_etf'):
+                self._p13_load_etf(update_collection_info=True)
+            return
+        if current_index == 12:
+            if hasattr(self, '_p14_refresh'):
+                self._p14_refresh(force=True)
+            return
+        if current_index == 13:
+            if hasattr(self, '_p15_refresh'):
+                self._p15_refresh(force=True)
+            return
+        if current_index == 14:
+            if hasattr(self, '_p16_refresh'):
+                self._p16_refresh(force=False, auto_trigger=False)
+            return
+        if current_index == 15:
+            if hasattr(self, '_refresh_run_on_startup_controls'):
+                self._refresh_run_on_startup_controls()
+            if hasattr(self, '_refresh_settings_log_controls'):
+                self._refresh_settings_log_controls()
+            if hasattr(self, '_set_settings_status'):
+                self._set_settings_status('Settings panel refreshed.', 'positive')
 
     def _handle_tab_picker_shortcut(self) -> None:
         """Open or close the popup tab picker from the global shortcut."""
@@ -473,21 +588,36 @@ class WindowLifecycleMixin:
     def _toggle_time_format(self) -> None:
         """Handle toggle time format."""
         self._time_12h = not self._time_12h
-        self.time_fmt_btn.setText('12h' if self._time_12h else '24h')
-        self.time_fmt_btn.setChecked(self._time_12h)
+        if hasattr(self, 'settings_time_format_checkbox'):
+            self.settings_time_format_checkbox.blockSignals(True)
+            self.settings_time_format_checkbox.setChecked(self._time_12h)
+            self.settings_time_format_checkbox.blockSignals(False)
         save_time_format(self._time_12h)
+        self.update_time()
+
+    def _current_clock_timezone_index(self) -> int:
+        """Return the active timezone index for the shared clock display."""
+        try:
+            idx = int(getattr(self, '_clock_tz_index', 0))
+        except (TypeError, ValueError):
+            idx = 0
+        if idx < 0 or idx >= len(getattr(self, '_tz_choices', ())):
+            return 0
+        return idx
+
+    def _on_settings_timezone_changed(self, index: int) -> None:
+        """Handle timezone changes from the Settings page clock controls."""
+        self._clock_tz_index = self._current_clock_timezone_index() if index is None else int(index)
         self.update_time()
 
     def update_time(self, *_: Any) -> None:
         """Update time."""
-        now = self._now_for_timezone_index(self.tz_combo.currentIndex())
+        now = self._now_for_timezone_index(self._current_clock_timezone_index())
         if self._time_12h:
             self.time_label.setText(now.strftime('%I:%M:%S %p'))
         else:
             self.time_label.setText(now.strftime('%H:%M:%S'))
         self._refresh_data_collection_label()
-        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_refresh_timestamp_labels'):
-            self._p17_refresh_timestamp_labels()
 
     def _set_data_collection_info(self, sources: Any, collected_at: Any=None) -> None:
         """Persist footer metadata about the latest completed data fetch."""
@@ -506,7 +636,7 @@ class WindowLifecycleMixin:
                 cleaned.append(text)
         self._data_collection_sources = cleaned
         if collected_at is None:
-            now = self._now_for_timezone_index(self.tz_combo.currentIndex())
+            now = self._now_for_timezone_index(self._current_clock_timezone_index())
             self._data_collection_ts = now.timestamp()
         else:
             try:
@@ -523,7 +653,7 @@ class WindowLifecycleMixin:
             self.data_collection_label.setText('Data collected: awaiting first refresh')
             return
         try:
-            tzinfo = self._get_tzinfo(self.tz_combo.currentIndex()) if hasattr(self, 'tz_combo') else None
+            tzinfo = self._get_tzinfo(self._current_clock_timezone_index())
             collected_dt = datetime.datetime.fromtimestamp(float(self._data_collection_ts), tz=tzinfo)
         except Exception:
             self.data_collection_label.setText('Data collected: unavailable')
@@ -546,6 +676,9 @@ class WindowLifecycleMixin:
         session_timer = getattr(self, '_session_cache_persist_timer', None)
         if session_timer is not None:
             session_timer.stop()
+        pre_market_timer = getattr(self, '_p14_auto_refresh_timer', None)
+        if pre_market_timer is not None:
+            pre_market_timer.stop()
         app = QApplication.instance()
         global_filter = getattr(self, '_global_input_exit_filter', None)
         if app is not None and global_filter is not None and getattr(self, '_app_keyboard_event_filter_installed', False):
@@ -559,10 +692,6 @@ class WindowLifecycleMixin:
         active_entry['portfolio'] = getattr(self, 'active_tickers', active_entry.get('portfolio', []))
         active_entry['portfolio_tracker'] = getattr(self, 'active_tracker_data', active_entry.get('portfolio_tracker', {}))
         active_entry['options_tracker'] = self.options_data
-        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_flush_pending_save'):
-            self._p17_flush_pending_save()
-        if self._page_initialized(page_attr='page17') and hasattr(self, '_p17_finalize_startup_draft_on_close'):
-            self._p17_finalize_startup_draft_on_close()
         self._persist_all_portfolios(immediate=True)
         if hasattr(self, '_dashboard_save_state'):
             self._dashboard_save_state()
@@ -598,20 +727,3 @@ class WindowLifecycleMixin:
             logger.removeHandler(handler)
             self._session_log_handler = None
         event.accept()
-
-    def take_screenshot(self) -> None:
-        """Handle take screenshot."""
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            QMessageBox.warning(self, 'Screenshot Failed', 'No screen is available for capturing a screenshot.')
-            return
-        screenshot = screen.grabWindow(self.winId())
-        if screenshot.isNull():
-            QMessageBox.warning(self, 'Screenshot Failed', 'The screenshot capture returned an empty image.')
-            return
-        clipboard = QApplication.clipboard()
-        if clipboard is None:
-            QMessageBox.warning(self, 'Screenshot Failed', 'Clipboard access is unavailable.')
-            return
-        clipboard.setPixmap(screenshot)
-        self.set_status_text(self.status_bar, 'Screenshot copied to clipboard', status='positive')

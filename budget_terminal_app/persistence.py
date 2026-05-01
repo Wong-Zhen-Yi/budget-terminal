@@ -1,6 +1,4 @@
 from __future__ import annotations
-import base64
-import html
 import shutil
 import sys
 from pathlib import Path
@@ -19,15 +17,11 @@ else:
     from .paths import legacy_documents_user_data_path, user_data_path
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
-USER_DATA_BACKUP_VERSION = 7
-BACKUP_BUNDLE_VERSION = 1
+USER_DATA_BACKUP_VERSION = 8
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
-BACKUP_BUNDLE_MANIFEST_NAME = 'manifest.json'
-BACKUP_BUNDLE_USER_DATA_NAME = 'user_data.json'
-BACKUP_BUNDLE_NOTES_JSON_NAME = 'notes.json'
-BACKUP_BUNDLE_NOTES_DOCX_NAME = 'notes.docx'
-ROLLBACK_BUNDLES_DIR = user_data_path('backups', 'rollbacks')
+ROLLBACK_BACKUPS_DIR = user_data_path('backups', 'rollbacks')
+LEGACY_NOTES_IMAGES_DIR = user_data_path('notes_images')
 DEFAULT_CHART_PAGE_SETTINGS = {
     'symbol': 'SPY',
     'timeframe_label': '1 Day',
@@ -59,9 +53,6 @@ DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NOTES = []
-NOTE_CATEGORIES = ('General', 'Observations', 'Trade Ideas')
-NOTES_BACKUP_VERSION = 1
 MAX_PORTFOLIOS = 5
 MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
@@ -88,20 +79,6 @@ def _write_json(path: Any, data: Any, *, indent: Any=None) -> None:
     with temp_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=indent)
     temp_path.replace(target)
-
-
-def _count_note_images(notes_payload: Any) -> int:
-    """Count embedded or referenced note images in a notes payload."""
-    total = 0
-    if not isinstance(notes_payload, list):
-        return 0
-    for note in notes_payload:
-        if not isinstance(note, dict):
-            continue
-        images = note.get('images', [])
-        if isinstance(images, list):
-            total += sum(1 for image in images if isinstance(image, dict))
-    return total
 
 
 def _portfolio_payload_with_chart_slots(data: Any, chart_slots: Any=None) -> Any:
@@ -530,74 +507,18 @@ def _normalize_options_chain_payload(settings: Any) -> Any:
     return {'default_risk_free_rate': min(max(rate_value, 0.0), 1.0)}
 
 
-def _normalize_note_category(value: Any) -> str:
-    """Clamp note categories to the supported fixed set."""
-    text = str(value or '').strip()
-    for category in NOTE_CATEGORIES:
-        if text.casefold() == category.casefold():
-            return category
-    return NOTE_CATEGORIES[0]
-
-
-def _normalize_note_images(images: Any) -> list[dict[str, str]]:
-    """Normalize persisted note attachments into a compact list."""
-    normalized = []
-    if not isinstance(images, list):
-        return normalized
-    for image in images:
-        entry = image if isinstance(image, dict) else {'path': image}
-        path_text = str(entry.get('path', '') or '').strip().replace('\\', '/')
-        if not path_text:
-            continue
-        image_id = str(entry.get('id', '') or '').strip() or path_text
-        name = str(entry.get('name', '') or Path(path_text).name).strip() or Path(path_text).name
-        normalized.append({'id': image_id, 'name': name, 'path': path_text})
-    return normalized
-
-
-def _normalize_notes_payload(notes: Any) -> list[dict[str, Any]]:
-    """Normalize persisted notes into the canonical list shape."""
-    normalized = []
-    if not isinstance(notes, list):
-        return normalized
-    seen_ids = set()
-    for index, note in enumerate(notes):
-        if not isinstance(note, dict):
-            continue
-        note_id = str(note.get('id', '') or '').strip() or f'note_{index + 1}'
-        if note_id in seen_ids:
-            continue
-        seen_ids.add(note_id)
-        created_at = str(note.get('created_at', '') or '').strip()
-        updated_at = str(note.get('updated_at', '') or '').strip() or created_at
-        normalized.append({
-            'id': note_id,
-            'title': str(note.get('title', '') or ''),
-            'body': str(note.get('body', '') or ''),
-            'category': _normalize_note_category(note.get('category')),
-            'created_at': created_at,
-            'updated_at': updated_at,
-            'images': _normalize_note_images(note.get('images', [])),
-        })
-    return normalized
-
-
-def _notes_image_directory() -> Any:
-    """Return the on-disk directory that stores copied note images."""
-    return user_data_path('notes_images')
-
-
-def _cleanup_orphaned_note_images(notes: Any) -> None:
-    """Remove copied note-image folders that are no longer referenced by saved notes."""
-    root = Path(_notes_image_directory())
-    if not root.exists():
+def _clear_legacy_notes_storage() -> None:
+    """Remove leftover note storage from versions that still shipped the Notes page."""
+    legacy_path = Path(LEGACY_NOTES_IMAGES_DIR)
+    if not legacy_path.exists():
         return
-    valid_note_ids = {str(note.get('id', '') or '').strip() for note in notes if isinstance(note, dict)}
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
-        if child.name not in valid_note_ids:
-            shutil.rmtree(child, ignore_errors=True)
+    try:
+        if legacy_path.is_dir():
+            shutil.rmtree(legacy_path, ignore_errors=True)
+        else:
+            legacy_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning('Unable to remove legacy notes storage at %s.', legacy_path)
 
 def fmt_num(val: Any) -> Any:
     """Format large numbers with B/M/K suffix."""
@@ -641,19 +562,17 @@ def _default_user_data_document() -> Any:
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
-        'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'time_12h': False,
     }
 
 
-def _normalize_user_data_document(payload: Any, *, existing_notes: Any=None) -> Any:
+def _normalize_user_data_document(payload: Any) -> Any:
     """Normalize persisted single-file user data into the canonical shape."""
     default = _default_user_data_document()
     saved = payload if isinstance(payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
-    notes_fallback = existing_notes if existing_notes is not None else default['notes']
     chart_page_payload = saved.get('chart_page', default['chart_page'])
     exported_compare_presets = saved.get('compare_presets')
     if isinstance(exported_compare_presets, list):
@@ -673,7 +592,6 @@ def _normalize_user_data_document(payload: Any, *, existing_notes: Any=None) -> 
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
         'youtube': _normalize_youtube_settings(saved.get('youtube', default['youtube'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
-        'notes': _normalize_notes_payload(saved.get('notes', notes_fallback)),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
         'time_12h': bool(saved.get('time_12h', False)),
@@ -700,6 +618,7 @@ def _migrate_legacy_user_data_file() -> Any:
         logger.warning('User data migrated to %s but the legacy file could not be removed: %s', USER_DATA_FILE, legacy_path)
     else:
         logger.info('Migrated user data from %s to %s.', legacy_path, USER_DATA_FILE)
+    _clear_legacy_notes_storage()
     return normalized
 
 
@@ -708,14 +627,19 @@ def _load_user_data_document() -> Any:
     migrated = _migrate_legacy_user_data_file()
     if migrated is not None:
         return migrated
-    return _normalize_user_data_document(_read_json(USER_DATA_FILE, None))
+    raw_document = _read_json(USER_DATA_FILE, None)
+    normalized = _normalize_user_data_document(raw_document)
+    if (isinstance(raw_document, dict) and 'notes' in raw_document) or Path(LEGACY_NOTES_IMAGES_DIR).exists():
+        _write_json(USER_DATA_FILE, normalized, indent=2)
+        _clear_legacy_notes_storage()
+    return normalized
 
 
 def _save_user_data_document(data: Any) -> Any:
     """Persist the normalized single-file user-data document to LocalAppData."""
     normalized = _normalize_user_data_document(data)
     _write_json(USER_DATA_FILE, normalized, indent=2)
-    _cleanup_orphaned_note_images(normalized.get('notes', []))
+    _clear_legacy_notes_storage()
     return normalized
 
 
@@ -809,527 +733,14 @@ def save_networth_data(data: Any) -> None:
     _save_user_data_document(document)
 
 
-def load_notes_data() -> Any:
-    """Load persisted notes."""
-    return _normalize_notes_payload(_load_user_data_document().get('notes', []))
-
-
-def save_notes_data(data: Any) -> Any:
-    """Persist notes and return the normalized saved list."""
-    document = _load_user_data_document()
-    document['notes'] = _normalize_notes_payload(data)
-    saved = _save_user_data_document(document)
-    return list(saved.get('notes', []))
-
-
-def _validate_notes_backup_payload(payload: Any) -> Any:
-    """Validate imported notes-backup data and return the original payload."""
-    if not isinstance(payload, dict):
-        raise ValueError('Notes backup file must contain a JSON object.')
-    if not isinstance(payload.get('notes'), list):
-        raise ValueError('Notes backup file must include a notes list.')
-    return payload
-
-
-def build_notes_backup() -> Any:
-    """Build a standalone notes backup payload with embedded image bytes."""
-    exported_notes = []
-    for note in load_notes_data():
-        images = []
-        for image in _normalize_note_images(note.get('images', [])):
-            relative_path = str(image.get('path', '') or '').strip().replace('\\', '/')
-            if not relative_path:
-                continue
-            image_path = Path(user_data_path(*Path(relative_path).parts))
-            if not image_path.exists() or not image_path.is_file():
-                logger.warning('Skipping missing note image during notes export: %s', image_path)
-                continue
-            try:
-                raw_bytes = image_path.read_bytes()
-            except OSError as exc:
-                logger.warning('Skipping unreadable note image during notes export %s: %s', image_path, exc)
-                continue
-            images.append({
-                'id': str(image.get('id', '') or '').strip(),
-                'name': str(image.get('name', '') or image_path.name).strip() or image_path.name,
-                'file_name': image_path.name,
-                'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
-            })
-        exported_notes.append({
-            'id': str(note.get('id', '') or '').strip(),
-            'title': str(note.get('title', '') or ''),
-            'body': str(note.get('body', '') or ''),
-            'category': _normalize_note_category(note.get('category')),
-            'created_at': str(note.get('created_at', '') or '').strip(),
-            'updated_at': str(note.get('updated_at', '') or '').strip(),
-            'images': images,
-        })
-    return {
-        'version': NOTES_BACKUP_VERSION,
-        'exported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'notes': exported_notes,
-    }
-
-
-def _build_backup_bundle_manifest(user_data_backup: Any, notes_backup: Any) -> dict[str, Any]:
-    """Build metadata for a folder-based backup bundle."""
-    portfolio_state = _normalize_multi_portfolio_state(user_data_backup)
-    notes = notes_backup.get('notes', []) if isinstance(notes_backup, dict) else []
-    return {
-        'bundle_version': BACKUP_BUNDLE_VERSION,
-        'app_version': APP_VERSION,
-        'exported_at': str(user_data_backup.get('exported_at', '') or notes_backup.get('exported_at', '')),
-        'files': {
-            'user_data': BACKUP_BUNDLE_USER_DATA_NAME,
-            'notes': BACKUP_BUNDLE_NOTES_JSON_NAME,
-            'notes_docx': BACKUP_BUNDLE_NOTES_DOCX_NAME,
-        },
-        'counts': {
-            'portfolios': len(portfolio_state.get('portfolio_order', [])),
-            'notes': len(notes) if isinstance(notes, list) else 0,
-            'note_images': _count_note_images(notes),
-        },
-    }
-
-
-def export_notes_backup(path: Any) -> None:
-    """Write a standalone notes backup to disk."""
-    _write_json(path, build_notes_backup(), indent=2)
-
-
-def load_notes_backup(path: Any) -> Any:
-    """Load and validate a standalone notes backup file."""
-    source_path = Path(path)
-    suffix = source_path.suffix.lower()
-    if suffix == '.docx':
-        return _load_notes_backup_docx(source_path)
-    payload = _read_json(source_path, None)
-    if payload is None:
-        raise ValueError('Unable to read notes backup file.')
-    return _validate_notes_backup_payload(payload)
-
-
-def _parse_docx_note_meta(meta_text: Any) -> dict[str, str]:
-    """Parse a DOCX-exported note metadata block."""
-    parsed = {'category': NOTE_CATEGORIES[0], 'created_at': '', 'updated_at': ''}
-    for raw_line in str(meta_text or '').splitlines():
-        line = str(raw_line or '').strip()
-        if not line or ':' not in line:
-            continue
-        label, value = line.split(':', 1)
-        normalized_value = value.strip()
-        label_key = label.strip().lower()
-        if label_key == 'category':
-            parsed['category'] = _normalize_note_category(normalized_value)
-        elif label_key == 'created':
-            parsed['created_at'] = '' if normalized_value == '-' else normalized_value
-        elif label_key == 'edited':
-            parsed['updated_at'] = '' if normalized_value == '-' else normalized_value
-    if not parsed['updated_at']:
-        parsed['updated_at'] = parsed['created_at']
-    return parsed
-
-
-def _docx_paragraph_images(document: Any, paragraph: Any) -> list[dict[str, str]]:
-    """Extract embedded image payloads from a DOCX paragraph."""
-    image_entries = []
-    namespaces = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
-    rel_attr = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
-    for image_index, blip in enumerate(paragraph._p.iterfind('.//a:blip', namespaces), start=1):
-        rel_id = str(blip.get(rel_attr, '') or '').strip()
-        if not rel_id:
-            continue
-        image_part = document.part.related_parts.get(rel_id)
-        if image_part is None:
-            continue
-        raw_bytes = getattr(image_part, 'blob', b'') or b''
-        if not raw_bytes:
-            continue
-        part_name = Path(str(getattr(image_part, 'partname', '') or ''))
-        file_name = part_name.name or f'image_{image_index}.bin'
-        image_entries.append({
-            'name': file_name,
-            'file_name': file_name,
-            'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
-        })
-    return image_entries
-
-
-def _finalize_docx_import_note(note: Any, body_lines: Any) -> dict[str, Any]:
-    """Convert parsed DOCX note fragments into backup payload shape."""
-    body_text = '\n'.join(body_lines) if isinstance(body_lines, list) else str(body_lines or '')
-    return {
-        'title': str(note.get('title', '') or '') or 'Untitled note',
-        'body': body_text,
-        'category': _normalize_note_category(note.get('category')),
-        'created_at': str(note.get('created_at', '') or '').strip(),
-        'updated_at': str(note.get('updated_at', '') or '').strip() or str(note.get('created_at', '') or '').strip(),
-        'images': list(note.get('images', [])) if isinstance(note.get('images', []), list) else [],
-    }
-
-
-def _load_notes_backup_docx(path: Any) -> Any:
-    """Load a DOCX notes export and convert it into backup payload shape."""
-    try:
-        from docx import Document
-    except ImportError as exc:
-        raise RuntimeError('DOCX notes import requires python-docx. Install it with: python -m pip install python-docx') from exc
-
-    document = Document(str(path))
-    imported_notes = []
-    current_note = None
-    current_body_lines: list[str] = []
-    current_section = None
-
-    for paragraph in document.paragraphs:
-        style_name = str(getattr(getattr(paragraph, 'style', None), 'name', '') or '')
-        paragraph_text = str(paragraph.text or '')
-        stripped_text = paragraph_text.strip()
-
-        if style_name == 'Title':
-            continue
-
-        if style_name == 'Heading 1':
-            if current_note is not None:
-                imported_notes.append(_finalize_docx_import_note(current_note, current_body_lines))
-            current_note = {
-                'title': stripped_text or 'Untitled note',
-                'category': NOTE_CATEGORIES[0],
-                'created_at': '',
-                'updated_at': '',
-                'images': [],
-            }
-            current_body_lines = []
-            current_section = 'meta'
-            continue
-
-        if current_note is None:
-            continue
-
-        if style_name == 'Heading 2':
-            heading_key = stripped_text.casefold()
-            if heading_key == 'note':
-                current_section = 'body'
-            elif heading_key == 'pictures':
-                current_section = 'pictures'
-            else:
-                current_section = None
-            continue
-
-        if current_section == 'meta':
-            current_note.update(_parse_docx_note_meta(paragraph_text))
-            continue
-
-        if current_section == 'body':
-            if not current_body_lines and stripped_text == 'No body text.':
-                continue
-            current_body_lines.append(paragraph_text)
-            continue
-
-        if current_section == 'pictures':
-            current_note['images'].extend(_docx_paragraph_images(document, paragraph))
-
-    if current_note is not None:
-        imported_notes.append(_finalize_docx_import_note(current_note, current_body_lines))
-
-    if not imported_notes:
-        non_empty_paragraphs = [str(paragraph.text or '').strip() for paragraph in document.paragraphs if str(paragraph.text or '').strip()]
-        if any(text != 'No notes were available at export time.' for text in non_empty_paragraphs):
-            raise ValueError('DOCX file does not match the Budget Terminal notes export format.')
-
-    return _validate_notes_backup_payload({
-        'version': NOTES_BACKUP_VERSION,
-        'imported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'notes': imported_notes,
-    })
-
-
-def apply_notes_backup(payload: Any) -> Any:
-    """Persist a standalone notes backup and return the normalized saved notes list."""
-    validated = _validate_notes_backup_payload(payload)
-    notes_root = Path(_notes_image_directory())
-    notes_root.mkdir(parents=True, exist_ok=True)
-    imported_notes = []
-    seen_note_ids = set()
-    for note_index, raw_note in enumerate(validated.get('notes', [])):
-        if not isinstance(raw_note, dict):
-            continue
-        base_note_id = str(raw_note.get('id', '') or f'note_{note_index + 1}').strip() or f'note_{note_index + 1}'
-        note_id = base_note_id
-        counter = 2
-        while note_id in seen_note_ids:
-            note_id = f'{base_note_id}_{counter}'
-            counter += 1
-        seen_note_ids.add(note_id)
-        note_dir = notes_root / note_id
-        shutil.rmtree(note_dir, ignore_errors=True)
-        images = []
-        raw_images = raw_note.get('images', [])
-        if isinstance(raw_images, list) and raw_images:
-            note_dir.mkdir(parents=True, exist_ok=True)
-            for image_index, raw_image in enumerate(raw_images):
-                if not isinstance(raw_image, dict):
-                    continue
-                encoded = str(raw_image.get('data_base64', '') or '').strip()
-                if not encoded:
-                    continue
-                try:
-                    raw_bytes = base64.b64decode(encoded, validate=True)
-                except Exception:
-                    logger.warning('Skipping invalid note image payload for imported note %s.', note_id)
-                    continue
-                base_name = Path(str(raw_image.get('file_name', '') or raw_image.get('name', '') or f'image_{image_index + 1}.bin')).name
-                if not base_name:
-                    base_name = f'image_{image_index + 1}.bin'
-                target_path = note_dir / base_name
-                file_counter = 2
-                while target_path.exists():
-                    target_path = note_dir / f'{Path(base_name).stem}_{file_counter}{Path(base_name).suffix}'
-                    file_counter += 1
-                try:
-                    target_path.write_bytes(raw_bytes)
-                except OSError as exc:
-                    logger.warning('Skipping note image write failure for %s: %s', target_path, exc)
-                    continue
-                image_id = str(raw_image.get('id', '') or f'{note_id}_image_{image_index + 1}').strip() or f'{note_id}_image_{image_index + 1}'
-                image_name = str(raw_image.get('name', '') or target_path.name).strip() or target_path.name
-                images.append({
-                    'id': image_id,
-                    'name': image_name,
-                    'path': str(Path('notes_images') / note_id / target_path.name).replace('\\', '/'),
-                })
-        if note_dir.exists() and not any(note_dir.iterdir()):
-            shutil.rmtree(note_dir, ignore_errors=True)
-        created_at = str(raw_note.get('created_at', '') or '').strip()
-        updated_at = str(raw_note.get('updated_at', '') or '').strip() or created_at
-        imported_notes.append({
-            'id': note_id,
-            'title': str(raw_note.get('title', '') or ''),
-            'body': str(raw_note.get('body', '') or ''),
-            'category': _normalize_note_category(raw_note.get('category')),
-            'created_at': created_at,
-            'updated_at': updated_at,
-            'images': images,
-        })
-    return save_notes_data(imported_notes)
-
-
-def _parse_note_timestamp(value: Any) -> Any:
-    """Parse a persisted note timestamp into an aware datetime."""
-    text = str(value or '').strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed
-
-
-def _sorted_notes_for_export() -> list[dict[str, Any]]:
-    """Return saved notes ordered newest-first for export outputs."""
-    return sorted(
-        load_notes_data(),
-        key=lambda note: (_parse_note_timestamp(note.get('updated_at')) or _parse_note_timestamp(note.get('created_at')) or datetime.datetime.fromtimestamp(0, datetime.timezone.utc)),
-        reverse=True,
-    )
-
-
-def _note_image_path(image: Any) -> Any:
-    """Resolve a persisted note image reference into a local path."""
-    return Path(user_data_path(*Path(str(image.get('path', '') or '').strip().replace('\\', '/')).parts))
-
-
-def _note_image_export_entries(note: Any) -> list[dict[str, Any]]:
-    """Collect note image export metadata for DOCX/HTML/PDF outputs."""
-    entries = []
-    for image in _normalize_note_images(note.get('images', [])):
-        image_path = _note_image_path(image)
-        if not image_path.exists() or not image_path.is_file():
-            logger.warning('Skipping missing note image during export: %s', image_path)
-            entries.append({'status': 'missing', 'path': image_path})
-            continue
-        try:
-            raw_bytes = image_path.read_bytes()
-        except OSError:
-            logger.exception('Unable to read note image during export: %s', image_path)
-            entries.append({'status': 'missing', 'path': image_path})
-            continue
-        suffix = image_path.suffix.lower()
-        mime_type = {
-            '.png': 'image/png',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif',
-            '.bmp': 'image/bmp',
-            '.webp': 'image/webp',
-        }.get(suffix, 'application/octet-stream')
-        entries.append({
-            'status': 'ok',
-            'path': image_path,
-            'mime_type': mime_type,
-            'data_base64': base64.b64encode(raw_bytes).decode('ascii'),
-        })
-    return entries
-
-
-def _build_notes_export_html(*, for_pdf: bool=False) -> str:
-    """Render notes as standalone HTML with embedded images."""
-    notes = _sorted_notes_for_export()
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    page_break_rule = 'page-break-before: always;' if for_pdf else 'border-top: 1px solid #d7dde5; margin-top: 28px; padding-top: 28px;'
-    parts = [
-        '<!DOCTYPE html>',
-        '<html lang="en">',
-        '<head>',
-        '<meta charset="utf-8">',
-        '<title>Budget Terminal Notes</title>',
-        '<style>',
-        'body { font-family: Arial, sans-serif; color: #1f2937; margin: 32px; line-height: 1.5; }',
-        'h1 { font-size: 24px; margin: 0 0 10px; }',
-        'h2 { font-size: 18px; margin: 18px 0 8px; }',
-        'h3 { font-size: 14px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; color: #4b5563; }',
-        '.summary { margin-bottom: 24px; color: #4b5563; }',
-        '.note { margin-bottom: 24px; }',
-        f'.note + .note {{ {page_break_rule} }}',
-        '.meta { margin: 10px 0 16px; color: #374151; }',
-        '.body-line { margin: 0 0 8px; white-space: pre-wrap; }',
-        '.image { margin: 12px 0 16px; }',
-        '.image img { max-width: 100%; max-height: 560px; border: 1px solid #d7dde5; }',
-        '.placeholder { margin: 12px 0; color: #6b7280; font-style: italic; }',
-        '</style>',
-        '</head>',
-        '<body>',
-        '<h1>Budget Terminal Notes</h1>',
-        f'<div class="summary"><strong>Exported at:</strong> {html.escape(timestamp)}<br><strong>Note count:</strong> {len(notes)}</div>',
-    ]
-    if not notes:
-        parts.append('<p>No notes were available at export time.</p>')
-    for note in notes:
-        parts.append('<section class="note">')
-        parts.append(f'<h2>{html.escape(str(note.get("title", "") or "Untitled note"))}</h2>')
-        parts.append(
-            '<div class="meta">'
-            f'<strong>Category:</strong> {html.escape(str(note.get("category", NOTE_CATEGORIES[0]) or NOTE_CATEGORIES[0]))}<br>'
-            f'<strong>Created:</strong> {html.escape(str(note.get("created_at", "") or "-"))}<br>'
-            f'<strong>Edited:</strong> {html.escape(str(note.get("updated_at", "") or "-"))}'
-            '</div>'
-        )
-        parts.append('<h3>Note</h3>')
-        body_text = str(note.get('body', '') or '')
-        if body_text.strip():
-            for line in body_text.splitlines():
-                parts.append(f'<div class="body-line">{html.escape(line) if line.strip() else "&nbsp;"}</div>')
-        else:
-            parts.append('<div class="body-line">No body text.</div>')
-        image_entries = _note_image_export_entries(note)
-        if image_entries:
-            parts.append('<h3>Pictures</h3>')
-        for image_entry in image_entries:
-            if image_entry.get('status') != 'ok':
-                parts.append('<div class="placeholder">Picture could not be embedded.</div>')
-                continue
-            parts.append(
-                '<div class="image">'
-                f'<img src="data:{html.escape(str(image_entry.get("mime_type", "image/png")))};base64,{image_entry.get("data_base64", "")}" alt="Embedded note picture">'
-                '</div>'
-            )
-        parts.append('</section>')
-    parts.extend(['</body>', '</html>'])
-    return '\n'.join(parts)
-
-
-def export_notes_docx(path: Any) -> None:
-    """Write all saved notes to a DOCX document."""
-    try:
-        from docx import Document
-        from docx.shared import Inches
-    except ImportError as exc:
-        raise RuntimeError('Notes export requires python-docx. Install it with: python -m pip install python-docx') from exc
-
-    notes = _sorted_notes_for_export()
-
-    document = Document()
-    styles = document.styles
-    if 'Normal' in styles:
-        styles['Normal'].font.name = 'Arial'
-        styles['Normal'].font.size = None
-    document.core_properties.title = 'Budget Terminal Notes Export'
-    document.core_properties.subject = 'Exported notes'
-    document.core_properties.comments = 'Generated by Budget Terminal'
-
-    document.add_heading('Budget Terminal Notes', 0)
-    summary = document.add_paragraph()
-    summary.add_run('Exported at: ').bold = True
-    summary.add_run(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    summary.add_run('\n')
-    summary.add_run('Note count: ').bold = True
-    summary.add_run(str(len(notes)))
-
-    if not notes:
-        document.add_paragraph('No notes were available at export time.')
-        document.save(path)
-        return
-
-    for index, note in enumerate(notes):
-        if index > 0:
-            document.add_page_break()
-        document.add_heading(str(note.get('title', '') or 'Untitled note'), level=1)
-
-        meta = document.add_paragraph()
-        meta.add_run('Category: ').bold = True
-        meta.add_run(str(note.get('category', NOTE_CATEGORIES[0]) or NOTE_CATEGORIES[0]))
-        meta.add_run('\n')
-        meta.add_run('Created: ').bold = True
-        meta.add_run(str(note.get('created_at', '') or '-'))
-        meta.add_run('\n')
-        meta.add_run('Edited: ').bold = True
-        meta.add_run(str(note.get('updated_at', '') or '-'))
-
-        body_text = str(note.get('body', '') or '')
-        document.add_heading('Note', level=2)
-        if body_text.strip():
-            for line in body_text.splitlines():
-                document.add_paragraph(line if line.strip() else '')
-        else:
-            document.add_paragraph('No body text.')
-
-        image_entries = _note_image_export_entries(note)
-        if image_entries:
-            document.add_heading('Pictures', level=2)
-        for image_entry in image_entries:
-            if image_entry.get('status') != 'ok':
-                document.add_paragraph('Picture could not be embedded.')
-                continue
-            try:
-                image_path = Path(image_entry.get('path'))
-                picture = document.add_picture(str(image_path), width=Inches(5.8))
-                inline = picture._inline
-                inline.graphic.graphicData.pic.nvPicPr.cNvPr.set('name', 'Embedded Picture')
-            except Exception:
-                logger.exception('Unable to embed note image in DOCX export: %s', image_path)
-                document.add_paragraph('Picture could not be embedded.')
-
-    document.save(path)
-
-
-def export_notes_html(path: Any) -> None:
-    """Write all saved notes to a standalone HTML document."""
-    Path(path).write_text(_build_notes_export_html(for_pdf=False), encoding='utf-8')
-
-
-def build_user_data_backup(*, include_notes: bool=True) -> Any:
+def build_user_data_backup() -> Any:
     """Build a single-file backup payload for all persisted user data."""
     backup = _load_user_data_document()
-    if not include_notes:
-        backup = dict(backup)
-        backup.pop('notes', None)
     backup['compare_presets'] = list(
         _normalize_chart_page_settings(backup.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)).get('compare_presets', [])
     )
     backup['version'] = USER_DATA_BACKUP_VERSION
+    backup['app_version'] = APP_VERSION
     backup['exported_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return backup
 
@@ -1339,46 +750,25 @@ def export_user_data_backup(path: Any) -> None:
     _write_json(path, build_user_data_backup(), indent=2)
 
 
-def _bundle_directory(parent_directory: Any, *, prefix: str='budget_terminal_backup') -> Path:
-    """Create a unique bundle directory within the requested parent."""
+def _backup_file_path(parent_directory: Any, *, prefix: str='budget_terminal_backup') -> Path:
+    """Create a unique timestamped JSON backup path within the requested parent."""
     target_root = Path(parent_directory)
     target_root.mkdir(parents=True, exist_ok=True)
     base_name = f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    bundle_dir = target_root / base_name
+    backup_path = target_root / f'{base_name}.json'
     suffix = 2
-    while bundle_dir.exists():
-        bundle_dir = target_root / f'{base_name}_{suffix}'
+    while backup_path.exists():
+        backup_path = target_root / f'{base_name}_{suffix}.json'
         suffix += 1
-    bundle_dir.mkdir(parents=True, exist_ok=False)
-    return bundle_dir
+    return backup_path
 
 
-def export_user_data_bundle(parent_directory: Any, *, prefix: str='budget_terminal_backup') -> dict[str, str]:
-    """Write separate user-data JSON and notes DOCX exports into a timestamped folder."""
-    bundle_dir = _bundle_directory(parent_directory, prefix=prefix)
-    user_data_backup = build_user_data_backup(include_notes=False)
-    notes_backup = build_notes_backup()
-    user_data_path = bundle_dir / BACKUP_BUNDLE_USER_DATA_NAME
-    notes_json_path = bundle_dir / BACKUP_BUNDLE_NOTES_JSON_NAME
-    notes_docx_path = bundle_dir / BACKUP_BUNDLE_NOTES_DOCX_NAME
-    manifest_path = bundle_dir / BACKUP_BUNDLE_MANIFEST_NAME
-    _write_json(user_data_path, user_data_backup, indent=2)
-    _write_json(notes_json_path, notes_backup, indent=2)
-    export_notes_docx(notes_docx_path)
-    _write_json(manifest_path, _build_backup_bundle_manifest(user_data_backup, notes_backup), indent=2)
-    return {
-        'folder': str(bundle_dir),
-        'manifest_path': str(manifest_path),
-        'user_data_path': str(user_data_path),
-        'notes_json_path': str(notes_json_path),
-        'notes_path': str(notes_docx_path),
-    }
-
-
-def create_rollback_backup_bundle(*, reason: str='before_import') -> dict[str, str]:
-    """Create an automatic rollback bundle under local app data."""
+def create_rollback_backup_file(*, reason: str='before_import') -> str:
+    """Create an automatic rollback JSON backup under local app data."""
     safe_reason = ''.join(char if char.isalnum() or char in {'_', '-'} else '_' for char in str(reason or 'before_import')).strip('_') or 'before_import'
-    return export_user_data_bundle(ROLLBACK_BUNDLES_DIR, prefix=f'rollback_{safe_reason}')
+    backup_path = _backup_file_path(ROLLBACK_BACKUPS_DIR, prefix=f'rollback_{safe_reason}')
+    export_user_data_backup(backup_path)
+    return str(backup_path)
 
 
 def _json_block(data: Any) -> Any:
@@ -1433,10 +823,6 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('net_worth', {'cash': [], 'debt': []})),
         '',
-        '## Notes',
-        '',
-        _json_block(payload.get('notes', [])),
-        '',
         '## Charts Page Settings',
         '',
         _json_block(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
@@ -1482,7 +868,7 @@ def export_ai_user_data(path: Any) -> None:
     Path(path).write_text(build_ai_user_data_export(), encoding='utf-8')
 
 
-def _validate_backup_payload(payload: Any, *, preserve_existing_notes: bool=False) -> Any:
+def _validate_backup_payload(payload: Any) -> Any:
     """Validate imported backup data and return a normalized payload."""
     if not isinstance(payload, dict):
         raise ValueError('Backup file must contain a JSON object.')
@@ -1496,193 +882,7 @@ def _validate_backup_payload(payload: Any, *, preserve_existing_notes: bool=Fals
             raise ValueError('Backup net worth data must be a JSON object.')
         if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('pension_insurance', []), list) or not isinstance(networth_payload.get('debt', []), list):
             raise ValueError('Backup net worth data must include cash, pension_insurance, and debt lists.')
-    existing_notes = load_notes_data() if preserve_existing_notes and 'notes' not in payload else None
-    return _normalize_user_data_document(payload, existing_notes=existing_notes)
-
-
-def _summarize_user_data_payload(payload: Any) -> dict[str, Any]:
-    """Build a compact summary for a normalized user-data payload."""
-    normalized = _validate_backup_payload(payload, preserve_existing_notes=False)
-    portfolio_state = _normalize_multi_portfolio_state(normalized)
-    notes = normalized.get('notes', [])
-    return {
-        'portfolios': len(portfolio_state.get('portfolio_order', [])),
-        'notes': len(notes) if isinstance(notes, list) else 0,
-        'note_images': _count_note_images(notes),
-        'exported_at': str(normalized.get('exported_at', '') or payload.get('exported_at', '')) if isinstance(payload, dict) else '',
-        'app_version': str(payload.get('app_version', '') or '') if isinstance(payload, dict) else '',
-    }
-
-
-def _summarize_notes_payload(payload: Any) -> dict[str, Any]:
-    """Build a compact summary for a notes backup payload."""
-    validated = _validate_notes_backup_payload(payload)
-    notes = validated.get('notes', [])
-    return {
-        'portfolios': 0,
-        'notes': len(notes) if isinstance(notes, list) else 0,
-        'note_images': _count_note_images(notes),
-        'exported_at': str(validated.get('exported_at', '') or validated.get('imported_at', '')),
-        'app_version': '',
-    }
-
-
-def _extract_notes_payload_from_user_data(payload: Any) -> Any:
-    """Extract a notes-only backup payload from a user-data backup when possible."""
-    normalized = _validate_backup_payload(payload, preserve_existing_notes=False)
-    notes = normalized.get('notes', [])
-    if not isinstance(notes, list):
-        return None
-    return {
-        'version': NOTES_BACKUP_VERSION,
-        'imported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'notes': notes,
-    }
-
-
-def inspect_import_source(path: Any) -> dict[str, Any]:
-    """Inspect a user-selected backup source without mutating persisted state."""
-    source_path = Path(path)
-    if not source_path.exists():
-        raise ValueError('Selected backup source does not exist.')
-
-    if source_path.is_dir() or source_path.name.lower() == BACKUP_BUNDLE_MANIFEST_NAME:
-        bundle_dir = source_path if source_path.is_dir() else source_path.parent
-        manifest_path = bundle_dir / BACKUP_BUNDLE_MANIFEST_NAME
-        manifest = _read_json(manifest_path, {}) if manifest_path.exists() else {}
-        files_meta = manifest.get('files', {}) if isinstance(manifest, dict) else {}
-        user_data_name = str(files_meta.get('user_data', BACKUP_BUNDLE_USER_DATA_NAME) or BACKUP_BUNDLE_USER_DATA_NAME)
-        notes_name = str(files_meta.get('notes', BACKUP_BUNDLE_NOTES_JSON_NAME) or BACKUP_BUNDLE_NOTES_JSON_NAME)
-        notes_docx_name = str(files_meta.get('notes_docx', BACKUP_BUNDLE_NOTES_DOCX_NAME) or BACKUP_BUNDLE_NOTES_DOCX_NAME)
-        user_data_file = bundle_dir / user_data_name
-        notes_file = bundle_dir / notes_name
-        notes_docx_file = bundle_dir / notes_docx_name
-        found_files = []
-        missing_files = []
-        user_data_payload = None
-        notes_payload = None
-        if manifest_path.exists():
-            found_files.append(BACKUP_BUNDLE_MANIFEST_NAME)
-        else:
-            missing_files.append(BACKUP_BUNDLE_MANIFEST_NAME)
-        if user_data_file.exists():
-            raw_user_data_payload = _read_json(user_data_file, None)
-            if raw_user_data_payload is None:
-                raise ValueError(f'Unable to read backup file: {user_data_file.name}')
-            user_data_payload = _validate_backup_payload(raw_user_data_payload, preserve_existing_notes=True)
-            found_files.append(user_data_file.name)
-        else:
-            missing_files.append(user_data_file.name)
-        if notes_file.exists():
-            notes_payload = load_notes_backup(notes_file)
-            found_files.append(notes_file.name)
-        elif notes_docx_file.exists():
-            notes_payload = load_notes_backup(notes_docx_file)
-            found_files.append(notes_docx_file.name)
-            missing_files.append(notes_file.name)
-        else:
-            missing_files.extend([notes_name, notes_docx_name])
-        if notes_docx_file.exists() and notes_docx_file.name not in found_files:
-            found_files.append(notes_docx_file.name)
-        supported_scopes = []
-        if user_data_payload is not None and notes_payload is not None:
-            supported_scopes.append('full')
-        if user_data_payload is not None:
-            supported_scopes.append('user_data_only')
-        if notes_payload is not None:
-            supported_scopes.append('notes_only')
-        if not supported_scopes:
-            raise ValueError('Backup bundle is missing both user_data and notes backups.')
-        counts = dict(manifest.get('counts', {})) if isinstance(manifest, dict) else {}
-        user_summary = _summarize_user_data_payload(raw_user_data_payload) if user_data_payload is not None else {'portfolios': 0, 'notes': 0, 'note_images': 0, 'exported_at': '', 'app_version': ''}
-        notes_summary = _summarize_notes_payload(notes_payload) if notes_payload is not None else {'notes': 0, 'note_images': 0, 'exported_at': '', 'app_version': ''}
-        return {
-            'source_kind': 'bundle',
-            'source_path': str(source_path),
-            'display_name': str(bundle_dir),
-            'manifest': manifest if isinstance(manifest, dict) else {},
-            'user_data_payload': user_data_payload,
-            'notes_payload': notes_payload,
-            'supported_scopes': supported_scopes,
-            'exported_at': str((manifest.get('exported_at') if isinstance(manifest, dict) else '') or user_summary.get('exported_at', '') or notes_summary.get('exported_at', '')),
-            'app_version': str((manifest.get('app_version') if isinstance(manifest, dict) else '') or user_summary.get('app_version', '')),
-            'portfolio_count': int(counts.get('portfolios', user_summary.get('portfolios', 0)) or 0),
-            'notes_count': int(counts.get('notes', notes_summary.get('notes', 0)) or 0),
-            'image_count': int(counts.get('note_images', notes_summary.get('note_images', 0)) or 0),
-            'found_files': found_files,
-            'missing_files': missing_files,
-        }
-
-    if source_path.suffix.lower() == '.docx':
-        notes_payload = load_notes_backup(source_path)
-        notes_summary = _summarize_notes_payload(notes_payload)
-        return {
-            'source_kind': 'notes',
-            'source_path': str(source_path),
-            'display_name': str(source_path),
-            'manifest': {},
-            'user_data_payload': None,
-            'notes_payload': notes_payload,
-            'supported_scopes': ['notes_only'],
-            'exported_at': str(notes_summary.get('exported_at', '')),
-            'app_version': '',
-            'portfolio_count': 0,
-            'notes_count': int(notes_summary.get('notes', 0) or 0),
-            'image_count': int(notes_summary.get('note_images', 0) or 0),
-            'found_files': [source_path.name],
-            'missing_files': [],
-        }
-
-    payload = _read_json(source_path, None)
-    if payload is None:
-        raise ValueError('Unable to read backup file.')
-    if source_path.name.lower() == BACKUP_BUNDLE_MANIFEST_NAME:
-        return inspect_import_source(source_path.parent)
-    if isinstance(payload, dict) and isinstance(payload.get('notes'), list) and not isinstance(payload.get('portfolios'), dict) and not any((key in payload for key in ('portfolio', 'portfolio_tracker', 'options_tracker'))):
-        notes_payload = _validate_notes_backup_payload(payload)
-        notes_summary = _summarize_notes_payload(notes_payload)
-        return {
-            'source_kind': 'notes',
-            'source_path': str(source_path),
-            'display_name': str(source_path),
-            'manifest': {},
-            'user_data_payload': None,
-            'notes_payload': notes_payload,
-            'supported_scopes': ['notes_only'],
-            'exported_at': str(notes_summary.get('exported_at', '')),
-            'app_version': '',
-            'portfolio_count': 0,
-            'notes_count': int(notes_summary.get('notes', 0) or 0),
-            'image_count': int(notes_summary.get('note_images', 0) or 0),
-            'found_files': [source_path.name],
-            'missing_files': [],
-        }
-    user_data_payload = _validate_backup_payload(payload, preserve_existing_notes=True)
-    user_summary = _summarize_user_data_payload(payload)
-    supported_scopes = ['full', 'user_data_only']
-    extracted_notes_payload = None
-    try:
-        extracted_notes_payload = _extract_notes_payload_from_user_data(payload)
-    except Exception:
-        extracted_notes_payload = None
-    if extracted_notes_payload is not None and _summarize_notes_payload(extracted_notes_payload).get('notes', 0):
-        supported_scopes.append('notes_only')
-    return {
-        'source_kind': 'user_data',
-        'source_path': str(source_path),
-        'display_name': str(source_path),
-        'manifest': {},
-        'user_data_payload': user_data_payload,
-        'notes_payload': extracted_notes_payload,
-        'supported_scopes': supported_scopes,
-        'exported_at': str(user_summary.get('exported_at', '')),
-        'app_version': str(user_summary.get('app_version', '')),
-        'portfolio_count': int(user_summary.get('portfolios', 0) or 0),
-        'notes_count': int(user_summary.get('notes', 0) or 0),
-        'image_count': int(user_summary.get('note_images', 0) or 0),
-        'found_files': [source_path.name],
-        'missing_files': [],
-    }
+    return _normalize_user_data_document(payload)
 
 
 def load_user_data_backup(path: Any) -> Any:
@@ -1690,40 +890,13 @@ def load_user_data_backup(path: Any) -> Any:
     payload = _read_json(path, None)
     if payload is None:
         raise ValueError('Unable to read backup file.')
-    return _validate_backup_payload(payload, preserve_existing_notes=True)
+    return _validate_backup_payload(payload)
 
 
 def apply_user_data_backup(payload: Any) -> Any:
     """Persist validated backup data and return the normalized state."""
-    normalized = _validate_backup_payload(payload, preserve_existing_notes=True)
+    normalized = _validate_backup_payload(payload)
     return _save_user_data_document(normalized)
-
-
-def apply_import_source(import_source: Any, *, scope: str='full') -> Any:
-    """Apply an inspected import source and return the current normalized user-data state."""
-    source = import_source if isinstance(import_source, dict) else {}
-    user_data_payload = source.get('user_data_payload')
-    notes_payload = source.get('notes_payload')
-    supported_scopes = list(source.get('supported_scopes', [])) if isinstance(source.get('supported_scopes', []), list) else []
-    if scope not in supported_scopes:
-        raise ValueError(f'Import scope "{scope}" is not available for this backup source.')
-    if scope == 'full':
-        if user_data_payload is None:
-            raise ValueError('Full restore requires user data.')
-        apply_user_data_backup(user_data_payload)
-        if notes_payload is not None:
-            apply_notes_backup(notes_payload)
-        return _load_user_data_document()
-    if scope == 'user_data_only':
-        if user_data_payload is None:
-            raise ValueError('This backup source does not include user data.')
-        return apply_user_data_backup(user_data_payload)
-    if scope == 'notes_only':
-        if notes_payload is None:
-            raise ValueError('This backup source does not include notes.')
-        apply_notes_backup(notes_payload)
-        return _load_user_data_document()
-    raise ValueError(f'Unknown import scope: {scope}')
 
 
 def reset_user_data(chart_slots: Any=None) -> Any:
@@ -1743,7 +916,6 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
-        'notes': list(DEFAULT_NOTES),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'time_12h': False,
@@ -2253,11 +1425,13 @@ def load_multi_charts_settings() -> Any:
     return _normalize_multi_charts_settings(config.get('multi_charts', {}))
 
 
-def save_multi_charts_settings(settings: Any) -> None:
+def save_multi_charts_settings(settings: Any) -> Any:
     """Persist state for the Multi Charts page."""
     current = load_app_config()
-    current['multi_charts'] = _normalize_multi_charts_settings(settings)
+    state = _normalize_multi_charts_settings(settings)
+    current['multi_charts'] = state
     save_app_config(current)
+    return state
 
 
 def load_youtube_settings() -> Any:
@@ -2308,7 +1482,7 @@ def save_options_chain_settings(settings: Any) -> Any:
 def load_time_format() -> bool:
     """Load persisted 12h/24h time format preference."""
     config = load_app_config()
-    return bool(config.get('time_12h', False))
+    return bool(config.get('time_12h', True))
 
 
 def save_time_format(use_12h: bool) -> None:

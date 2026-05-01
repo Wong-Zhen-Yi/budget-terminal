@@ -1,4 +1,4 @@
-# Budget Terminal v0.828
+# Budget Terminal v0.829
 
 ## Architecture
 This project is organized as a small package around the `BudgetTerminalApp` Qt main window. The root `budget_terminal.py` file remains the launcher so existing run commands still work.
@@ -56,17 +56,17 @@ python -m venv .venv
 Run:
 
 ```bat
-build_exe.bat
+packaging\build_exe.bat
 ```
 
 The script will:
 - activate `.venv`
 - install `requirements.txt` plus `pyinstaller`
 - remove old `build/` and `dist/` folders
-- build the packaged app from `budget_terminal.spec`
+- build the packaged app from `packaging\budget_terminal.spec`
 - create `release\BudgetTerminal-v*-windows.zip`
 
 ### Packaged run notes
 - The app is built as windowed/no-console.
-- Bundled assets such as `budget_terminal_app/assets/qr-code.png` are embedded into the packaged executable.
+- Only required application assets are embedded into the packaged executable.
 - User-writable files are stored under `%LOCALAPPDATA%\BudgetTerminal` instead of beside the executable.

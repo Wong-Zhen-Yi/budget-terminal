@@ -459,12 +459,20 @@ class SectorsMixin:
             queued.update(needed)
             self._p8_mktcap_queued_tickers = queued
             return False
-        worker = MarketCapWorker(needed)
         self._p8_mktcap_fetching = True
         self._p8_mktcap_inflight_tickers = set(needed)
-        self._p8_mktcap_worker = worker
-        worker.finished.connect(self._p8_on_market_caps_ready)
-        threading.Thread(target=worker.run, daemon=True).start()
+        self._p8_mktcap_worker = None
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                results = client.fetch_market_caps(needed) if client is not None else MarketCapWorker(needed).fetch()
+            except Exception as exc:
+                logger.warning('Embedded data service sector market-cap request failed; falling back to direct worker: %s', exc)
+                results = MarketCapWorker(needed).fetch()
+            self._invoke_main.emit(lambda payload=results: self._p8_on_market_caps_ready(payload))
+
+        threading.Thread(target=_run, daemon=True).start()
         return True
 
     def _p8_on_market_caps_ready(self, results: Any) -> None:

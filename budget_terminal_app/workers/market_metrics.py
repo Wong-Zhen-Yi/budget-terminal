@@ -20,8 +20,8 @@ class MonthReturnWorker(QObject):
         self.interval = interval
         self.start = start
 
-    def run(self) -> Any:
-        """Handle run."""
+    def fetch(self) -> dict[str, Any]:
+        """Return month/period returns synchronously."""
         try:
             results = {}
 
@@ -47,10 +47,14 @@ class MonthReturnWorker(QObject):
             for t, ret in res_list:
                 if ret is not None:
                     results[t] = ret
-            self.finished.emit(results)
+            return results
         except Exception as ex:
             logger.error(f'MonthReturnWorker unhandled error: {ex}')
-            self.finished.emit({})
+            return {}
+
+    def run(self) -> Any:
+        """Handle run."""
+        self.finished.emit(self.fetch())
 
 class PortfolioMomentumWorker(QObject):
     finished = pyqtSignal(dict)
@@ -77,8 +81,8 @@ class PortfolioMomentumWorker(QObject):
             'reason': str(reason or '').strip(),
         }
 
-    def run(self) -> Any:
-        """Handle run."""
+    def fetch(self) -> dict[str, Any]:
+        """Return portfolio momentum synchronously."""
         try:
             ordered_tickers = []
             seen = set()
@@ -102,8 +106,7 @@ class PortfolioMomentumWorker(QObject):
                 else:
                     excluded_tickers.append(ticker)
             if not positive_positions:
-                self.finished.emit(self._empty_payload('No positive-share positions', excluded=excluded_tickers))
-                return
+                return self._empty_payload('No positive-share positions', excluded=excluded_tickers)
 
             def fetch_position_series(position: Any) -> Any:
                 """Fetch one adjusted price series and convert it to position value."""
@@ -149,20 +152,14 @@ class PortfolioMomentumWorker(QObject):
                 position_series[ticker] = series
             included_tickers = [ticker for ticker, _shares in positive_positions if ticker in position_series]
             if not included_tickers:
-                self.finished.emit(
-                    self._empty_payload('No historical data available', included=included_tickers, excluded=excluded_tickers)
-                )
-                return
+                return self._empty_payload('No historical data available', included=included_tickers, excluded=excluded_tickers)
 
             common_index = None
             for ticker in included_tickers:
                 idx = pd.Index(position_series[ticker].index)
                 common_index = idx if common_index is None else common_index.intersection(idx)
             if common_index is None or len(common_index) < 2:
-                self.finished.emit(
-                    self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
-                )
-                return
+                return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
             common_index = common_index.sort_values()
             aligned = pd.concat(
                 [position_series[ticker].reindex(common_index) for ticker in included_tickers],
@@ -170,23 +167,14 @@ class PortfolioMomentumWorker(QObject):
             )
             aligned = aligned.dropna(how='any')
             if aligned.empty or len(aligned.index) < 2:
-                self.finished.emit(
-                    self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
-                )
-                return
+                return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
             total_series = aligned.sum(axis=1)
             total_series = pd.to_numeric(total_series, errors='coerce').dropna()
             if total_series.empty or len(total_series.index) < 2:
-                self.finished.emit(
-                    self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
-                )
-                return
+                return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
             start_value = float(total_series.iloc[0])
             if start_value <= 0:
-                self.finished.emit(
-                    self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
-                )
-                return
+                return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
             returns = ((total_series / start_value) - 1.0) * 100.0
             dates = [pd.Timestamp(ts).date() for ts in returns.index]
             payload = {
@@ -199,10 +187,14 @@ class PortfolioMomentumWorker(QObject):
                 'start_date': dates[0].isoformat() if dates else None,
                 'reason': '',
             }
-            self.finished.emit(payload)
+            return payload
         except Exception as ex:
             logger.error(f'PortfolioMomentumWorker unhandled error: {ex}')
-            self.finished.emit(self._empty_payload('Unable to load momentum data'))
+            return self._empty_payload('Unable to load momentum data')
+
+    def run(self) -> Any:
+        """Handle run."""
+        self.finished.emit(self.fetch())
 
 
 class PortfolioAnalyticsWorker(QObject):
@@ -376,8 +368,8 @@ class PortfolioAnalyticsWorker(QObject):
             'weights': {ticker: float(weight * 100.0) for ticker, weight in weights.items()},
         }
 
-    def run(self) -> Any:
-        """Fetch portfolio history and compute analytics off the UI thread."""
+    def fetch(self) -> dict[str, Any]:
+        """Fetch portfolio history and compute analytics synchronously."""
         try:
             ordered_tickers = []
             seen = set()
@@ -397,8 +389,7 @@ class PortfolioAnalyticsWorker(QObject):
                 if shares > 0:
                     positive_positions.append((ticker, shares))
             if not positive_positions:
-                self.finished.emit(self._empty_payload('No positive-share holdings'))
-                return
+                return self._empty_payload('No positive-share holdings')
 
             def fetch_position_series(position: Any) -> Any:
                 """Fetch one holding's adjusted series and scale it by current shares."""
@@ -433,68 +424,53 @@ class PortfolioAnalyticsWorker(QObject):
 
             included_tickers = [ticker for ticker, _shares in positive_positions if ticker in position_series]
             if not included_tickers:
-                self.finished.emit(
-                    self._empty_payload(
-                        'No historical data available',
-                        exposure=exposure,
-                        included=included_tickers,
-                        excluded=excluded_tickers,
-                    )
+                return self._empty_payload(
+                    'No historical data available',
+                    exposure=exposure,
+                    included=included_tickers,
+                    excluded=excluded_tickers,
                 )
-                return
 
             common_index = None
             for ticker in included_tickers:
                 idx = pd.Index(position_series[ticker].index)
                 common_index = idx if common_index is None else common_index.intersection(idx)
             if common_index is None or len(common_index) < 2:
-                self.finished.emit(
-                    self._empty_payload(
-                        'No common historical window',
-                        exposure=exposure,
-                        included=included_tickers,
-                        excluded=excluded_tickers,
-                    )
+                return self._empty_payload(
+                    'No common historical window',
+                    exposure=exposure,
+                    included=included_tickers,
+                    excluded=excluded_tickers,
                 )
-                return
             common_index = common_index.sort_values()
             aligned_positions = pd.concat(
                 [position_series[ticker].reindex(common_index) for ticker in included_tickers],
                 axis=1,
             ).dropna(how='any')
             if aligned_positions.empty or len(aligned_positions.index) < 2:
-                self.finished.emit(
-                    self._empty_payload(
-                        'No common historical window',
-                        exposure=exposure,
-                        included=included_tickers,
-                        excluded=excluded_tickers,
-                    )
+                return self._empty_payload(
+                    'No common historical window',
+                    exposure=exposure,
+                    included=included_tickers,
+                    excluded=excluded_tickers,
                 )
-                return
 
             total_series = pd.to_numeric(aligned_positions.sum(axis=1), errors='coerce').dropna()
             if total_series.empty or len(total_series.index) < 2:
-                self.finished.emit(
-                    self._empty_payload(
-                        'No common historical window',
-                        exposure=exposure,
-                        included=included_tickers,
-                        excluded=excluded_tickers,
-                    )
+                return self._empty_payload(
+                    'No common historical window',
+                    exposure=exposure,
+                    included=included_tickers,
+                    excluded=excluded_tickers,
                 )
-                return
             start_value = float(total_series.iloc[0])
             if start_value <= 0.0:
-                self.finished.emit(
-                    self._empty_payload(
-                        'No common historical window',
-                        exposure=exposure,
-                        included=included_tickers,
-                        excluded=excluded_tickers,
-                    )
+                return self._empty_payload(
+                    'No common historical window',
+                    exposure=exposure,
+                    included=included_tickers,
+                    excluded=excluded_tickers,
                 )
-                return
 
             metrics = self._empty_metrics()
             portfolio_returns = total_series.pct_change().dropna()
@@ -580,10 +556,14 @@ class PortfolioAnalyticsWorker(QObject):
                 'reason': '',
                 'note': note,
             }
-            self.finished.emit(payload)
+            return payload
         except Exception as ex:
             logger.error(f'PortfolioAnalyticsWorker unhandled error: {ex}')
-            self.finished.emit(self._empty_payload('Unable to load portfolio metrics'))
+            return self._empty_payload('Unable to load portfolio metrics')
+
+    def run(self) -> Any:
+        """Fetch portfolio history and compute analytics off the UI thread."""
+        self.finished.emit(self.fetch())
 
 
 class MarketCapWorker(QObject):
@@ -594,8 +574,8 @@ class MarketCapWorker(QObject):
         super().__init__()
         self.tickers = tickers
 
-    def run(self) -> Any:
-        """Handle run."""
+    def fetch(self) -> dict[str, Any]:
+        """Return market caps synchronously."""
         try:
             results = {}
 
@@ -608,7 +588,14 @@ class MarketCapWorker(QObject):
                     if mc:
                         return (t, mc)
                     with YF_LOCK:
-                        info = ticker.info
+                        try:
+                            info = ticker.info
+                        except Exception as exc:
+                            if is_yahoo_unauthorized_error(exc):
+                                logger.info('Yahoo refused optional market-cap metadata for %s.', t)
+                            else:
+                                logger.warning(f'MarketCap info fallback error {t}: {exc}')
+                            info = {}
                     return (t, info.get('marketCap'))
                 except Exception as ex:
                     logger.warning(f'MarketCap fetch error {t}: {ex}')
@@ -617,7 +604,11 @@ class MarketCapWorker(QObject):
                 res_list = list(executor.map(fetch_mktcap, self.tickers))
             for t, mc in res_list:
                 results[t] = mc
-            self.finished.emit(results)
+            return results
         except Exception as ex:
             logger.error(f'MarketCapWorker unhandled error: {ex}')
-            self.finished.emit({})
+            return {}
+
+    def run(self) -> Any:
+        """Handle run."""
+        self.finished.emit(self.fetch())

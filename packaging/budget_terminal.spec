@@ -13,19 +13,31 @@ from budget_terminal_app import __version__
 
 app_name = f'BudgetTerminal-v{__version__}'
 
-datas = collect_data_files('budget_terminal_app', includes=['assets/*.png'])
+datas = collect_data_files('budget_terminal_app', includes=['assets/app_icon.png'])
 datas += collect_data_files('tzdata')
 
 hiddenimports = collect_submodules('yfinance')
 hiddenimports += collect_submodules('pandas_market_calendars')
 hiddenimports += collect_submodules('exchange_calendars')
 hiddenimports += collect_submodules('pyqtgraph')
+hiddenimports += collect_submodules('fastapi')
+hiddenimports += collect_submodules('uvicorn')
+hiddenimports += collect_submodules('starlette')
+hiddenimports += collect_submodules('pydantic')
+hiddenimports += collect_submodules('httpx')
+hiddenimports += collect_submodules('yt_dlp')
 hiddenimports += [
     'PyQt6.QtNetwork',
     'pandas',
     'pyqtgraph',
     'requests',
     'yfinance',
+    'fastapi',
+    'uvicorn',
+    'starlette',
+    'pydantic',
+    'httpx',
+    'yt_dlp',
 ]
 
 a = Analysis(

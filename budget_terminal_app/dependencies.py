@@ -58,7 +58,44 @@ yf = _LazyModuleProxy('yfinance')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
-logging.getLogger('yfinance').setLevel(logging.WARNING)
+
+YAHOO_UNAUTHORIZED_MARKERS = (
+    'HTTP Error 401',
+    '401 Client Error: Unauthorized',
+    '"code":"Unauthorized"',
+    '"code":"unauthorized"',
+    'Unauthorized',
+    'User is unable to access this feature',
+    'Invalid Crumb',
+    'User is not logged in',
+)
+
+
+def is_yahoo_unauthorized_error(error: Any) -> bool:
+    """Return whether an exception/log message is a known Yahoo Finance refusal."""
+    text = str(error or '')
+    try:
+        text = f'{text} {repr(error)}'
+    except Exception:
+        pass
+    return any(marker in text for marker in YAHOO_UNAUTHORIZED_MARKERS)
+
+
+class _YahooUnauthorizedLogFilter(logging.Filter):
+    """Suppress noisy yfinance 401 logs that optional app fallbacks handle."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return not is_yahoo_unauthorized_error(record.getMessage())
+        except Exception:
+            return True
+
+
+yfinance_logger = logging.getLogger('yfinance')
+yfinance_logger.setLevel(logging.WARNING)
+yfinance_logger.addFilter(_YahooUnauthorizedLogFilter())
 logging.getLogger('peewee').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
 YF_LOCK = threading.Lock()

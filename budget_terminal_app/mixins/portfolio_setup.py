@@ -135,14 +135,14 @@ class PortfolioSetupMixin:
             'stock': {
                 'table_attr': 'p4_table',
                 'config_path': _P4_STOCK_TABLE_WIDTHS_CONFIG,
-                'resizable_cols': tuple(range(P4_PORTFOLIO_COL_ACTION)),
-                'fixed_cols': {P4_PORTFOLIO_COL_ACTION: _P4_TABLE_FIXED_ACTION_WIDTH},
+                'resizable_cols': tuple(range(len(P4_PORTFOLIO_COLUMNS))),
+                'fixed_cols': {},
             },
             'options': {
                 'table_attr': 'p4_opt_table',
                 'config_path': _P4_OPTIONS_TABLE_WIDTHS_CONFIG,
-                'resizable_cols': tuple(range(15)),
-                'fixed_cols': {15: _P4_TABLE_FIXED_ACTION_WIDTH},
+                'resizable_cols': tuple(range(14)),
+                'fixed_cols': {},
             },
         }
 
@@ -369,6 +369,7 @@ class PortfolioSetupMixin:
             self.p4_table.blockSignals(False)
             if hasattr(self, '_p4_update_stock_positions_label'):
                 self._p4_update_stock_positions_label()
+            self._p4_update_remove_stock_button_state()
             self._p4_apply_table_width_preferences('stock')
             if hasattr(self, '_p4_refresh_active_momentum_view'):
                 self._p4_refresh_active_momentum_view()
@@ -553,6 +554,11 @@ class PortfolioSetupMixin:
         add_stock_btn.setMinimumHeight(24)
         self.set_theme_variant(add_stock_btn, 'positive')
         add_stock_btn.clicked.connect(self._on_add_stock_clicked)
+        self.p4_remove_stock_btn = QPushButton('Remove Position')
+        self.p4_remove_stock_btn.setMinimumHeight(24)
+        self.p4_remove_stock_btn.setEnabled(False)
+        self.set_theme_variant(self.p4_remove_stock_btn, 'danger')
+        self.p4_remove_stock_btn.clicked.connect(self._p4_remove_selected_stock_position)
         export_llm_btn = QPushButton('Export for LLM')
         export_llm_btn.setMinimumHeight(24)
         self.set_theme_variant(export_llm_btn, 'positive')
@@ -560,6 +566,8 @@ class PortfolioSetupMixin:
         stock_header_layout.addWidget(stock_header)
         stock_header_layout.addSpacing(10)
         stock_header_layout.addWidget(add_stock_btn)
+        stock_header_layout.addSpacing(6)
+        stock_header_layout.addWidget(self.p4_remove_stock_btn)
         stock_header_layout.addSpacing(6)
         stock_header_layout.addWidget(export_llm_btn)
         stock_header_layout.addStretch()
@@ -573,6 +581,7 @@ class PortfolioSetupMixin:
         self.p4_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.p4_table.verticalHeader().setDefaultSectionSize(52)
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
+        self.p4_table.itemSelectionChanged.connect(self._p4_update_remove_stock_button_state)
         self._p4_apply_table_width_preferences('stock')
         hh.sectionResized.connect(lambda logical, old, new: self._p4_on_table_section_resized('stock', logical, old, new))
         stock_layout.addWidget(self.p4_table, 1)
@@ -715,6 +724,49 @@ class PortfolioSetupMixin:
                 else:
                     self.refresh_data()
 
+    def _p4_selected_stock_ticker(self) -> str:
+        """Return the ticker from the currently selected stock row."""
+        table = getattr(self, 'p4_table', None)
+        if table is None:
+            return ''
+        selection_model = table.selectionModel()
+        if selection_model is not None:
+            row_candidates = [index.row() for index in selection_model.selectedRows()]
+            if not row_candidates:
+                row_candidates = [index.row() for index in selection_model.selectedIndexes()]
+        else:
+            row_candidates = []
+        row_candidates.extend([table.currentRow()])
+        current_item = table.currentItem()
+        if current_item is not None:
+            row_candidates.append(current_item.row())
+        for row in row_candidates:
+            if row < 0 or row >= table.rowCount():
+                continue
+            item = table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+            ticker = str(item.text() if item is not None else '').strip().upper()
+            if ticker:
+                return ticker
+        return ''
+
+    def _p4_update_remove_stock_button_state(self) -> None:
+        """Enable stock removal only when a stock row is selected."""
+        button = getattr(self, 'p4_remove_stock_btn', None)
+        if button is None:
+            return
+        table = getattr(self, 'p4_table', None)
+        button.setEnabled(bool(table is not None and table.rowCount() > 0))
+
+    def _p4_remove_selected_stock_position(self) -> None:
+        """Remove the currently selected stock position from the active portfolio."""
+        ticker = self._p4_selected_stock_ticker()
+        if not ticker:
+            QMessageBox.information(self, 'Remove Position', 'Select a stock position to remove.')
+            self._p4_update_remove_stock_button_state()
+            return
+        self._p4_remove_active_ticker(ticker)
+        self._p4_update_remove_stock_button_state()
+
     def _init_options_tab(self) -> Any:
         """Build the Options section widget and return it."""
         options_widget = QWidget()
@@ -730,27 +782,33 @@ class PortfolioSetupMixin:
         add_btn.setMinimumHeight(24)
         self.set_theme_variant(add_btn, 'positive')
         add_btn.clicked.connect(self._add_options_row)
+        self.p4_remove_options_btn = QPushButton('Remove Position')
+        self.p4_remove_options_btn.setMinimumHeight(24)
+        self.p4_remove_options_btn.setEnabled(False)
+        self.set_theme_variant(self.p4_remove_options_btn, 'danger')
+        self.p4_remove_options_btn.clicked.connect(self._p4_remove_selected_options_position)
         refresh_opt_btn = QPushButton('↻ Sync')
         refresh_opt_btn.setMinimumHeight(24)
         self.set_theme_variant(refresh_opt_btn, 'accent')
         refresh_opt_btn.clicked.connect(self._sync_all_options)
         header.addWidget(add_btn)
         header.addSpacing(6)
+        header.addWidget(self.p4_remove_options_btn)
+        header.addSpacing(6)
         header.addWidget(refresh_opt_btn)
         header.addStretch()
         layout.addLayout(header)
-        self.p4_opt_table = QTableWidget(0, 16)
-        self.p4_opt_table.setHorizontalHeaderLabels(['Ticker', 'Type', 'Expiry', 'DTE', 'Strike', 'Qty', 'Premium', 'Market Price', 'IV (%)', 'Delta', 'Theta', 'P&L ($)', 'Return %', 'Annual %', 'Status', ''])
+        self.p4_opt_table = QTableWidget(0, 14)
+        self.p4_opt_table.setHorizontalHeaderLabels(['Ticker', 'Type', 'Expiry', 'DTE', 'Strike', 'Qty', 'Premium', 'Market Price', 'IV (%)', 'Delta', 'Theta', 'P&L ($)', 'Return %', 'Annual %'])
         oh = self.p4_opt_table.horizontalHeader()
-        for col in range(15):
+        for col in range(14):
             oh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        oh.setSectionResizeMode(15, QHeaderView.ResizeMode.Fixed)
-        self.p4_opt_table.setColumnWidth(15, 36)
         self.p4_opt_table.verticalHeader().setVisible(False)
-        self.p4_opt_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.p4_opt_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.p4_opt_table.verticalHeader().setDefaultSectionSize(38)
         self.p4_opt_table.setAlternatingRowColors(True)
         self.p4_opt_table.itemChanged.connect(self._on_options_cell_changed)
+        self.p4_opt_table.itemSelectionChanged.connect(self._p4_update_remove_options_button_state)
         layout.addWidget(self.p4_opt_table, 1)
         for pos in self.options_data:
             self._insert_options_row(pos)

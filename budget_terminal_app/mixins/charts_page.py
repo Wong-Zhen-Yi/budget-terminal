@@ -260,7 +260,7 @@ class ChartsPageMixin:
         self.p10_chart_tab = QWidget()
         self.p10_multi_tab = QWidget()
         self.p10_compare_tab = QWidget()
-        self.p10_tabs.addTab(self.p10_chart_tab, 'Chart')
+        self.p10_tabs.addTab(self.p10_chart_tab, 'Main')
         self.p10_tabs.addTab(self.p10_multi_tab, 'Multi Charts')
         self.p10_tabs.addTab(self.p10_compare_tab, 'Compare')
         self.p10_tabs.currentChanged.connect(self._p10_on_subtab_changed)
@@ -295,9 +295,6 @@ class ChartsPageMixin:
         self.p10_load_btn = QPushButton('Load')
         self.set_theme_variant(self.p10_load_btn, 'accent')
         self.p10_load_btn.clicked.connect(self._p10_load_from_input)
-        self.p10_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p10_refresh_btn, 'accent')
-        self.p10_refresh_btn.clicked.connect(lambda: self._p10_refresh_chart(force_refresh=True))
         self.p10_auto_btn = QPushButton('Auto')
         self.p10_auto_btn.setCheckable(True)
         self.p10_auto_btn.clicked.connect(self._p10_toggle_auto_follow)
@@ -316,7 +313,6 @@ class ChartsPageMixin:
             toolbar.addWidget(btn)
         toolbar.addStretch()
         toolbar.addWidget(self.p10_auto_btn)
-        toolbar.addWidget(self.p10_refresh_btn)
         layout.addLayout(toolbar)
 
         indicator_row = QHBoxLayout()
@@ -434,9 +430,6 @@ class ChartsPageMixin:
         self.p10_multi_interval_load_btn = QPushButton('Load')
         self.set_theme_variant(self.p10_multi_interval_load_btn, 'accent')
         self.p10_multi_interval_load_btn.clicked.connect(self._p10_load_multi_interval_from_input)
-        self.p10_multi_interval_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p10_multi_interval_refresh_btn, 'accent')
-        self.p10_multi_interval_refresh_btn.clicked.connect(lambda: self._p10_refresh_multi_interval_views(force=True))
         toolbar.addWidget(title)
         toolbar.addSpacing(10)
         toolbar.addWidget(self.p10_multi_interval_symbol_input)
@@ -463,7 +456,6 @@ class ChartsPageMixin:
         self.p10_multi_interval_status_label = QLabel('Loading available timeframes.')
         self.set_theme_role(self.p10_multi_interval_status_label, 'status_muted')
         toolbar.addWidget(self.p10_multi_interval_status_label)
-        toolbar.addWidget(self.p10_multi_interval_refresh_btn)
         layout.addLayout(toolbar)
 
         summary_row = QHBoxLayout()
@@ -513,9 +505,6 @@ class ChartsPageMixin:
         self.p10_compare_remove_btn = QPushButton('Remove')
         self.set_theme_variant(self.p10_compare_remove_btn, 'danger')
         self.p10_compare_remove_btn.clicked.connect(self._p10_remove_compare_symbol)
-        self.p10_compare_refresh_btn = QPushButton('Refresh')
-        self.set_theme_variant(self.p10_compare_refresh_btn, 'accent')
-        self.p10_compare_refresh_btn.clicked.connect(lambda: self._p10_refresh_compare_view(force=True))
         toolbar.addWidget(title)
         toolbar.addSpacing(10)
         toolbar.addWidget(self.p10_compare_input)
@@ -568,7 +557,6 @@ class ChartsPageMixin:
         self.p10_compare_status_label = QLabel('Add symbols to compare.')
         self.set_theme_role(self.p10_compare_status_label, 'status_muted')
         toolbar.addWidget(self.p10_compare_status_label)
-        toolbar.addWidget(self.p10_compare_refresh_btn)
         layout.addLayout(toolbar)
 
         body_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2087,7 +2075,6 @@ class ChartsPageMixin:
         request_id = self._p10_request_seq
         self._p10_active_request = request_id
         self.p10_load_btn.setEnabled(False)
-        self.p10_refresh_btn.setEnabled(False)
         self._p10_set_status(f'Loading {symbol} {self.p10_timeframe_label}...', 'info')
 
         def _run() -> None:
@@ -2109,7 +2096,6 @@ class ChartsPageMixin:
             self.p10_compare_df = None
             self.p10_compare_errors = []
             self.p10_compare_interval = default_interval
-            self.p10_compare_refresh_btn.setEnabled(True)
             self.p10_compare_empty_label.setText('Add one or more tickers to compare normalized performance.')
             self._p10_render_compare_chart(None, default_interval, force=True)
             self._p10_set_compare_status('Add symbols to compare.', 'muted')
@@ -2143,14 +2129,12 @@ class ChartsPageMixin:
         if (not force) and (not refresh_symbols) and isinstance(cached_frame, pd.DataFrame) and list(cached_frame.columns) == compare_symbols:
             self._p10_compare_dirty = False
             self.p10_compare_errors = []
-            self.p10_compare_refresh_btn.setEnabled(True)
             self._p10_set_compare_status(
                 f'Loaded {len(compare_symbols)} compare line(s) from memory cache for {compare_range_label} ({compare_interval_label}).',
                 'positive',
             )
             return
 
-        self.p10_compare_refresh_btn.setEnabled(False)
         if isinstance(cached_frame, pd.DataFrame) and not cached_frame.empty:
             self._p10_set_compare_status(
                 f'Showing cached compare data while refreshing {len(refresh_symbols or compare_symbols)} ticker(s)...',
@@ -2260,7 +2244,6 @@ class ChartsPageMixin:
         """Render compare data if it belongs to the latest compare request."""
         if request_id != self._p10_compare_active_request:
             return
-        self.p10_compare_refresh_btn.setEnabled(True)
         errors = list(payload.get('errors', [])) if isinstance(payload, dict) else []
         symbols = list(payload.get('symbols', [])) if isinstance(payload, dict) else []
         interval_label = str(payload.get('interval_label', self.p10_compare_interval_label) or self.p10_compare_interval_label) if isinstance(payload, dict) else self.p10_compare_interval_label
@@ -2691,7 +2674,6 @@ class ChartsPageMixin:
         self._p10_update_quote_header(stats)
         self._p10_show_row_details(len(self._p10_chart_rows) - 1)
         self.p10_load_btn.setEnabled(True)
-        self.p10_refresh_btn.setEnabled(True)
         self._p10_save_state()
         self._p10_rebuild_watchlists()
         self._p10_pending_x_range = None
@@ -2810,7 +2792,6 @@ class ChartsPageMixin:
             return
         self._p10_chart_dirty = True
         self.p10_load_btn.setEnabled(True)
-        self.p10_refresh_btn.setEnabled(True)
         self._p10_set_status(f'Chart load failed: {message}', 'negative')
 
     def _p10_update_quote_header(self, stats: Any) -> None:
