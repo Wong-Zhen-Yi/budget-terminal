@@ -63,6 +63,7 @@ class DataServiceClient:
         period: str = "1mo",
         interval: str = "1d",
         start: Any = None,
+        cash_amount: Any = 0.0,
     ) -> dict[str, Any]:
         response = self._client.post(
             "/portfolio/momentum",
@@ -72,6 +73,7 @@ class DataServiceClient:
                 "period": str(period or "1mo"),
                 "interval": str(interval or "1d"),
                 "start": start,
+                "cash_amount": float(cash_amount or 0.0),
             },
         )
         response.raise_for_status()
@@ -85,6 +87,7 @@ class DataServiceClient:
         prices_map: Any = None,
         benchmark_symbol: str = "SPY",
         lookback_key: str = "1y",
+        cash_amount: Any = 0.0,
     ) -> dict[str, Any]:
         response = self._client.post(
             "/portfolio/analytics",
@@ -94,6 +97,7 @@ class DataServiceClient:
                 "prices_map": dict(prices_map or {}),
                 "benchmark_symbol": str(benchmark_symbol or "SPY"),
                 "lookback_key": str(lookback_key or "1y"),
+                "cash_amount": float(cash_amount or 0.0),
             },
         )
         response.raise_for_status()

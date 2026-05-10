@@ -26,6 +26,7 @@ class MonthReturnsRequest(BaseModel):
 
 class PortfolioMomentumRequest(MonthReturnsRequest):
     shares_map: dict[str, float] = Field(default_factory=dict)
+    cash_amount: float = 0.0
 
 
 class PortfolioAnalyticsRequest(BaseModel):
@@ -34,6 +35,7 @@ class PortfolioAnalyticsRequest(BaseModel):
     prices_map: dict[str, float] = Field(default_factory=dict)
     benchmark_symbol: str = "SPY"
     lookback_key: str = "1y"
+    cash_amount: float = 0.0
 
 
 class MarketCapsRequest(BaseModel):

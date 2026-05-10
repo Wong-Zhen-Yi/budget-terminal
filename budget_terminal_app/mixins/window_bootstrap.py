@@ -1,10 +1,11 @@
 from __future__ import annotations
 from collections import deque
 from copy import deepcopy
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 from .. import __version__
 from ..compat import *
+from ..startup_metrics import make_launch_id, upsert_startup_launch, utc_now_iso
 
 
 class _SessionLogHandler(logging.Handler):
@@ -36,7 +37,19 @@ def _window_bootstrap_default_portfolio_entry(portfolio_id: Any) -> Any:
         'chart_slots': list(DEFAULT_CHART_SLOTS),
         'portfolio_tracker': {},
         'options_tracker': [],
+        'cash_balance': 0.0,
     }
+
+
+def _window_bootstrap_normalize_cash_balance(value: Any) -> float:
+    """Return a non-negative brokerage cash balance."""
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    return max(amount, 0.0)
 
 
 def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: Any=None) -> list[str]:
@@ -62,6 +75,161 @@ class WindowBootstrapMixin:
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
     _SESSION_CACHE_PERSIST_DEBOUNCE_MS = 250
     _OPTIONS_FETCH_MAX_WORKERS = 4
+    _STARTUP_METRIC_STAGE_LABELS = {
+        'first_ui': 'First UI',
+        'dashboard_data': 'Dashboard Data',
+        'session_restore': 'Session Restore',
+        'page_warmup': 'Page Warmup',
+        'cache_warmup': 'Cache Warmup',
+    }
+
+    def _startup_metrics_elapsed(self) -> float:
+        """Return elapsed seconds from the startup profiler, when available."""
+        profiler = getattr(self, '_startup_profiler', None)
+        if profiler is None:
+            return 0.0
+        elapsed = getattr(profiler, 'elapsed', None)
+        if callable(elapsed):
+            return float(elapsed())
+        return 0.0
+
+    def _init_startup_metrics_state(self) -> None:
+        """Create this process' startup metrics entry."""
+        launch_id = make_launch_id()
+        stages = {}
+        for key, label in self._STARTUP_METRIC_STAGE_LABELS.items():
+            stages[key] = {
+                'label': label,
+                'status': 'pending',
+                'detail': '',
+                'count': None,
+                'started_seconds': None,
+                'completed_seconds': None,
+                'duration_seconds': None,
+            }
+        self._startup_metrics_current = {
+            'launch_id': launch_id,
+            'started_at': utc_now_iso(),
+            'completed_at': '',
+            'app_version': __version__,
+            'status': 'running',
+            'total_seconds': None,
+            'stages': stages,
+        }
+        self._persist_startup_metrics_current()
+
+    def _startup_metrics_terminal(self, status: Any) -> bool:
+        """Return whether one stage status no longer represents active work."""
+        return str(status or '') in {'complete', 'skipped', 'failed'}
+
+    def _refresh_startup_metrics_launch_status(self) -> None:
+        """Derive launch-level status from stage statuses."""
+        launch = getattr(self, '_startup_metrics_current', None)
+        if not isinstance(launch, dict):
+            return
+        stages = launch.get('stages', {})
+        if not isinstance(stages, dict) or not stages:
+            return
+        stage_values = list(stages.values())
+        if all(self._startup_metrics_terminal(stage.get('status')) for stage in stage_values if isinstance(stage, dict)):
+            failed = any(str(stage.get('status', '') or '') == 'failed' for stage in stage_values if isinstance(stage, dict))
+            launch['status'] = 'partial' if failed else 'complete'
+            launch['completed_at'] = utc_now_iso()
+            completed_values = [
+                float(stage.get('completed_seconds') or 0.0)
+                for stage in stage_values
+                if isinstance(stage, dict) and stage.get('completed_seconds') is not None
+            ]
+            launch['total_seconds'] = max(completed_values) if completed_values else self._startup_metrics_elapsed()
+        else:
+            launch['status'] = 'running'
+            launch['total_seconds'] = self._startup_metrics_elapsed()
+
+    def _persist_startup_metrics_current(self) -> None:
+        """Persist the current launch metrics without impacting startup flow."""
+        launch = getattr(self, '_startup_metrics_current', None)
+        if not isinstance(launch, dict):
+            return
+        try:
+            upsert_startup_launch(launch)
+        except Exception:
+            logger.debug('Unable to persist startup metrics.', exc_info=True)
+
+    def _startup_metrics_snapshot(self) -> dict[str, Any]:
+        """Return a current-run startup metrics snapshot for Settings."""
+        launch = deepcopy(getattr(self, '_startup_metrics_current', {}) or {})
+        if not isinstance(launch, dict):
+            return {}
+        now_seconds = self._startup_metrics_elapsed()
+        stages = launch.get('stages', {})
+        if isinstance(stages, dict):
+            for stage in stages.values():
+                if not isinstance(stage, dict):
+                    continue
+                if str(stage.get('status', '') or '') == 'running':
+                    started = stage.get('started_seconds')
+                    try:
+                        stage['duration_seconds'] = max(0.0, now_seconds - float(started))
+                    except (TypeError, ValueError):
+                        stage['duration_seconds'] = None
+        if str(launch.get('status', '') or '') == 'running':
+            launch['total_seconds'] = now_seconds
+        return launch
+
+    def _startup_metrics_set_stage(
+        self,
+        key: str,
+        *,
+        status: str,
+        detail: Any = None,
+        count: Any = None,
+        completed_seconds: float | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Update one startup metric stage and refresh Settings if visible."""
+        launch = getattr(self, '_startup_metrics_current', None)
+        if not isinstance(launch, dict):
+            return
+        stages = launch.setdefault('stages', {})
+        stage = stages.setdefault(key, {
+            'label': self._STARTUP_METRIC_STAGE_LABELS.get(key, key),
+            'status': 'pending',
+            'detail': '',
+            'count': None,
+            'started_seconds': None,
+            'completed_seconds': None,
+            'duration_seconds': None,
+        })
+        now_seconds = self._startup_metrics_elapsed()
+        previous_started = stage.get('started_seconds')
+        stage['label'] = self._STARTUP_METRIC_STAGE_LABELS.get(key, stage.get('label', key))
+        stage['status'] = str(status or 'pending')
+        if detail is not None:
+            stage['detail'] = str(detail or '')
+        if count is not None:
+            stage['count'] = count
+        if stage['status'] == 'running':
+            stage['started_seconds'] = now_seconds
+            stage['completed_seconds'] = None
+            stage['duration_seconds'] = None
+        elif self._startup_metrics_terminal(stage['status']):
+            if completed_seconds is None:
+                completed_seconds = now_seconds
+            stage['completed_seconds'] = float(completed_seconds)
+            if duration_seconds is None:
+                try:
+                    if previous_started is not None:
+                        duration_seconds = max(0.0, float(completed_seconds) - float(previous_started))
+                except (TypeError, ValueError):
+                    duration_seconds = None
+            if duration_seconds is None:
+                duration_seconds = float(completed_seconds)
+            stage['duration_seconds'] = float(duration_seconds)
+        self._refresh_startup_metrics_launch_status()
+        self._persist_startup_metrics_current()
+        refresh = getattr(self, '_refresh_startup_performance_views', None)
+        if callable(refresh):
+            refresh()
 
     def _startup_profiler_stamp(self, name: str) -> None:
         """Record one startup milestone when profiling is enabled."""
@@ -75,6 +243,52 @@ class WindowBootstrapMixin:
         if profiler is None:
             return nullcontext()
         return profiler.step(name)
+
+    @contextmanager
+    def _startup_progress_step(self, key: str, label: str | None = None) -> Any:
+        """Update the startup loading screen around one synchronous step."""
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin(key, label)
+        try:
+            yield
+        finally:
+            if progress is not None:
+                progress.complete(key, label)
+
+    def _startup_progress_begin(self, key: str, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin(key, label)
+
+    def _startup_progress_complete(self, key: str, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.complete(key, label)
+
+    def _startup_progress_begin_page(self, index: Any, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin_page(index, label)
+
+    def _startup_progress_complete_page(self, index: Any, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.complete_page(index, label)
+
+    def _startup_progress_register_pages(self, page_labels: Any) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.register_pages(page_labels)
+
+    def _startup_progress_switch_to_compact(self) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.switch_to_compact(self)
+
+    def _startup_progress_finish_if_complete(self) -> bool:
+        progress = getattr(self, '_startup_progress', None)
+        return bool(progress is not None and progress.finish_if_complete())
 
     def _get_cache_manager(self) -> Any:
         """Return the shared cache manager for the running app session."""
@@ -143,11 +357,13 @@ class WindowBootstrapMixin:
             'chart_slots': list(DEFAULT_CHART_SLOTS),
             'portfolio_tracker': {},
             'options_tracker': [],
+            'cash_balance': 0.0,
         })
         entry.setdefault('portfolio', [])
         entry.setdefault('chart_slots', list(DEFAULT_CHART_SLOTS))
         entry.setdefault('portfolio_tracker', {})
         entry.setdefault('options_tracker', [])
+        entry['cash_balance'] = _window_bootstrap_normalize_cash_balance(entry.get('cash_balance'))
         return entry
 
     def _apply_main_portfolio_runtime(self) -> None:
@@ -156,6 +372,7 @@ class WindowBootstrapMixin:
         self.tickers = entry['portfolio']
         self.chart_slots = entry['chart_slots']
         self.tracker_data = entry['portfolio_tracker']
+        self.cash_balance = entry['cash_balance']
         if not getattr(self, '_dashboard_chart_initialized', False):
             fallback_symbol = str((self.chart_slots[0] if self.chart_slots else '') or '').upper().strip()
             current_symbol = str(getattr(self, 'dashboard_chart_state', {}).get('symbol', '') or '').upper().strip()
@@ -173,6 +390,7 @@ class WindowBootstrapMixin:
         self.active_tracker_data = entry['portfolio_tracker']
         self.options_data = entry['options_tracker']
         self.active_options_data = self.options_data
+        self.active_cash_balance = entry['cash_balance']
 
     def _save_active_options_data(self) -> None:
         """Persist page-4 options rows to the selected active portfolio."""
@@ -510,17 +728,20 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=deleted_main)
         return True
 
-    def __init__(self, startup_profiler: Any=None, data_service_client: Any=None) -> None:
+    def __init__(self, startup_profiler: Any=None, data_service_client: Any=None, startup_progress: Any=None) -> None:
         """Initialize the object."""
         super().__init__()
         self._startup_profiler = startup_profiler
+        self._startup_progress = startup_progress
         self._data_service_client = data_service_client
         self._invoke_main.connect(self._on_invoke_main)
-        with self._startup_profiler_step('window_init'):
+        self._init_startup_metrics_state()
+        with self._startup_profiler_step('window_init'), self._startup_progress_step('window_init', 'Main window'):
             self._init_session_log_capture()
+            if hasattr(self, '_init_data_health_state'):
+                self._init_data_health_state()
             self.setWindowTitle(f'Budget Terminal v{__version__}')
-            self.resize(1280, 600)
-            with self._startup_profiler_step('state_load'):
+            with self._startup_profiler_step('state_load'), self._startup_progress_step('state_load', 'Saved state'):
                 self.all_portfolios_state = load_all_portfolios_state()
                 self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
                 self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
@@ -595,9 +816,17 @@ class WindowBootstrapMixin:
             self._dashboard_refresh_timer.timeout.connect(self._execute_refresh_data)
             self._startup_show_completed = False
             self._startup_refresh_pending = False
+            self._startup_dashboard_timeout_pending = False
+            self._startup_dashboard_data_actual_done = False
+            self._startup_dashboard_data_timed_out = False
             self._startup_page_prefetch_pending = False
+            self._startup_cache_warmup_pending = False
+            self._startup_cache_warmup_queue = []
             self._startup_session_restore_pending = False
             self._startup_session_restore_queue = []
+            self._startup_dashboard_data_done = False
+            self._lazy_warmup_started = False
+            self._lazy_warmup_finished = False
             self._lazy_warmup_queue = []
             self._lazy_page_warmup_timer = QTimer(self)
             self._lazy_page_warmup_timer.setSingleShot(True)
@@ -614,22 +843,37 @@ class WindowBootstrapMixin:
             self.active_tickers = []
             self.active_tracker_data = {}
             self.active_options_data = []
-            with self._startup_profiler_step('theme_init'):
+            with self._startup_profiler_step('theme_init'), self._startup_progress_step('theme_init', 'Theme system'):
                 self.init_theme_system(apply=False)
             self.dashboard_chart_rows = []
             self.dashboard_chart_ma200 = None
             self.dashboard_chart_view_guard = False
             self._apply_main_portfolio_runtime()
             self._apply_active_portfolio_editor_state()
-            with self._startup_profiler_step('ui_build'):
+            with self._startup_profiler_step('ui_build'), self._startup_progress_step('ui_build', 'UI layout'):
                 self.init_ui()
-            with self._startup_profiler_step('theme_apply'):
+            with self._startup_profiler_step('theme_apply'), self._startup_progress_step('theme_apply', 'Theme styling'):
                 self.theme_manager.apply_theme(self.current_theme_id, persist=False)
             self._sync_after_portfolio_change(refresh_main=False)
+            self._apply_startup_window_size()
 
     def _on_invoke_main(self, fn: Any) -> None:
         """Handle invoke main."""
         fn()
+
+    def _apply_startup_window_size(self) -> None:
+        """Apply one stable startup size after the initial UI has its final size hints."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 800)
+            return
+        available = screen.availableGeometry()
+        width = min(1280, max(640, available.width() - 80))
+        height = min(800, max(480, available.height() - 100))
+        minimum_hint = self.minimumSizeHint()
+        width = max(width, minimum_hint.width())
+        height = max(height, minimum_hint.height())
+        self.resize(width, height)
 
     def _start_clock_timer(self) -> None:
         """Handle start clock timer."""

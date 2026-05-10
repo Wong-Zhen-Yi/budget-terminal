@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from typing import Any
 from ..compat import *
 
@@ -15,9 +16,41 @@ class _GlobalInputExitFilter(QObject):
         return bool(getattr(self._window, '_handle_global_input_exit_event', lambda *_: False)(obj, event))
 
 
+class _CurrentPageStackedWidget(QStackedWidget):
+    """Stacked widget whose hidden lazy pages do not inflate the window size hint."""
+
+    def sizeHint(self) -> Any:
+        widget = self.currentWidget()
+        return widget.sizeHint() if widget is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> Any:
+        widget = self.currentWidget()
+        return widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+
+
 class WindowSetupMixin:
-    _LAZY_WARMUP_INITIAL_DELAY_MS = 1200
+    _LAZY_WARMUP_INITIAL_DELAY_MS = 350
     _LAZY_WARMUP_STEP_MS = 150
+    _INTERACTION_LOG_BOUND_PROPERTY = 'bt_interaction_log_bound'
+    _PAGE_LABELS = {
+        0: 'Dashboard',
+        1: 'Portfolio',
+        2: 'Personal Finance',
+        3: 'Calendar',
+        4: 'News',
+        5: 'Sectors',
+        6: 'Heatmap',
+        7: 'Stocks',
+        8: 'Fundamentals',
+        9: 'Charts',
+        11: 'Options',
+        12: 'ETF',
+        13: 'Pre-Market',
+        14: 'Politics',
+        15: 'YouTube',
+        16: 'Settings',
+        17: 'Roll',
+    }
 
     def init_ui(self) -> None:
         """Initialize ui."""
@@ -33,6 +66,7 @@ class WindowSetupMixin:
 
     def _setup_window_shell(self, root_layout: Any) -> None:
         """Handle setup window shell."""
+        self._startup_progress_begin('window_shell', 'Window shell')
         self.top_bar = QHBoxLayout()
         self.time_label = QLabel('--:--')
         self.set_theme_role(self.time_label, 'section_title')
@@ -58,6 +92,8 @@ class WindowSetupMixin:
         self.btn_page7.setCheckable(True)
         self.btn_page8 = QPushButton('Sectors')
         self.btn_page8.setCheckable(True)
+        self.btn_page17 = QPushButton('Heatmap')
+        self.btn_page17.setCheckable(True)
         self.btn_page15 = QPushButton('Politics')
         self.btn_page15.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
@@ -70,6 +106,8 @@ class WindowSetupMixin:
         self.btn_page11.setCheckable(True)
         self.btn_page12 = QPushButton('Stocks')
         self.btn_page12.setCheckable(True)
+        self.btn_page18 = QPushButton('Roll')
+        self.btn_page18.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
             self.btn_page4,
@@ -77,6 +115,7 @@ class WindowSetupMixin:
             self.btn_page7,
             self.btn_page3,
             self.btn_page8,
+            self.btn_page17,
             self.btn_page12,
             self.btn_page2,
             self.btn_page10,
@@ -85,6 +124,7 @@ class WindowSetupMixin:
             self.btn_page14,
             self.btn_page15,
             self.btn_page16,
+            self.btn_page18,
             self.btn_page9,
         ]
         self.top_refresh_btn = QPushButton('Reload (F5)')
@@ -96,6 +136,7 @@ class WindowSetupMixin:
         nav_scroll_right = QPushButton('>')
         nav_scroll_right.setFixedWidth(24)
         nav_scroll_right.setFixedHeight(38)
+        self._shell_log_buttons = [nav_scroll_left, nav_scroll_right]
 
         nav_container = QWidget()
         nav_container_layout = QHBoxLayout(nav_container)
@@ -172,7 +213,7 @@ class WindowSetupMixin:
         self.top_bar.addSpacing(8)
         self.top_bar.addWidget(self.top_refresh_btn)
         root_layout.addLayout(self.top_bar)
-        self.stacked_widget = QStackedWidget()
+        self.stacked_widget = _CurrentPageStackedWidget()
         root_layout.addWidget(self.stacked_widget)
         footer_row = QHBoxLayout()
         self.status_bar = QLabel('Ready')
@@ -180,12 +221,197 @@ class WindowSetupMixin:
         self.data_collection_label = QLabel('Data collected: awaiting first refresh')
         self.set_theme_role(self.data_collection_label, 'status_muted')
         self.data_collection_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.data_health_label = QLabel('Data health: OK')
+        self.set_theme_role(self.data_health_label, 'status_muted')
+        self.data_health_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         footer_row.addWidget(self.status_bar, 1)
+        footer_row.addWidget(self.data_health_label, 0)
         footer_row.addWidget(self.data_collection_label, 0)
         root_layout.addLayout(footer_row)
+        self._bind_shell_interaction_logging()
+        self._startup_progress_complete('window_shell', 'Window shell')
+
+    def _safe_log_text(self, value: Any, *, max_length: int=80, fallback: str='unnamed') -> str:
+        """Return a compact single-line label for session log messages."""
+        text = str(value or '').replace('\r', ' ').replace('\n', ' ').strip()
+        while '  ' in text:
+            text = text.replace('  ', ' ')
+        if not text:
+            text = fallback
+        if len(text) > max_length:
+            text = f'{text[:max_length - 3].rstrip()}...'
+        return text
+
+    def _page_label(self, index: Any=None) -> str:
+        """Return a readable main-page label for log messages."""
+        try:
+            numeric_index = int(index if index is not None else self.stacked_widget.currentIndex())
+        except (TypeError, ValueError, AttributeError):
+            numeric_index = 0
+        page = getattr(self, '_pages', {}).get(numeric_index, {})
+        button = page.get('btn') if isinstance(page, dict) else None
+        if button is not None and hasattr(button, 'text'):
+            label = str(button.text() or '').strip()
+            if label:
+                return self._safe_log_text(label)
+        return self._PAGE_LABELS.get(numeric_index, f'Page {numeric_index}')
+
+    def _widget_log_label(self, widget: Any, *, fallback: str='control') -> str:
+        """Return a non-sensitive label for a widget without reading user-entered values."""
+        for attr_name in ('text', 'windowTitle', 'placeholderText', 'objectName'):
+            attr = getattr(widget, attr_name, None)
+            if not callable(attr):
+                continue
+            try:
+                value = attr()
+            except Exception:
+                value = ''
+            if value:
+                return self._safe_log_text(value, fallback=fallback)
+        return self._safe_log_text(widget.__class__.__name__, fallback=fallback)
+
+    def _widget_log_page_label(self, widget: Any) -> str:
+        """Resolve the owning visible page for an interaction log line."""
+        current = widget
+        while current is not None and isinstance(current, QWidget):
+            try:
+                page_index = self.stacked_widget.indexOf(current)
+            except Exception:
+                page_index = -1
+            if page_index >= 0:
+                return self._page_label(page_index)
+            current = current.parentWidget()
+        return self._page_label()
+
+    def _mark_interaction_logger_bound(self, widget: Any, key: str) -> bool:
+        """Return True once for each widget/signal pair that receives log wiring."""
+        bound = widget.property(self._INTERACTION_LOG_BOUND_PROPERTY)
+        if isinstance(bound, str):
+            keys = {item for item in bound.split(',') if item}
+        else:
+            keys = set()
+        if key in keys:
+            return False
+        keys.add(key)
+        widget.setProperty(self._INTERACTION_LOG_BOUND_PROPERTY, ','.join(sorted(keys)))
+        return True
+
+    def _log_user_interaction(self, action: str, widget: Any, detail: Any='') -> None:
+        """Emit one concise, privacy-aware user interaction log line."""
+        label = self._widget_log_label(widget)
+        page_label = self._widget_log_page_label(widget)
+        clean_detail = self._safe_log_text(detail, max_length=120, fallback='') if detail else ''
+        if clean_detail:
+            logger.info('User action: %s "%s" on %s (%s).', action, label, page_label, clean_detail)
+        else:
+            logger.info('User action: %s "%s" on %s.', action, label, page_label)
+
+    def _bind_button_interaction_logging(self, button: Any) -> None:
+        if not self._mark_interaction_logger_bound(button, 'clicked'):
+            return
+        button.clicked.connect(lambda _checked=False, widget=button: self._log_user_interaction('clicked button', widget))
+
+    def _bind_checkbox_interaction_logging(self, checkbox: Any) -> None:
+        if not self._mark_interaction_logger_bound(checkbox, 'toggled'):
+            return
+        checkbox.toggled.connect(
+            lambda checked=False, widget=checkbox: self._log_user_interaction(
+                'toggled checkbox',
+                widget,
+                f'checked={bool(checked)}',
+            )
+        )
+
+    def _bind_combo_interaction_logging(self, combo: Any) -> None:
+        if not self._mark_interaction_logger_bound(combo, 'activated'):
+            return
+        combo.activated.connect(
+            lambda index=0, widget=combo: self._log_user_interaction(
+                'selected combo item',
+                widget,
+                f'index={int(index)}',
+            )
+        )
+
+    def _bind_line_edit_interaction_logging(self, line_edit: Any) -> None:
+        if not self._mark_interaction_logger_bound(line_edit, 'returnPressed'):
+            return
+        line_edit.returnPressed.connect(
+            lambda widget=line_edit: self._log_user_interaction('submitted text field', widget)
+        )
+
+    def _bind_table_interaction_logging(self, table: Any) -> None:
+        if not self._mark_interaction_logger_bound(table, 'cellClicked'):
+            return
+        table.cellClicked.connect(
+            lambda row=0, column=0, widget=table: self._log_user_interaction(
+                'clicked table cell',
+                widget,
+                f'row={int(row)} column={int(column)}',
+            )
+        )
+
+    def _bind_list_interaction_logging(self, list_widget: Any) -> None:
+        if not self._mark_interaction_logger_bound(list_widget, 'itemClicked'):
+            return
+        list_widget.itemClicked.connect(
+            lambda _item=None, widget=list_widget: self._log_user_interaction(
+                'clicked list item',
+                widget,
+                f'row={int(widget.currentRow())}',
+            )
+        )
+
+    def _bind_tab_interaction_logging(self, tab_widget: Any) -> None:
+        if not self._mark_interaction_logger_bound(tab_widget, 'tabBarClicked'):
+            return
+        tab_widget.tabBarClicked.connect(
+            lambda index=0, widget=tab_widget: self._log_user_interaction(
+                'clicked tab',
+                widget,
+                f'index={int(index)}',
+            )
+        )
+
+    def _bind_shell_interaction_logging(self) -> None:
+        """Wire meaningful top-shell controls that are not children of a page."""
+        shell_buttons = list(getattr(self, '_shell_log_buttons', []))
+        shell_buttons.extend(list(getattr(self, '_nav_buttons', [])))
+        shell_buttons.append(getattr(self, 'top_refresh_btn', None))
+        for button in shell_buttons:
+            if button is not None:
+                self._bind_button_interaction_logging(button)
+        for widget in (getattr(self, '_tab_picker_input', None), getattr(self, '_tab_picker_list', None)):
+            if isinstance(widget, QLineEdit):
+                self._bind_line_edit_interaction_logging(widget)
+            elif isinstance(widget, QListWidget):
+                self._bind_list_interaction_logging(widget)
+
+    def _bind_page_interaction_logging(self, page: Any, index: Any) -> None:
+        """Wire concise interaction logs for meaningful controls on one built page."""
+        if not isinstance(page, QWidget):
+            return
+        for button in page.findChildren(QPushButton):
+            self._bind_button_interaction_logging(button)
+        for checkbox in page.findChildren(QCheckBox):
+            self._bind_checkbox_interaction_logging(checkbox)
+        for combo in page.findChildren(QComboBox):
+            self._bind_combo_interaction_logging(combo)
+        for line_edit in page.findChildren(QLineEdit):
+            self._bind_line_edit_interaction_logging(line_edit)
+        for table in page.findChildren(QTableWidget):
+            self._bind_table_interaction_logging(table)
+        for list_widget in page.findChildren(QListWidget):
+            self._bind_list_interaction_logging(list_widget)
+        for tab_widget in page.findChildren(QTabWidget):
+            self._bind_tab_interaction_logging(tab_widget)
+        logger.info('Interaction logging wired for %s page.', self._page_label(index))
 
     def _init_dashboard_page(self) -> None:
         """Handle init dashboard page."""
+        started_at = time.perf_counter()
+        logger.info('Page load started: Dashboard (index 0, startup).')
+        self._startup_progress_begin_page(0, 'Dashboard')
         self.page1 = QWidget()
         self.stacked_widget.addWidget(self.page1)
         main_layout = QHBoxLayout(self.page1)
@@ -318,6 +544,7 @@ class WindowSetupMixin:
         right_widget = QWidget()
         right_col = QVBoxLayout(right_widget)
         right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(3)
         indices_bar = QHBoxLayout()
         self.index_labels = {}
         for index_name in ['SPY', 'DXY', 'VIX', 'GLD', 'WTI']:
@@ -350,58 +577,95 @@ class WindowSetupMixin:
         self.dashboard_indicator_buttons = {}
         self.dashboard_option_tables = {}
 
+        header_widget = QWidget()
+        header_widget.setMinimumWidth(0)
+        header_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(2)
+
         toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
         toolbar_title = QLabel('<b>Dashboard Chart</b>')
         self.set_theme_role(toolbar_title, 'page_title')
         toolbar.addWidget(toolbar_title)
-        toolbar.addSpacing(10)
+        toolbar.addSpacing(6)
         toolbar.addWidget(self.dashboard_symbol_input)
         toolbar.addWidget(self.dashboard_load_btn)
         toolbar.addWidget(self.dashboard_export_options_btn)
-        toolbar.addSpacing(16)
+        toolbar.addStretch()
+        toolbar.addWidget(self.dashboard_auto_btn)
+        header_layout.addLayout(toolbar)
+
+        timeframe_scroll = QScrollArea()
+        timeframe_scroll.setWidgetResizable(False)
+        timeframe_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        timeframe_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        timeframe_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        timeframe_scroll.setMinimumWidth(0)
+        timeframe_scroll.setMinimumHeight(30)
+        timeframe_scroll.setMaximumHeight(36)
+        timeframe_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        timeframe_widget = QWidget()
+        timeframe_widget.setMinimumWidth(0)
+        timeframe_layout = QHBoxLayout(timeframe_widget)
+        timeframe_layout.setContentsMargins(0, 0, 0, 0)
+        timeframe_layout.setSpacing(4)
         for label, _, _ in timeframe_options:
             btn = QPushButton(label)
             btn.setCheckable(True)
-            btn.setMinimumHeight(26)
+            btn.setMinimumHeight(24)
             btn.clicked.connect(partial(self._dashboard_set_timeframe, label))
             self.dashboard_timeframe_group.addButton(btn)
             self.dashboard_timeframe_buttons[label] = btn
-            toolbar.addWidget(btn)
-        toolbar.addStretch()
-        toolbar.addWidget(self.dashboard_auto_btn)
-        right_col.addLayout(toolbar)
+            timeframe_layout.addWidget(btn)
+        timeframe_layout.addStretch()
+        timeframe_scroll.setWidget(timeframe_widget)
 
         indicator_row = QHBoxLayout()
+        indicator_row.setContentsMargins(0, 0, 0, 0)
+        indicator_row.setSpacing(4)
         indicator_label = QLabel('Indicators')
         self.set_theme_role(indicator_label, 'muted')
         indicator_row.addWidget(indicator_label)
-        indicator_row.addSpacing(8)
+        indicator_row.addSpacing(2)
         for name in ('Volume', 'RSI', '200 MA'):
             btn = QPushButton(name)
             btn.setCheckable(True)
+            btn.setMinimumHeight(24)
             btn.clicked.connect(partial(self._dashboard_toggle_indicator, name))
             self.dashboard_indicator_buttons[name] = btn
             indicator_row.addWidget(btn)
-        indicator_row.addStretch()
-        right_col.addLayout(indicator_row)
 
         info_strip = QHBoxLayout()
+        info_strip.setContentsMargins(0, 0, 0, 0)
+        info_strip.setSpacing(6)
         self.dashboard_symbol_label = QLabel(self.dashboard_chart_state.get('symbol', 'SPY'))
         self.dashboard_price_label = QLabel('--')
-        self.dashboard_price_label.setMinimumHeight(30)
+        self.dashboard_price_label.setMinimumHeight(24)
         self.dashboard_price_label.setMinimumWidth(92)
         self.dashboard_change_label = QLabel('--')
         self.dashboard_ohlc_label = QLabel('O --  H --  L --  C --')
         self.dashboard_status_label = QLabel('Ready')
         self.set_theme_role(self.dashboard_status_label, 'status_muted')
         info_strip.addWidget(self.dashboard_symbol_label)
-        info_strip.addSpacing(16)
+        info_strip.addSpacing(8)
         info_strip.addWidget(self.dashboard_price_label)
         info_strip.addWidget(self.dashboard_change_label)
-        info_strip.addSpacing(20)
+        info_strip.addSpacing(8)
         info_strip.addWidget(self.dashboard_ohlc_label, 1)
         info_strip.addWidget(self.dashboard_status_label)
-        right_col.addLayout(info_strip)
+
+        compact_row = QHBoxLayout()
+        compact_row.setContentsMargins(0, 0, 0, 0)
+        compact_row.setSpacing(6)
+        compact_row.addWidget(timeframe_scroll, 2)
+        compact_row.addLayout(indicator_row)
+        compact_row.addSpacing(4)
+        compact_row.addLayout(info_strip, 3)
+        header_layout.addLayout(compact_row)
+        right_col.addWidget(header_widget)
 
         self.dashboard_body_splitter = QSplitter(Qt.Orientation.Horizontal)
         chart_container = QWidget()
@@ -479,6 +743,9 @@ class WindowSetupMixin:
         self.dashboard_main_splitter.splitterMoved.connect(self._dashboard_on_main_splitter_moved)
         main_layout.addWidget(self.dashboard_main_splitter)
         self._dashboard_apply_main_splitter_sizes()
+        self._bind_page_interaction_logging(self.page1, 0)
+        logger.info('Page load complete: Dashboard (index 0) in %.3fs.', time.perf_counter() - started_at)
+        self._startup_progress_complete_page(0, 'Dashboard')
 
     def _lazy_page_specs(self) -> tuple[dict[str, Any], ...]:
         """Return metadata for pages that can be initialized after first paint."""
@@ -488,38 +755,47 @@ class WindowSetupMixin:
             {'index': 3, 'page_attr': 'page7', 'init_method': 'init_page7', 'theme_hook': '_apply_calendar_theme', 'hydrate_hook': '_hydrate_lazy_page7'},
             {'index': 4, 'page_attr': 'page3', 'init_method': 'init_page3', 'theme_hook': '_apply_news_theme', 'hydrate_hook': '_hydrate_lazy_page3'},
             {'index': 5, 'page_attr': 'page8', 'init_method': 'init_page8', 'theme_hook': '_apply_sectors_theme'},
-            {'index': 6, 'page_attr': 'page12', 'init_method': 'init_page12', 'theme_hook': '_apply_stocks_theme'},
-            {'index': 7, 'page_attr': 'page2', 'init_method': 'init_page2', 'theme_hook': '_apply_fundamentals_theme', 'layout_margins': (10, 10, 10, 10)},
-            {'index': 8, 'page_attr': 'page10', 'init_method': 'init_page10', 'theme_hook': '_apply_charts_page_theme'},
-            {'index': 9, 'page_attr': 'page11', 'init_method': 'init_page11'},
-            {'index': 10, 'page_attr': 'page5', 'init_method': 'init_page5', 'theme_hook': '_apply_options_chain_theme'},
-            {'index': 11, 'page_attr': 'page13', 'init_method': 'init_page13', 'theme_hook': '_apply_etf_theme'},
-            {'index': 12, 'page_attr': 'page14', 'init_method': 'init_page14'},
-            {'index': 13, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
-            {'index': 14, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
-            {'index': 15, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+            {'index': 6, 'page_attr': 'page17', 'init_method': 'init_page17', 'theme_hook': '_apply_spy_heatmap_theme'},
+            {'index': 7, 'page_attr': 'page12', 'init_method': 'init_page12', 'theme_hook': '_apply_stocks_theme'},
+            {'index': 8, 'page_attr': 'page2', 'init_method': 'init_page2', 'theme_hook': '_apply_fundamentals_theme', 'layout_margins': (10, 10, 10, 10)},
+            {'index': 9, 'page_attr': 'page10', 'init_method': 'init_page10', 'theme_hook': '_apply_charts_page_theme'},
+            {'index': 10, 'page_attr': 'page11', 'placeholder_only': True},
+            {'index': 11, 'page_attr': 'page5', 'init_method': 'init_page5', 'theme_hook': '_apply_options_chain_theme'},
+            {'index': 12, 'page_attr': 'page13', 'init_method': 'init_page13', 'theme_hook': '_apply_etf_theme'},
+            {'index': 13, 'page_attr': 'page14', 'init_method': 'init_page14'},
+            {'index': 14, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
+            {'index': 15, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
+            {'index': 16, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+            {'index': 17, 'page_attr': 'page18', 'init_method': 'init_page18', 'theme_hook': '_apply_random_recommender_theme'},
         )
 
     def _register_lazy_pages(self) -> None:
         """Insert placeholders for secondary pages so they can be built on demand."""
+        self._startup_progress_begin('lazy_registry', 'Page registry')
         self._lazy_page_registry = {}
         for spec in self._lazy_page_specs():
             placeholder = QWidget()
             setattr(self, spec['page_attr'], placeholder)
             self.stacked_widget.addWidget(placeholder)
+            if spec.get('placeholder_only'):
+                continue
             self._lazy_page_registry[int(spec['index'])] = {
                 **spec,
                 'widget': placeholder,
                 'initialized': False,
             }
+        page_labels = [(0, self._PAGE_LABELS.get(0, 'Dashboard'))]
+        page_labels.extend(
+            (int(spec['index']), self._PAGE_LABELS.get(int(spec['index']), f"Page {spec['index']}"))
+            for spec in self._lazy_page_specs()
+            if not spec.get('placeholder_only')
+        )
+        self._startup_progress_register_pages(tuple(page_labels))
+        self._startup_progress_complete('lazy_registry', 'Page registry')
 
     def _initialize_startup_pages(self) -> None:
-        """Build fast, high-traffic pages during startup so they are ready on first open."""
-        for page_index in (5,):
-            if self._page_initialized(index=page_index):
-                continue
-            with self._startup_profiler_step(f'eager_page_{int(page_index)}'):
-                self._build_page_now(page_index)
+        """Keep secondary pages lazy so first paint stays responsive."""
+        return
 
     def _lazy_page_entry(self, *, index: Any = None, page_attr: str | None = None) -> Any:
         """Return one lazy-page registry entry by index or page attribute."""
@@ -564,18 +840,23 @@ class WindowSetupMixin:
         fn(*args, **kwargs)
         return True
 
-    def _build_page_now(self, index: Any) -> Any:
+    def _build_page_now(self, index: Any, *, reason: str='lazy') -> Any:
         """Replace a lazy placeholder with the real page widget and initialize it once."""
         entry = self._lazy_page_entry(index=index)
         if entry is None:
             return None
         if entry.get('initialized'):
             return entry.get('widget')
+        started_at = time.perf_counter()
         placeholder = entry.get('widget')
         page_attr = str(entry.get('page_attr', '') or '')
+        page_index = int(entry['index'])
+        page_label = self._page_label(page_index)
+        logger.info('Page load started: %s (index %s, reason=%s).', page_label, page_index, reason)
+        self._startup_progress_begin_page(page_index, page_label)
         page = QWidget()
         setattr(self, page_attr, page)
-        self.stacked_widget.insertWidget(int(entry['index']), page)
+        self.stacked_widget.insertWidget(page_index, page)
         init_method = getattr(self, str(entry.get('init_method', '') or ''), None)
         if not callable(init_method):
             raise AttributeError(f'Missing initializer for lazy page {page_attr}.')
@@ -599,6 +880,10 @@ class WindowSetupMixin:
             hydrate_hook()
         if hasattr(self, '_lazy_warmup_queue') and int(entry['index']) in getattr(self, '_lazy_warmup_queue', []):
             self._lazy_warmup_queue = [value for value in self._lazy_warmup_queue if int(value) != int(entry['index'])]
+        self._bind_page_interaction_logging(page, page_index)
+        logger.info('Page load complete: %s (index %s, reason=%s) in %.3fs.', page_label, page_index, reason, time.perf_counter() - started_at)
+        self._startup_progress_complete_page(page_index, page_label)
+        self._startup_progress_finish_if_complete()
         return page
 
     def _hydrate_lazy_page4(self) -> None:
@@ -625,6 +910,8 @@ class WindowSetupMixin:
     def _apply_window_theme(self) -> None:
         """Apply the active theme to shared shell widgets and dashboard plots."""
         self.set_status_text(self.status_bar, self.status_bar.text(), status=self.status_bar.property('bt_status') or 'muted')
+        if hasattr(self, 'data_health_label'):
+            self.set_status_text(self.data_health_label, self.data_health_label.text(), status=self.data_health_label.property('bt_status') or 'positive')
         self.set_status_text(self.data_collection_label, self.data_collection_label.text(), status=self.data_collection_label.property('bt_status') or 'muted')
         for plot in getattr(self, 'charts', []):
             self.style_plot_widget(plot)

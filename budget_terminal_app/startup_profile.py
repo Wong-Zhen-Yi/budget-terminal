@@ -34,6 +34,10 @@ class StartupProfiler:
         """Record elapsed time from process startup to one milestone."""
         return self._record('stamp', name, time.perf_counter() - self.started_at)
 
+    def elapsed(self) -> float:
+        """Return current elapsed startup time in seconds."""
+        return float(time.perf_counter() - self.started_at)
+
     def add_duration(self, name: str, seconds: float) -> float:
         """Record one named duration."""
         return self._record('duration', name, seconds)
@@ -50,6 +54,32 @@ class StartupProfiler:
     def records(self) -> list[dict[str, float | str]]:
         """Return a copy of the captured timing records."""
         return [dict(record) for record in self._records]
+
+    def latest(self, name: str) -> float | None:
+        """Return the latest recorded value for a named startup record."""
+        return self._find_latest(name)
+
+    def snapshot(self) -> dict[str, float | list[dict[str, float | str]]]:
+        """Return a serializable snapshot of current startup timings."""
+        return {
+            'elapsed_seconds': self.elapsed(),
+            'records': self.records(),
+        }
+
+    @staticmethod
+    def format_seconds(value: float | int | None) -> str:
+        """Return a compact human-readable startup timing value."""
+        if value is None:
+            return '-'
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return '-'
+        if seconds < 0:
+            return '-'
+        if seconds < 1:
+            return f'{seconds * 1000:.0f} ms'
+        return f'{seconds:.2f} s'
 
     def _find_latest(self, name: str) -> float | None:
         for record in reversed(self._records):

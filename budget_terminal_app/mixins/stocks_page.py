@@ -1030,7 +1030,7 @@ class StocksPageMixin:
                 **self.chart_page_state,
                 'symbol': symbol,
             }
-        page_index = self._stocks_page_index('page10', 8)
+        page_index = self._stocks_page_index('page10', 9)
         page_ready = self._page_initialized(index=page_index)
         self.switch_page(page_index)
         if hasattr(self, 'p10_symbol_input'):
@@ -1042,7 +1042,7 @@ class StocksPageMixin:
         symbol = self._stocks_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._stocks_page_index('page2', 7))
+        self.switch_page(self._stocks_page_index('page2', 8))
         if hasattr(self, 'p2_ticker_input'):
             self.p2_ticker_input.setText(symbol)
         if hasattr(self, 'analyze_stock_p2'):
@@ -1052,7 +1052,7 @@ class StocksPageMixin:
         symbol = self._stocks_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._stocks_page_index('page5', 10))
+        self.switch_page(self._stocks_page_index('page5', 11))
         if hasattr(self, 'p5_shared_ticker_input'):
             self.p5_shared_ticker_input.setText(symbol)
         if hasattr(self, '_p5_load_expiries'):

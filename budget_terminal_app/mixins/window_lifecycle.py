@@ -3,8 +3,15 @@ from typing import Any
 from ..compat import *
 
 class WindowLifecycleMixin:
-    _STARTUP_SESSION_RESTORE_INITIAL_DELAY_MS = 350
+    _STARTUP_REFRESH_DELAY_MS = 2400
+    _STARTUP_DASHBOARD_DATA_TIMEOUT_MS = 15000
+    _STARTUP_SECTORS_PREFETCH_DELAY_MS = 4500
+    _STARTUP_HEATMAP_PREFETCH_DELAY_MS = 5500
+    _STARTUP_PRE_MARKET_TIMER_DELAY_MS = 6500
+    _STARTUP_SESSION_RESTORE_INITIAL_DELAY_MS = 7000
     _STARTUP_SESSION_RESTORE_STEP_MS = 250
+    _STARTUP_CACHE_WARMUP_INITIAL_DELAY_MS = 1200
+    _STARTUP_CACHE_WARMUP_STEP_MS = 1400
 
     def _get_tzinfo(self, idx: Any) -> Any:
         """Resolve a UI timezone selection into a tzinfo object."""
@@ -22,6 +29,7 @@ class WindowLifecycleMixin:
 
     def _register_navigation_pages(self) -> None:
         """Handle register navigation pages."""
+        self._startup_progress_begin('navigation', 'Navigation')
         self._pages.clear()
         self._register_page(0, self.btn_page1)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
@@ -29,17 +37,19 @@ class WindowLifecycleMixin:
         self._register_page(3, self.btn_page7)
         self._register_page(4, self.btn_page3, on_show=lambda: self.p3_crawler_timer.start(40) if hasattr(self, 'p3_crawler_timer') else None, on_hide=lambda: self.p3_crawler_timer.stop() if hasattr(self, 'p3_crawler_timer') else None)
         self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
-        self._register_page(6, self.btn_page12, on_show=self._stocks_on_show)
-        self._register_page(7, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
-        self._register_page(8, self.btn_page10, on_show=self._p10_on_show)
-        self._register_page(9, self.btn_page11, on_show=self._mc_on_show)
-        self._register_page(10, self.btn_page5)
-        self._register_page(11, self.btn_page13)
-        self._register_page(12, self.btn_page14, on_show=self._p14_on_show)
-        self._register_page(13, self.btn_page15, on_show=self._p15_on_show)
-        self._register_page(14, self.btn_page16, on_show=self._p16_on_show)
-        self._register_page(15, self.btn_page9)
+        self._register_page(6, self.btn_page17, on_show=self._p17_on_show)
+        self._register_page(7, self.btn_page12, on_show=self._stocks_on_show)
+        self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
+        self._register_page(9, self.btn_page10, on_show=self._p10_on_show)
+        self._register_page(11, self.btn_page5)
+        self._register_page(12, self.btn_page13)
+        self._register_page(13, self.btn_page14, on_show=self._p14_on_show)
+        self._register_page(14, self.btn_page15, on_show=self._p15_on_show)
+        self._register_page(15, self.btn_page16, on_show=self._p16_on_show)
+        self._register_page(17, self.btn_page18)
+        self._register_page(16, self.btn_page9)
         self._refresh_main_tab_picker_items()
+        self._startup_progress_complete('navigation', 'Navigation')
 
     def _is_current_page(self, page: Any) -> bool:
         """Return whether the provided stacked page is currently visible."""
@@ -68,6 +78,45 @@ class WindowLifecycleMixin:
         self._pages[index] = {'btn': btn, 'on_show': on_show, 'on_hide': on_hide}
         btn.clicked.connect(partial(self.switch_page, index))
 
+    def _prepare_startup_before_show(self) -> None:
+        """Run startup-blocking work while the main window remains hidden."""
+        if getattr(self, '_startup_hidden_preparation_started', False):
+            return
+        self._startup_hidden_preparation_started = True
+        self._startup_profiler_stamp('hidden_startup_start')
+        self._startup_profiler_stamp('startup_refresh_start')
+        logger.info('Startup refresh started before first show: %s page.', self._page_label(0))
+        self._startup_metrics_set_stage(
+            'dashboard_data',
+            status='running',
+            detail='Loading first dashboard data before showing the main window.',
+        )
+        self.refresh_data(force=True)
+        self._startup_dashboard_timeout_pending = True
+        QTimer.singleShot(self._STARTUP_DASHBOARD_DATA_TIMEOUT_MS, self._on_startup_dashboard_timeout)
+        self._startup_progress_finish_if_complete()
+
+    def _on_startup_dashboard_timeout(self) -> None:
+        """Release first UI if startup dashboard data is still loading."""
+        self._startup_dashboard_timeout_pending = False
+        if getattr(self, '_startup_dashboard_data_actual_done', False):
+            return
+        if getattr(self, '_startup_show_completed', False):
+            return
+        self._startup_dashboard_data_timed_out = True
+        self._startup_metrics_set_stage(
+            'dashboard_data',
+            status='running',
+            detail='Dashboard data is still loading; first UI released after startup timeout.',
+        )
+        logger.warning(
+            'Startup dashboard data still loading after %.1fs; showing main window while refresh continues.',
+            self._STARTUP_DASHBOARD_DATA_TIMEOUT_MS / 1000.0,
+        )
+        if hasattr(self, 'dashboard_status_label'):
+            self._dashboard_set_status('Dashboard data is still loading; window opened after startup timeout.', 'warning')
+        self._complete_startup_dashboard_data('Dashboard Data delayed', actual=False)
+
     def showEvent(self, event: Any) -> None:
         """Start deferred startup work only after the window has been shown once."""
         super().showEvent(event)
@@ -76,19 +125,33 @@ class WindowLifecycleMixin:
         self._startup_show_completed = True
         self._startup_profiler_stamp('window_shown')
         profiler = getattr(self, '_startup_profiler', None)
+        window_shown_seconds = profiler.latest('window_shown') if profiler is not None and hasattr(profiler, 'latest') else None
+        self._startup_metrics_set_stage(
+            'first_ui',
+            status='complete',
+            detail=(
+                'Main window shown after dashboard startup timeout; data refresh still running.'
+                if getattr(self, '_startup_dashboard_data_timed_out', False)
+                else 'Main window shown.'
+            ),
+            completed_seconds=window_shown_seconds,
+            duration_seconds=window_shown_seconds,
+        )
+        self._startup_progress_complete('first_show', 'First usable view')
         if profiler is not None:
             profiler.log_summary()
-        self._schedule_startup_refresh()
+        if not getattr(self, '_startup_ready_before_show', False):
+            self._schedule_startup_refresh()
+        self._start_lazy_warmup()
         self._schedule_startup_page_prefetches()
         self._schedule_startup_session_restores()
-        self._start_lazy_warmup()
 
     def _schedule_startup_refresh(self) -> None:
-        """Queue the first dashboard refresh for the next event turn after first paint."""
+        """Queue the first dashboard refresh after the first paint has settled."""
         if getattr(self, '_startup_refresh_pending', False):
             return
         self._startup_refresh_pending = True
-        QTimer.singleShot(0, self._run_startup_refresh)
+        QTimer.singleShot(self._STARTUP_REFRESH_DELAY_MS, self._run_startup_refresh)
 
     def _run_startup_refresh(self) -> None:
         """Run the deferred startup refresh once the window is visible."""
@@ -96,38 +159,287 @@ class WindowLifecycleMixin:
         if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
             return
         self._startup_profiler_stamp('startup_refresh_start')
+        logger.info('Startup refresh started: %s page.', self._page_label(0))
         self.refresh_data(force=True)
 
     def _schedule_startup_page_prefetches(self) -> None:
-        """Queue eager post-show page data work without blocking first paint."""
+        """Queue post-show page data work in separate waves."""
         if getattr(self, '_startup_page_prefetch_pending', False):
             return
         self._startup_page_prefetch_pending = True
-        QTimer.singleShot(0, self._run_startup_page_prefetches)
+        QTimer.singleShot(self._STARTUP_SECTORS_PREFETCH_DELAY_MS, self._run_startup_sectors_prefetch)
+        QTimer.singleShot(self._STARTUP_HEATMAP_PREFETCH_DELAY_MS, self._run_startup_heatmap_prefetch)
+        QTimer.singleShot(self._STARTUP_PRE_MARKET_TIMER_DELAY_MS, self._run_startup_pre_market_timer)
 
-    def _run_startup_page_prefetches(self) -> None:
-        """Kick off background data loads for startup-priority secondary pages."""
-        self._startup_page_prefetch_pending = False
+    def _startup_work_can_run(self) -> bool:
+        """Return whether deferred startup work should still run."""
+        return bool(getattr(self, '_startup_show_completed', False) and self.isVisible())
+
+    def _run_startup_sectors_prefetch(self) -> None:
+        """Build and refresh the Sectors page after the first startup wave."""
         if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
             return
+        logger.info('Startup prefetch loading %s page.', self._page_label(5))
         self._ensure_page_initialized(5)
+        logger.info('Startup prefetch requesting data for %s page.', self._page_label(5))
         self._call_if_page_initialized(
             '_p8_request_refresh',
             page_attr='page8',
             status_text='Loading sector data...',
         )
+
+    def _run_startup_heatmap_prefetch(self) -> None:
+        """Build and refresh the Heatmap page after Sectors has started."""
+        if not self._startup_work_can_run():
+            return
+        logger.info('Startup prefetch loading %s page.', self._page_label(6))
+        self._ensure_page_initialized(6)
+        logger.info('Startup prefetch requesting data for %s page.', self._page_label(6))
+        self._call_if_page_initialized(
+            '_p17_request_refresh',
+            page_attr='page17',
+        )
+
+    def _run_startup_pre_market_timer(self) -> None:
+        """Start the Pre-Market auto refresh timer after early startup has settled."""
+        self._startup_page_prefetch_pending = False
+        if not self._startup_work_can_run():
+            return
         if hasattr(self, '_p14_start_auto_refresh'):
+            logger.info('Startup prefetch starting Pre-Market auto refresh timer.')
             self._p14_start_auto_refresh()
+        logger.info('Startup page prefetch waves complete.')
+        self._schedule_startup_cache_warmup()
+
+    def _schedule_startup_cache_warmup(self) -> None:
+        """Queue balanced cache warmup after the dashboard has loaded."""
+        if getattr(self, '_startup_cache_warmup_pending', False) or getattr(self, '_startup_cache_warmup_started', False):
+            return
+        if not self._startup_work_can_run():
+            return
+        if (not getattr(self, '_startup_dashboard_data_done', False)) or getattr(self, '_startup_page_prefetch_pending', False):
+            self._startup_cache_warmup_pending = True
+            QTimer.singleShot(1000, self._retry_startup_cache_warmup)
+            return
+        self._startup_cache_warmup_queue = self._startup_cache_warmup_specs()
+        if not self._startup_cache_warmup_queue:
+            self._startup_metrics_set_stage(
+                'cache_warmup',
+                status='skipped',
+                detail='No cache warmup tasks were available.',
+                count=0,
+                duration_seconds=0.0,
+            )
+            return
+        self._startup_cache_warmup_total = len(self._startup_cache_warmup_queue)
+        self._startup_cache_warmup_failed = False
+        self._startup_cache_warmup_started = True
+        self._startup_cache_warmup_pending = True
+        self._startup_metrics_set_stage(
+            'cache_warmup',
+            status='running',
+            detail='Startup cache warmup queued.',
+            count=self._startup_cache_warmup_total,
+        )
+        logger.info(
+            'Startup cache warmup queued for %s task(s): %s.',
+            len(self._startup_cache_warmup_queue),
+            ', '.join(item.get('label', 'warmup') for item in self._startup_cache_warmup_queue),
+        )
+        QTimer.singleShot(self._STARTUP_CACHE_WARMUP_INITIAL_DELAY_MS, self._run_startup_cache_warmup_step)
+
+    def _retry_startup_cache_warmup(self) -> None:
+        """Retry cache warmup scheduling after the dashboard finishes."""
+        self._startup_cache_warmup_pending = False
+        self._schedule_startup_cache_warmup()
+
+    def _startup_cache_warmup_specs(self) -> list[dict[str, Any]]:
+        """Return balanced staged cache warmup work."""
+        return [
+            {'label': 'chart cache', 'method': '_warm_startup_chart_cache'},
+            {'label': 'options expiries', 'method': '_warm_startup_options_expiries'},
+            {'label': 'portfolio metrics', 'method': '_warm_startup_portfolio_metrics'},
+            {'label': 'sector data', 'method': '_warm_startup_sector_data'},
+            {'label': 'ETF heatmap', 'method': '_warm_startup_etf_heatmap'},
+            {'label': 'ETF holdings', 'method': '_warm_startup_etf_holdings'},
+        ]
+
+    def _run_startup_cache_warmup_step(self) -> None:
+        """Run one background warmup task and schedule the next wave."""
+        self._startup_cache_warmup_pending = False
+        if not self._startup_work_can_run():
+            return
+        queue = list(getattr(self, '_startup_cache_warmup_queue', []) or [])
+        if not queue:
+            logger.info('Startup cache warmup complete.')
+            self._startup_metrics_set_stage(
+                'cache_warmup',
+                status='complete',
+                detail='Startup cache warmup complete.',
+                count=getattr(self, '_startup_cache_warmup_total', 0),
+            )
+            return
+        current = queue.pop(0)
+        self._startup_cache_warmup_queue = queue
+        label = str(current.get('label') or 'warmup')
+        method = getattr(self, str(current.get('method') or ''), None)
+        if callable(method):
+            try:
+                logger.info('Startup cache warmup running: %s.', label)
+                method()
+            except Exception as exc:
+                logger.exception('Startup cache warmup failed for %s.', label)
+                self._startup_cache_warmup_failed = True
+                if hasattr(self, '_record_data_health_exception'):
+                    self._record_data_health_exception(f'Warmup: {label}', exc, severity='warning')
+        if self._startup_cache_warmup_queue:
+            self._startup_cache_warmup_pending = True
+            QTimer.singleShot(self._STARTUP_CACHE_WARMUP_STEP_MS, self._run_startup_cache_warmup_step)
+        else:
+            logger.info('Startup cache warmup complete.')
+            failed = bool(getattr(self, '_startup_cache_warmup_failed', False))
+            self._startup_metrics_set_stage(
+                'cache_warmup',
+                status='failed' if failed else 'complete',
+                detail='Startup cache warmup finished with errors.' if failed else 'Startup cache warmup complete.',
+                count=getattr(self, '_startup_cache_warmup_total', 0),
+            )
+
+    def _startup_warmup_symbols(self, *, limit: int = 12) -> list[str]:
+        """Return a bounded ticker universe for background warmup."""
+        symbols = []
+        candidates = [
+            getattr(self, 'dashboard_symbol', ''),
+            getattr(self, 'p10_symbol', ''),
+        ]
+        candidates.extend(list(getattr(self, 'chart_slots', []) or []))
+        if hasattr(self, '_get_fetch_tickers'):
+            candidates.extend(list(self._get_fetch_tickers() or []))
+        for value in candidates:
+            symbol = str(value or '').upper().strip()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+            if len(symbols) >= int(limit):
+                break
+        return symbols
+
+    def _warm_startup_chart_cache(self) -> None:
+        """Warm common chart frames without changing visible chart state."""
+        symbols = self._startup_warmup_symbols(limit=8)
+        if not symbols:
+            return
+
+        def _run() -> None:
+            try:
+                from budget_terminal_app.services.chart_data import ChartDataService
+
+                service = ChartDataService(self._get_cache_manager())
+                for symbol in symbols:
+                    payload = service.fetch_base_frame_payload(symbol, period='1mo', interval='1d')
+                    if hasattr(self, '_record_data_health_payload'):
+                        self._record_data_health_payload('Warmup chart cache', payload, symbols=[symbol])
+                logger.info('Startup chart cache warmup finished for %s symbol(s).', len(symbols))
+            except Exception as exc:
+                logger.warning('Startup chart cache warmup failed: %s', exc)
+                if hasattr(self, '_record_data_health_exception'):
+                    self._record_data_health_exception('Warmup chart cache', exc, symbols=symbols, severity='warning')
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _warm_startup_options_expiries(self) -> None:
+        """Warm option expiry caches for saved portfolio/options symbols."""
+        symbols = []
+        symbols.extend(self._startup_warmup_symbols(limit=12))
+        for pos in list(getattr(self, 'options_data', []) or []):
+            ticker = str((pos or {}).get('ticker', '') if isinstance(pos, dict) else '').upper().strip()
+            if ticker and ticker not in symbols:
+                symbols.append(ticker)
+        symbols = symbols[:16]
+        if not symbols:
+            return
+
+        def _run() -> None:
+            try:
+                service = self._get_options_data_service()
+                for symbol in symbols:
+                    payload = service.fetch_expiries_payload(symbol)
+                    if hasattr(self, '_record_data_health_payload'):
+                        self._record_data_health_payload('Warmup options expiries', payload, symbols=[symbol])
+                logger.info('Startup options expiry warmup finished for %s symbol(s).', len(symbols))
+            except Exception as exc:
+                logger.warning('Startup options expiry warmup failed: %s', exc)
+                if hasattr(self, '_record_data_health_exception'):
+                    self._record_data_health_exception('Warmup options expiries', exc, symbols=symbols, severity='warning')
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _warm_startup_portfolio_metrics(self) -> None:
+        """Warm active portfolio analytics cache."""
+        if not self._startup_work_can_run():
+            return
+        self._ensure_page_initialized(1)
+        if hasattr(self, '_fetch_portfolio_analytics'):
+            self._fetch_portfolio_analytics(force=False)
+
+    def _warm_startup_sector_data(self) -> None:
+        """Warm sector page data using existing throttles."""
+        if not self._startup_work_can_run():
+            return
+        self._ensure_page_initialized(5)
+        self._call_if_page_initialized(
+            '_p8_request_refresh',
+            page_attr='page8',
+            status_text='Warming sector data...',
+        )
+
+    def _warm_startup_etf_heatmap(self) -> None:
+        """Warm ETF heatmap data using existing throttles."""
+        if not self._startup_work_can_run():
+            return
+        self._ensure_page_initialized(6)
+        self._call_if_page_initialized('_p17_request_refresh', page_attr='page17')
+
+    def _warm_startup_etf_holdings(self) -> None:
+        """Warm last-session ETF holdings without changing visible inputs."""
+        snapshot = self._get_tab_session_snapshot('etf') if hasattr(self, '_get_tab_session_snapshot') else None
+        ticker = ''
+        if isinstance(snapshot, dict):
+            ticker = str(snapshot.get('input_ticker') or snapshot.get('ticker') or '').upper().strip()
+        if not ticker:
+            return
+
+        def _run() -> None:
+            try:
+                from budget_terminal_app.etf_holdings import EtfHoldingsService
+
+                result = EtfHoldingsService().load(ticker)
+                if bool(getattr(result, 'is_partial', False)) and hasattr(self, '_record_data_health_event'):
+                    self._record_data_health_event(
+                        'Warmup ETF holdings',
+                        severity='warning',
+                        source=getattr(result, 'issuer', '') or 'ETF holdings source',
+                        freshness='partial',
+                        reason=f'{ticker} holdings warmup used a partial fallback source.',
+                        symbols=[ticker],
+                    )
+                logger.info('Startup ETF holdings warmup finished for %s.', ticker)
+            except Exception as exc:
+                logger.warning('Startup ETF holdings warmup failed for %s: %s', ticker, exc)
+                if hasattr(self, '_record_data_health_exception'):
+                    self._record_data_health_exception('Warmup ETF holdings', exc, symbols=[ticker], severity='warning')
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _startup_session_restore_specs(self) -> list[dict[str, Any]]:
         """Return the tab-session restore tasks that should run after first paint."""
         specs = [
-            {'tab_key': 'stocks', 'page_index': 6, 'restore_method': '_stocks_restore_startup_session'},
-            {'tab_key': 'fundamentals', 'page_index': 7, 'restore_method': '_p2_restore_startup_session'},
-            {'tab_key': 'options', 'page_index': 10, 'restore_method': '_p5_restore_startup_session'},
-            {'tab_key': 'etf', 'page_index': 11, 'restore_method': '_p13_restore_startup_session'},
-            {'tab_key': 'politics', 'page_index': 13, 'restore_method': '_p15_restore_startup_session', 'allow_empty_snapshot': True},
-            {'tab_key': 'youtube', 'page_index': 14, 'restore_method': '_p16_restore_startup_session'},
+            {'tab_key': 'stocks', 'page_index': 7, 'restore_method': '_stocks_restore_startup_session'},
+            {'tab_key': 'roll', 'page_index': 17, 'restore_method': '_p18_restore_startup_session'},
+            {'tab_key': 'fundamentals', 'page_index': 8, 'restore_method': '_p2_restore_startup_session'},
+            {'tab_key': 'options', 'page_index': 11, 'restore_method': '_p5_restore_startup_session'},
+            {'tab_key': 'etf', 'page_index': 12, 'restore_method': '_p13_restore_startup_session'},
+            {'tab_key': 'politics', 'page_index': 14, 'restore_method': '_p15_restore_startup_session', 'allow_empty_snapshot': True},
+            {'tab_key': 'youtube', 'page_index': 15, 'restore_method': '_p16_restore_startup_session'},
         ]
         queue = []
         for spec in specs:
@@ -137,13 +449,29 @@ class WindowLifecycleMixin:
         return queue
 
     def _schedule_startup_session_restores(self) -> None:
-        """Queue hidden last-session tab restores after the dashboard has started loading."""
+        """Queue hidden last-session tab restores after early startup work has settled."""
         if getattr(self, '_startup_session_restore_pending', False):
             return
         queue = self._startup_session_restore_specs()
         self._startup_session_restore_queue = list(queue)
         if not queue:
+            self._startup_metrics_set_stage(
+                'session_restore',
+                status='skipped',
+                detail='No cached tabs to restore.',
+                count=0,
+                duration_seconds=0.0,
+            )
             return
+        self._startup_session_restore_total = len(queue)
+        self._startup_session_restore_failed = False
+        self._startup_metrics_set_stage(
+            'session_restore',
+            status='running',
+            detail='Restoring cached tabs.',
+            count=self._startup_session_restore_total,
+        )
+        logger.info('Startup session restore queued for %s page(s): %s.', len(queue), ', '.join(self._page_label(item.get('page_index')) for item in queue))
         self._startup_session_restore_pending = True
         QTimer.singleShot(self._STARTUP_SESSION_RESTORE_INITIAL_DELAY_MS, self._run_startup_session_restore_step)
 
@@ -154,26 +482,60 @@ class WindowLifecycleMixin:
             return
         queue = list(getattr(self, '_startup_session_restore_queue', []))
         if not queue:
+            self._startup_metrics_set_stage(
+                'session_restore',
+                status='complete',
+                detail='Startup session restore complete.',
+                count=getattr(self, '_startup_session_restore_total', 0),
+            )
             return
         current = queue.pop(0)
         self._startup_session_restore_queue = queue
+        page_index = current.get('page_index')
+        page_label = self._page_label(page_index)
+        logger.info('Startup session restore started: %s page (tab=%s).', page_label, current.get('tab_key'))
         try:
-            self._ensure_page_initialized(current.get('page_index'))
+            self._ensure_page_initialized(page_index)
             restore_fn = getattr(self, str(current.get('restore_method', '') or ''), None)
             if callable(restore_fn):
                 restore_fn(current.get('snapshot'))
+            logger.info('Startup session restore complete: %s page (tab=%s).', page_label, current.get('tab_key'))
         except Exception:
             logger.exception('Startup session restore failed for %s.', current.get('tab_key'))
+            self._startup_session_restore_failed = True
         if self._startup_session_restore_queue:
             self._startup_session_restore_pending = True
             QTimer.singleShot(self._STARTUP_SESSION_RESTORE_STEP_MS, self._run_startup_session_restore_step)
+        else:
+            failed = bool(getattr(self, '_startup_session_restore_failed', False))
+            self._startup_metrics_set_stage(
+                'session_restore',
+                status='failed' if failed else 'complete',
+                detail='Startup session restore finished with errors.' if failed else 'Startup session restore complete.',
+                count=getattr(self, '_startup_session_restore_total', 0),
+            )
 
     def _start_lazy_warmup(self) -> None:
         """Warm secondary pages one at a time after the window becomes interactive."""
+        if getattr(self, '_lazy_warmup_started', False) or getattr(self, '_lazy_warmup_finished', False):
+            return
+        if not getattr(self, '_startup_show_completed', False):
+            return
+        self._startup_progress_begin('lazy_warmup', 'Page warmup')
         queue = []
+        excluded_pages = {3, 12}
         for button in getattr(self, '_nav_buttons', []):
             page_index = self._page_index_for_button(button)
             if page_index in (None, 0) or self._page_initialized(index=page_index):
+                continue
+            if int(page_index) in excluded_pages:
+                continue
+            if page_index not in queue:
+                queue.append(page_index)
+        for page_index in getattr(self, '_lazy_page_registry', {}).keys():
+            if page_index in (None, 0) or self._page_initialized(index=page_index):
+                continue
+            if int(page_index) in excluded_pages:
                 continue
             if page_index not in queue:
                 queue.append(page_index)
@@ -182,22 +544,43 @@ class WindowLifecycleMixin:
             2: 20,
             4: 30,
             5: 40,
-            6: 50,
-            7: 60,
-            10: 70,
-            11: 80,
-            12: 90,
-            13: 100,
-            14: 110,
-            15: 120,
-            8: 140,
+            6: 45,
+            7: 50,
+            8: 60,
+            9: 65,
+            11: 70,
+            12: 80,
+            13: 90,
+            14: 100,
+            15: 110,
+            16: 120,
+            17: 130,
             3: 150,
         }
         queue.sort(key=lambda value: priority.get(int(value), 999))
         self._lazy_warmup_queue = queue
         timer = getattr(self, '_lazy_page_warmup_timer', None)
         if timer is None or not queue:
+            self._lazy_warmup_finished = True
+            self._startup_metrics_set_stage(
+                'page_warmup',
+                status='skipped',
+                detail='No lazy pages needed warmup.',
+                count=0,
+                duration_seconds=0.0,
+            )
+            self._startup_progress_finish_if_complete()
             return
+        self._lazy_warmup_started = True
+        self._lazy_warmup_total = len(queue)
+        self._lazy_warmup_failed = False
+        self._startup_metrics_set_stage(
+            'page_warmup',
+            status='running',
+            detail='Lazy page warmup queued.',
+            count=self._lazy_warmup_total,
+        )
+        logger.info('Lazy page warmup queued for %s page(s): %s.', len(queue), ', '.join(self._page_label(index) for index in queue))
         timer.start(getattr(self, '_LAZY_WARMUP_INITIAL_DELAY_MS', 500))
 
     def _warm_next_page(self) -> None:
@@ -207,20 +590,34 @@ class WindowLifecycleMixin:
             if self._page_initialized(index=page_index):
                 continue
             try:
+                logger.info('Lazy page warmup loading %s page (index %s).', self._page_label(page_index), page_index)
                 with self._startup_profiler_step(f'lazy_page_{int(page_index)}'):
-                    self._build_page_now(page_index)
+                    self._build_page_now(page_index, reason='lazy warmup')
             except Exception:
                 logger.exception('Lazy page warmup failed for page index %s.', page_index)
+                self._lazy_warmup_failed = True
+                self._startup_progress_complete_page(page_index, self._page_label(page_index))
             break
         timer = getattr(self, '_lazy_page_warmup_timer', None)
         if timer is not None and getattr(self, '_lazy_warmup_queue', []):
             timer.start(getattr(self, '_LAZY_WARMUP_STEP_MS', 75))
+        else:
+            self._lazy_warmup_finished = True
+            failed = bool(getattr(self, '_lazy_warmup_failed', False))
+            self._startup_metrics_set_stage(
+                'page_warmup',
+                status='failed' if failed else 'complete',
+                detail='Lazy page warmup finished with errors.' if failed else 'Lazy page warmup complete.',
+                count=getattr(self, '_lazy_warmup_total', 0),
+            )
+            self._startup_progress_finish_if_complete()
 
     def _ensure_page_initialized(self, index: Any) -> None:
         """Synchronously build a lazy page before it becomes visible."""
         if self._page_initialized(index=index):
             return
-        self._build_page_now(index)
+        logger.info('Page initialization required before show: %s (index %s).', self._page_label(index), index)
+        self._build_page_now(index, reason='before show')
 
     def switch_page(self, index: Any, *_: Any) -> None:
         """Switch page."""
@@ -228,6 +625,10 @@ class WindowLifecycleMixin:
             numeric_index = int(index)
         except (TypeError, ValueError):
             return
+        previous_index = int(self.stacked_widget.currentIndex()) if hasattr(self, 'stacked_widget') else 0
+        previous_label = self._page_label(previous_index)
+        target_label = self._page_label(numeric_index)
+        logger.info('Page navigation requested: %s (index %s) -> %s (index %s).', previous_label, previous_index, target_label, numeric_index)
         self._ensure_page_initialized(numeric_index)
         self.stacked_widget.setCurrentIndex(numeric_index)
         for i, page in self._pages.items():
@@ -235,6 +636,7 @@ class WindowLifecycleMixin:
             cb = page['on_show'] if i == numeric_index else page['on_hide']
             if cb:
                 cb()
+        logger.info('Page shown: %s (index %s).', target_label, numeric_index)
 
     def _refresh_main_tab_picker_items(self) -> None:
         """Sync the top-bar tab picker with the registered main navigation pages."""
@@ -294,6 +696,7 @@ class WindowLifecycleMixin:
         page_index = self._find_main_tab_match(label)
         if page_index is None:
             return
+        logger.info('Tab picker activated: %s -> %s page.', self._safe_log_text(label), self._page_label(page_index))
         self.switch_page(page_index)
         self._hide_tab_picker()
 
@@ -353,7 +756,23 @@ class WindowLifecycleMixin:
         while current is not None:
             if not isinstance(current, QWidget):
                 return None
+            if isinstance(current, QAbstractSpinBox):
+                if current.window() is not self:
+                    return None
+                if hasattr(current, 'isReadOnly') and current.isReadOnly():
+                    return None
+                return current
             if isinstance(current, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                if isinstance(current, QLineEdit):
+                    ancestor = current.parentWidget()
+                    while ancestor is not None and ancestor is not self and ancestor is not getattr(self, '_tab_picker_popup', None):
+                        if isinstance(ancestor, QAbstractSpinBox):
+                            if ancestor.window() is not self:
+                                return None
+                            if hasattr(ancestor, 'isReadOnly') and ancestor.isReadOnly():
+                                return None
+                            return ancestor
+                        ancestor = ancestor.parentWidget()
                 if current.window() is not self:
                     return None
                 if hasattr(current, 'isReadOnly') and current.isReadOnly():
@@ -401,7 +820,7 @@ class WindowLifecycleMixin:
         focus_widget = QApplication.focusWidget()
         if focus_widget is None:
             return True
-        blocked_types = (QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QTableWidget, QListWidget, QTabWidget)
+        blocked_types = (QLineEdit, QComboBox, QAbstractSpinBox, QTextEdit, QPlainTextEdit, QTableWidget, QListWidget, QTabWidget)
         widget = focus_widget
         while widget is not None:
             if isinstance(widget, blocked_types):
@@ -453,6 +872,7 @@ class WindowLifecycleMixin:
         if not hasattr(self, 'stacked_widget'):
             return
         current_index = int(self.stacked_widget.currentIndex())
+        logger.info('Manual refresh requested: %s page (index %s).', self._page_label(current_index), current_index)
         if current_index in (0, 4):
             if hasattr(self, 'refresh_data'):
                 self.refresh_data(force=True, reason='manual_refresh')
@@ -491,14 +911,18 @@ class WindowLifecycleMixin:
                 self._p8_request_refresh(force=True, status_text='Refreshing sector data...')
             return
         if current_index == 6:
+            if hasattr(self, '_p17_request_refresh'):
+                self._p17_request_refresh(force=True)
+            return
+        if current_index == 7:
             if hasattr(self, '_stocks_load_from_input'):
                 self._stocks_load_from_input(include_global_status=True, update_collection_info=True)
             return
-        if current_index == 7:
+        if current_index == 8:
             if hasattr(self, 'analyze_stock_p2'):
                 self.analyze_stock_p2(update_collection_info=True)
             return
-        if current_index == 8:
+        if current_index == 9:
             active_key = self._p10_active_subtab_key() if hasattr(self, '_p10_active_subtab_key') else 'chart'
             if active_key == 'compare':
                 if hasattr(self, '_p10_refresh_compare_view'):
@@ -515,37 +939,39 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p10_refresh_chart'):
                 self._p10_refresh_chart(force_refresh=True)
             return
-        if current_index == 9:
-            if hasattr(self, '_mc_refresh_all'):
-                self._mc_refresh_all()
-            return
-        if current_index == 10:
+        if current_index == 11:
             if hasattr(self, '_p5_load_active_subtab'):
                 self._p5_load_active_subtab()
             return
-        if current_index == 11:
+        if current_index == 12:
             if hasattr(self, '_p13_load_etf'):
                 self._p13_load_etf(update_collection_info=True)
             return
-        if current_index == 12:
+        if current_index == 13:
             if hasattr(self, '_p14_refresh'):
                 self._p14_refresh(force=True)
             return
-        if current_index == 13:
+        if current_index == 14:
             if hasattr(self, '_p15_refresh'):
                 self._p15_refresh(force=True)
             return
-        if current_index == 14:
+        if current_index == 15:
             if hasattr(self, '_p16_refresh'):
                 self._p16_refresh(force=False, auto_trigger=False)
             return
-        if current_index == 15:
+        if current_index == 16:
             if hasattr(self, '_refresh_run_on_startup_controls'):
                 self._refresh_run_on_startup_controls()
             if hasattr(self, '_refresh_settings_log_controls'):
                 self._refresh_settings_log_controls()
+            if hasattr(self, '_refresh_startup_performance_views'):
+                self._refresh_startup_performance_views()
             if hasattr(self, '_set_settings_status'):
                 self._set_settings_status('Settings panel refreshed.', 'positive')
+            return
+        if current_index == 17:
+            if hasattr(self, '_p18_roll_stock'):
+                self._p18_roll_stock(include_global_status=True)
 
     def _handle_tab_picker_shortcut(self) -> None:
         """Open or close the popup tab picker from the global shortcut."""
@@ -644,6 +1070,8 @@ class WindowLifecycleMixin:
             except Exception:
                 self._data_collection_ts = None
         self._refresh_data_collection_label()
+        if hasattr(self, '_refresh_data_health_views'):
+            self._refresh_data_health_views()
 
     def _refresh_data_collection_label(self) -> None:
         """Refresh the footer label that summarizes the latest collected data."""
@@ -679,6 +1107,16 @@ class WindowLifecycleMixin:
         pre_market_timer = getattr(self, '_p14_auto_refresh_timer', None)
         if pre_market_timer is not None:
             pre_market_timer.stop()
+        p6_fx_timer = getattr(self, '_p6_fx_refresh_timer', None)
+        if p6_fx_timer is not None:
+            p6_fx_timer.stop()
+        p6_goal_timer = getattr(self, '_p6_goal_anim_timer', None)
+        if p6_goal_timer is not None:
+            p6_goal_timer.stop()
+        p6_fx_thread = getattr(self, '_p6_fx_thread', None)
+        if p6_fx_thread is not None and p6_fx_thread.isRunning():
+            p6_fx_thread.quit()
+            p6_fx_thread.wait(3000)
         app = QApplication.instance()
         global_filter = getattr(self, '_global_input_exit_filter', None)
         if app is not None and global_filter is not None and getattr(self, '_app_keyboard_event_filter_installed', False):
@@ -688,10 +1126,12 @@ class WindowLifecycleMixin:
         main_entry['portfolio'] = self.tickers
         main_entry['chart_slots'] = self.chart_slots
         main_entry['portfolio_tracker'] = self.tracker_data
+        main_entry['cash_balance'] = getattr(self, 'cash_balance', main_entry.get('cash_balance', 0.0))
         active_entry = self._get_portfolio_entry(self.active_portfolio_id)
         active_entry['portfolio'] = getattr(self, 'active_tickers', active_entry.get('portfolio', []))
         active_entry['portfolio_tracker'] = getattr(self, 'active_tracker_data', active_entry.get('portfolio_tracker', {}))
         active_entry['options_tracker'] = self.options_data
+        active_entry['cash_balance'] = getattr(self, 'active_cash_balance', active_entry.get('cash_balance', 0.0))
         self._persist_all_portfolios(immediate=True)
         if hasattr(self, '_dashboard_save_state'):
             self._dashboard_save_state()
@@ -699,6 +1139,8 @@ class WindowLifecycleMixin:
             self._persist_dashboard_state(immediate=True)
         if self._page_initialized(page_attr='page12') and hasattr(self, '_stocks_save_session_snapshot'):
             self._stocks_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page18') and hasattr(self, '_p18_save_session_snapshot'):
+            self._p18_save_session_snapshot(immediate=True)
         if self._page_initialized(page_attr='page2') and hasattr(self, '_p2_save_session_snapshot'):
             self._p2_save_session_snapshot(immediate=True)
         if self._page_initialized(page_attr='page5') and hasattr(self, '_p5_save_session_snapshot'):
@@ -709,6 +1151,8 @@ class WindowLifecycleMixin:
             self._p16_save_session_snapshot(immediate=True)
         if hasattr(self, '_persist_tab_session_cache'):
             self._persist_tab_session_cache(immediate=True)
+        if self._page_initialized(page_attr='page6') and hasattr(self, '_p6_on_goal_controls_changed'):
+            self._p6_on_goal_controls_changed()
         save_networth_data(self.networth_data)
         executor = getattr(self, '_options_fetch_executor', None)
         if executor is not None:

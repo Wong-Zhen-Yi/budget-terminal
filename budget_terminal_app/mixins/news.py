@@ -11,6 +11,17 @@ class NewsMixin:
         """Return newest articles first."""
         return sorted(articles, key=lambda article: article.get('_ts', 0), reverse=True)
 
+    def _sort_articles_for_news_table(self, articles: Any) -> Any:
+        """Return scored trader news by signal rank, otherwise newest first."""
+        article_list = list(articles or [])
+        if any(isinstance(article, dict) and '_trader_score' in article for article in article_list):
+            return sorted(
+                article_list,
+                key=lambda article: (article.get('_trader_score', 0), article.get('_ts', 0)),
+                reverse=True,
+            )
+        return self._sort_articles_by_newest(article_list)
+
     def _make_news_table(self, on_click: Any) -> Any:
         """Factory: create a standard 4-column news QTableWidget."""
         table = QTableWidget(0, 4)
@@ -61,14 +72,14 @@ class NewsMixin:
         macro_layout.addWidget(self.p3_export_macro_news_btn)
         panels_row.addWidget(macro_box, 1)
 
-        other_box = QGroupBox('Other')
+        other_box = QGroupBox('All News')
         self.set_theme_role(other_box, 'panel')
         other_layout = QVBoxLayout(other_box)
         other_layout.setContentsMargins(4, 8, 4, 4)
         other_layout.setSpacing(6)
         self.p3_other_table = self._make_news_table(self._open_news_link_table)
         other_layout.addWidget(self.p3_other_table, 1)
-        self.p3_export_other_news_btn = QPushButton('Export Other News')
+        self.p3_export_other_news_btn = QPushButton('Export All News')
         self.set_theme_variant(self.p3_export_other_news_btn, 'positive')
         self.p3_export_other_news_btn.clicked.connect(self._p3_export_other_news)
         other_layout.addWidget(self.p3_export_other_news_btn)
@@ -140,13 +151,13 @@ class NewsMixin:
         self._p3_export_news_section('macro', 'Market & Macro News')
 
     def _p3_export_other_news(self) -> None:
-        """Export the other news section to the clipboard."""
-        self._p3_export_news_section('other', 'Other News')
+        """Export the all news section to the clipboard."""
+        self._p3_export_news_section('other', 'All News')
 
     def _populate_news_table(self, table: Any, articles: Any) -> None:
         """Populate one of the News page tables."""
         table.setRowCount(0)
-        for article in self._sort_articles_by_newest(articles):
+        for article in self._sort_articles_for_news_table(articles):
             row = table.rowCount()
             table.insertRow(row)
             headline = article.get('title', 'N/A')
@@ -177,15 +188,12 @@ class NewsMixin:
         news = data.get('news', [])
         portfolio_news = self._sort_articles_by_newest([article for article in news if article.get('category') == 'portfolio'])
         macro_news = self._sort_articles_by_newest([article for article in news if article.get('category') == 'macro'])
-        other_news = self._sort_articles_by_newest([
-            article for article in news
-            if article.get('category') not in ('portfolio', 'macro')
-        ])
+        all_news = self._sort_articles_for_news_table([article for article in news if article.get('category') == 'other'])
         self._p3_loaded_news = {
             'portfolio': [dict(article) for article in portfolio_news],
             'macro': [dict(article) for article in macro_news],
-            'other': [dict(article) for article in other_news],
+            'other': [dict(article) for article in all_news],
         }
         self._populate_news_table(self.p3_portfolio_table, portfolio_news)
         self._populate_news_table(self.p3_macro_table, macro_news)
-        self._populate_news_table(self.p3_other_table, other_news)
+        self._populate_news_table(self.p3_other_table, all_news)

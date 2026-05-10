@@ -2,23 +2,35 @@ from __future__ import annotations
 import time
 from typing import Any
 from ..compat import *
+from budget_terminal_app.services.options_data import OptionsMarketDataService
 
 class OptionsFetchMixin:
+    def _get_options_data_service(self) -> OptionsMarketDataService:
+        """Return the shared options market-data service for this window session."""
+        service = getattr(self, '_options_data_service', None)
+        cache_manager = self._get_cache_manager()
+        if service is None or getattr(service, 'cache_manager', None) is not cache_manager:
+            service = OptionsMarketDataService(
+                cache_manager,
+                expiry_memory_cache=getattr(self, '_options_expiry_memory_cache', {}),
+                chain_memory_cache=getattr(self, '_option_chain_memory_cache', {}),
+                expiry_memory_ttl_seconds=getattr(self, '_options_expiry_memory_cache_ttl', 900.0),
+                chain_memory_ttl_seconds=getattr(self, '_option_chain_memory_cache_ttl', 60.0),
+            )
+            self._options_data_service = service
+        return service
+
     def _get_cached_options_expiries(self, ticker: Any) -> Any:
         """Return cached expiry dates from memory or SQLite before hitting the network."""
         ticker_key = str(ticker or '').strip().upper()
         if not ticker_key:
             return None
-        now = time.time()
-        cached = getattr(self, '_options_expiry_memory_cache', {}).get(ticker_key)
-        if cached and (now - cached[0]) < getattr(self, '_options_expiry_memory_cache_ttl', 900.0):
-            return list(cached[1])
-        cache = self._get_cache_manager()
-        expiries = cache.get_options_expiries(ticker_key)
-        if expiries:
-            self._options_expiry_memory_cache[ticker_key] = (now, list(expiries))
-            return list(expiries)
-        return None
+        payload = self._get_options_data_service().fetch_expiries_payload(ticker_key)
+        self._last_options_expiry_payload = payload
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Options expiries', payload, symbols=[ticker_key])
+        expiries = payload.get('expiries') if isinstance(payload, dict) else None
+        return list(expiries) if expiries else None
 
     def _save_cached_options_expiries(self, ticker: Any, expiries: Any) -> None:
         """Persist expiry dates into the short-lived memory cache and SQLite."""
@@ -35,26 +47,13 @@ class OptionsFetchMixin:
         expiry_key = str(expiry or '').strip()
         if not ticker_key or not expiry_key:
             return None
-        cache_key = (ticker_key, expiry_key)
-        now = time.time()
-        cached = getattr(self, '_option_chain_memory_cache', {}).get(cache_key)
-        if cached and (now - cached[0]) < getattr(self, '_option_chain_memory_cache_ttl', 60.0):
-            return cached[1].copy()
-        cache = self._get_cache_manager()
-        chain_df = cache.get_options_chain(ticker_key, expiry_key)
-        if chain_df is None:
-            with YF_LOCK:
-                chain = yf.Ticker(ticker_key).option_chain(expiry_key)
-            calls = chain.calls.copy()
-            puts = chain.puts.copy()
-            calls['type'] = 'Call'
-            puts['type'] = 'Put'
-            chain_df = pd.concat([calls, puts], ignore_index=True)
-            if chain_df is not None and not chain_df.empty:
-                cache.save_options_chain(ticker_key, expiry_key, chain_df)
-        if chain_df is None:
+        payload = self._get_options_data_service().fetch_chain_payload(ticker_key, expiry_key)
+        self._last_option_chain_payload = payload
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Options chain', payload, symbols=[ticker_key])
+        chain_df = payload.get('chain') if isinstance(payload, dict) else None
+        if chain_df is None or chain_df.empty:
             return None
-        self._option_chain_memory_cache[cache_key] = (now, chain_df.copy())
         return chain_df.copy()
 
     def _submit_options_fetch(self, fn: Any) -> None:
@@ -119,6 +118,8 @@ class OptionsFetchMixin:
         self.options_data[row]['current_price'] = data['price']
         self.options_data[row]['iv'] = data['iv']
         self.options_data[row]['strike'] = data['strike']
+        self.options_data[row]['volume'] = data.get('volume', 0.0)
+        self.options_data[row]['open_interest'] = data.get('open_interest', 0.0)
         if data['delta'] is not None:
             self.options_data[row]['delta'] = data['delta']
         self._save_active_options_data()
@@ -130,11 +131,26 @@ class OptionsFetchMixin:
             t.item(row, 7).setText(f"{data['price']:.2f}")
             t.item(row, 7).setForeground(normal_color)
         if t.item(row, 8):
-            t.item(row, 8).setText(f"{data['iv'] * 100:.1f}%")
+            t.item(row, 8).setText(self._format_option_count(data.get('volume', 0.0)))
             t.item(row, 8).setForeground(normal_color)
-        if data['delta'] is not None and t.item(row, 9):
-            t.item(row, 9).setText(f"{data['delta']:.3f}")
+        if t.item(row, 9):
+            t.item(row, 9).setText(self._format_option_count(data.get('open_interest', 0.0)))
             t.item(row, 9).setForeground(normal_color)
+        if t.item(row, 10):
+            t.item(row, 10).setText(f"{data['iv'] * 100:.1f}%")
+            t.item(row, 10).setForeground(normal_color)
+
+    def _clean_option_number(self, value: Any, default: float=0.0) -> float:
+        """Return a finite float from Yahoo option-chain values."""
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if math.isnan(number) or math.isinf(number):
+            return default
+        return number
 
     def _fetch_option_expiries_sync(self, row: Any, ticker: Any) -> None:
         """Synchronous version of expiry fetch for use within a worker thread."""
@@ -143,17 +159,64 @@ class OptionsFetchMixin:
             row_id = ''
             if 0 <= row < len(self.options_data):
                 row_id = str(self.options_data[row].get('row_id', '') or '').strip()
-            exps = self._get_cached_options_expiries(ticker)
-            if exps is None:
-                with YF_LOCK:
-                    t_obj = yf.Ticker(ticker)
-                    exps = t_obj.options
-                if exps:
-                    self._save_cached_options_expiries(ticker, exps)
+            exps = self._fetch_option_expiries_list_sync(ticker)
             if exps:
                 self._invoke_main.emit(lambda: self._set_expiry_combo(row_id, ticker, list(exps), portfolio_id))
         except Exception as e:
             logger.error(f'Sync expiry fetch failed for {ticker}: {e}')
+            if hasattr(self, '_record_data_health_exception'):
+                self._record_data_health_exception('Options expiries', e, symbols=[ticker])
+
+    def _fetch_option_expiries_list_sync(self, ticker: Any) -> list[str]:
+        """Fetch option expiries from explicit input without touching Qt widgets."""
+        ticker_key = str(ticker or '').strip().upper()
+        if not ticker_key:
+            return []
+        payload = self._get_options_data_service().fetch_expiries_payload(ticker_key)
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Options expiries', payload, symbols=[ticker_key])
+        expiries = payload.get('expiries') if isinstance(payload, dict) else None
+        return [str(expiry) for expiry in list(expiries or []) if expiry]
+
+    def _fetch_option_quote_for_values_sync(
+        self,
+        ticker: Any,
+        expiry: Any,
+        strike: Any,
+        strategy: Any,
+        *,
+        underlying_price: Any=0.0,
+    ) -> dict[str, Any]:
+        """Fetch one option quote from explicit values without reading UI state."""
+        ticker_key = str(ticker or '').strip().upper()
+        expiry_key = str(expiry or '').strip()
+        if not ticker_key:
+            return {'error': 'Ticker Err'}
+        if not expiry_key:
+            return {'error': 'Incomplete Data'}
+        try:
+            data_package = self._get_options_data_service().fetch_option_quote_payload(
+                ticker_key,
+                expiry_key,
+                strike,
+                strategy,
+                underlying_price=underlying_price,
+            )
+            if hasattr(self, '_record_data_health_payload'):
+                self._record_data_health_payload('Option quote', data_package, symbols=[ticker_key])
+            return data_package
+        except Exception as e:
+            logger.debug(f'Sync price fetch failed for {ticker_key}: {e}')
+            if hasattr(self, '_record_data_health_exception'):
+                self._record_data_health_exception('Option quote', e, symbols=[ticker_key])
+            err_msg = str(e)
+            if 'expired' in err_msg.lower():
+                err_msg = 'Expired'
+            elif 'not found' in err_msg.lower():
+                err_msg = 'Ticker Err'
+            else:
+                err_msg = 'Fetch Err'
+            return {'error': err_msg}
 
     def _fetch_single_option_price_sync(self, row: Any) -> None:
         """Synchronous version of price fetch for use within a worker thread."""
@@ -172,58 +235,17 @@ class OptionsFetchMixin:
             data_package = {'error': 'Incomplete Data'}
             self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
             return
-        try:
-            chain_df = self._get_cached_option_chain(ticker, expiry)
-            if chain_df is None or chain_df.empty:
-                data_package = {'error': 'No Data'}
-                self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
-                return
-            is_call = 'Call' in strategy or 'Calls' == strategy
-            option_type = 'Call' if is_call else 'Put'
-            df = chain_df[chain_df.get('type', '') == option_type].copy() if 'type' in chain_df.columns else chain_df
-            if df.empty:
-                data_package = {'error': 'No Data'}
-                self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
-                return
-            if strike <= 0:
-                underlying_price = 0.0
-                if self.last_data and 'portfolio' in self.last_data:
-                    underlying_price = float(self.last_data['portfolio'].get(ticker, {}).get('price', 0.0) or 0.0)
-                if underlying_price > 0:
-                    diffs = (df['strike'] - underlying_price).abs()
-                else:
-                    diffs = (df['strike']).abs()
-            else:
-                diffs = (df['strike'] - strike).abs()
-            best_match_idx = diffs.argsort()[:1]
-            match = df.iloc[best_match_idx]
-            if not match.empty:
-                m = match.iloc[0]
-                actual_strike = float(m.get('strike', 0))
-                if strike > 0 and abs(actual_strike - strike) > 0.01:
-                    logger.debug(f'Closest strike for {ticker} {expiry} {strike} is {actual_strike}')
-                bid = float(m.get('bid', 0))
-                ask = float(m.get('ask', 0))
-                last = float(m.get('lastPrice', 0))
-                new_price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
-                iv = float(m.get('impliedVolatility', 0))
-                delta = float(m.get('delta', 0)) if 'delta' in m else None
-                data_package = {'price': new_price, 'iv': iv, 'delta': delta, 'strike': actual_strike}
-                self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
-            else:
-                data_package = {'error': 'Strike Not Found'}
-                self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
-        except Exception as e:
-            logger.debug(f'Sync price fetch failed for {ticker}: {e}')
-            err_msg = str(e)
-            if 'expired' in err_msg.lower():
-                err_msg = 'Expired'
-            elif 'not found' in err_msg.lower():
-                err_msg = 'Ticker Err'
-            else:
-                err_msg = 'Fetch Err'
-            data_package = {'error': err_msg}
-            self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
+        underlying_price = 0.0
+        if self.last_data and 'portfolio' in self.last_data:
+            underlying_price = float(self.last_data['portfolio'].get(ticker, {}).get('price', 0.0) or 0.0)
+        data_package = self._fetch_option_quote_for_values_sync(
+            ticker,
+            expiry,
+            strike,
+            strategy,
+            underlying_price=underlying_price,
+        )
+        self._invoke_main.emit(lambda: self._update_option_price_ui(row_id, ticker, data_package, portfolio_id))
 
     def _fetch_single_option_price(self, row: Any) -> None:
         """Background fetch of the current price for a single option row."""
@@ -248,6 +270,9 @@ class OptionsFetchMixin:
             if t.item(row, 9):
                 t.item(row, 9).setText('N/A')
                 t.item(row, 9).setForeground(self.theme_qcolor('text_muted'))
+            if t.item(row, 10):
+                t.item(row, 10).setText('N/A')
+                t.item(row, 10).setForeground(self.theme_qcolor('text_muted'))
         else:
             self._apply_option_market_data(row, data)
         t.blockSignals(False)
@@ -278,6 +303,8 @@ class OptionsFetchMixin:
                     self._invoke_main.emit(lambda: self._reset_expiry_placeholder(row_id, ticker_clean, 'N/A', portfolio_id))
             except Exception as ex:
                 logger.error(f'Options expiry fetch failed for {ticker}: {ex}', exc_info=True)
+                if hasattr(self, '_record_data_health_exception'):
+                    self._record_data_health_exception('Options expiries', ex, symbols=[ticker])
                 self._invoke_main.emit(lambda: self._reset_expiry_placeholder(row_id, ticker, 'N/A', portfolio_id))
         self._submit_options_fetch(_run)
 
@@ -296,7 +323,16 @@ class OptionsFetchMixin:
         t.setItem(row, 2, item)
         t.blockSignals(False)
 
-    def _set_expiry_combo(self, row_id: Any, ticker: Any, expiries: Any, portfolio_id: Any=None) -> None:
+    def _set_expiry_combo(
+        self,
+        row_id: Any,
+        ticker: Any,
+        expiries: Any,
+        portfolio_id: Any=None,
+        *,
+        selected_expiry: Any=None,
+        fetch_price: bool=True,
+    ) -> None:
         """Replace the expiry cell with a QComboBox populated with fetched dates + DTE."""
         row = self._resolve_active_option_row_by_id(row_id, ticker, portfolio_id)
         if row is None:
@@ -306,7 +342,7 @@ class OptionsFetchMixin:
         if not expiries:
             self._reset_expiry_placeholder(row_id, ticker, 'N/A', portfolio_id)
             return
-        saved = self.options_data[row].get('expiry', '') if row < len(self.options_data) else ''
+        saved = str(selected_expiry or '').strip() or (self.options_data[row].get('expiry', '') if row < len(self.options_data) else '')
         today = datetime.date.today()
         combo = QComboBox()
         combo.setMaxVisibleItems(12)
@@ -321,6 +357,9 @@ class OptionsFetchMixin:
         combo.setMinimumWidth(130)
         if saved in expiries:
             combo.setCurrentIndex(expiries.index(saved))
+            if row < len(self.options_data) and self.options_data[row].get('expiry') != saved:
+                self.options_data[row]['expiry'] = saved
+                self._save_active_options_data()
         elif row < len(self.options_data):
             self.options_data[row]['expiry'] = expiries[0]
             if not self.options_data[row].get('open_date'):
@@ -332,4 +371,5 @@ class OptionsFetchMixin:
         t.setCellWidget(row, 2, combo)
         t.blockSignals(False)
         self._recalc_options_row(row)
-        self._fetch_single_option_price(row)
+        if fetch_price:
+            self._fetch_single_option_price(row)

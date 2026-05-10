@@ -2,6 +2,14 @@ from __future__ import annotations
 import math
 from typing import Any
 from ..compat import *
+from budget_terminal_app.data_service.results import (
+    attach_market_data_result,
+    data_sources_from_meta,
+    describe_market_data_status,
+    market_data_errors,
+    market_data_meta,
+)
+from budget_terminal_app.services.chart_data import ChartDataService
 
 
 P10_TIMEFRAME_OPTIONS = [
@@ -44,124 +52,53 @@ P10_CACHE_PERIOD_DAY_MAP = {
 
 
 class ChartsPageMixin:
+    def _get_chart_data_service(self) -> ChartDataService:
+        """Return the shared chart data service for this window session."""
+        service = getattr(self, '_chart_data_service', None)
+        cache_manager = self._get_cache_manager()
+        if service is None or getattr(service, 'cache_manager', None) is not cache_manager:
+            service = ChartDataService(cache_manager=cache_manager)
+            self._chart_data_service = service
+        return service
 
     def _chart_required_span_days(self, period: Any) -> float | None:
         """Convert one yfinance period string into approximate calendar days."""
-        text = str(period or '').strip().lower()
-        if not text:
-            return None
-        if text == 'max':
-            return None
-        for suffix, multiplier in P10_CACHE_PERIOD_DAY_MAP.items():
-            if text.endswith(suffix):
-                number_text = text[:-len(suffix)].strip()
-                try:
-                    return float(number_text) * multiplier
-                except Exception:
-                    return None
-        return None
+        return self._get_chart_data_service().required_span_days(period)
 
     def _chart_cache_covers_period(self, df: Any, period: Any) -> bool:
         """Return whether one cached OHLCV frame is long enough for the requested period."""
-        if df is None or getattr(df, 'empty', True):
-            return False
-        required_days = self._chart_required_span_days(period)
-        if required_days is None:
-            return True
-        try:
-            index = pd.DatetimeIndex(pd.to_datetime(df.index))
-        except Exception:
-            return False
-        if len(index) < 2:
-            return False
-        if getattr(index, 'tz', None) is not None:
-            index = index.tz_localize(None)
-        coverage_days = max(0.0, (index.max() - index.min()).total_seconds() / 86400.0)
-        min_acceptable_days = max(required_days - 45.0, required_days * 0.85)
-        return coverage_days >= min_acceptable_days
+        return self._get_chart_data_service().cache_covers_period(df, period)
 
     def _p10_normalize_datetime_index(self, values: Any) -> Any:
         """Normalize chart timestamps for safe asof merges across pandas resolutions."""
-        index = pd.DatetimeIndex(pd.to_datetime(values))
-        if getattr(index, 'tz', None) is not None:
-            index = index.tz_localize(None)
-        return pd.DatetimeIndex(index.astype('datetime64[ns]'))
+        return self._get_chart_data_service().normalize_datetime_index(values)
 
     def _chart_extract_symbol_frame(self, symbol: Any, df: Any) -> Any:
         """Select one symbol frame from a single- or multi-ticker yfinance result."""
-        if df is None or getattr(df, 'empty', True):
-            return pd.DataFrame()
-        frame = df.copy()
-        symbol_text = str(symbol or '').upper().strip()
-        if not isinstance(frame.columns, pd.MultiIndex):
-            return frame
-        level0 = [str(value).upper().strip() for value in frame.columns.get_level_values(0)]
-        level1 = [str(value).upper().strip() for value in frame.columns.get_level_values(1)]
-        if symbol_text and symbol_text in level0:
-            mask = [value == symbol_text for value in level0]
-            frame = frame.loc[:, mask].copy()
-            frame.columns = frame.columns.get_level_values(1)
-            return frame
-        if symbol_text and symbol_text in level1:
-            mask = [value == symbol_text for value in level1]
-            frame = frame.loc[:, mask].copy()
-            frame.columns = frame.columns.get_level_values(0)
-            return frame
-        frame.columns = frame.columns.get_level_values(0)
-        return frame
+        return self._get_chart_data_service().extract_symbol_frame(symbol, df)
 
     def _chart_normalize_frame(self, symbol: Any, df: Any) -> Any:
         """Normalize raw yfinance OHLCV data into one chart-ready frame."""
-        frame = self._chart_extract_symbol_frame(symbol, df)
-        if frame is None or getattr(frame, 'empty', True):
-            return pd.DataFrame()
-        rename_map = {}
-        for column in list(frame.columns):
-            text = str(column).strip().lower()
-            if text == 'open':
-                rename_map[column] = 'Open'
-            elif text == 'high':
-                rename_map[column] = 'High'
-            elif text == 'low':
-                rename_map[column] = 'Low'
-            elif text == 'close':
-                rename_map[column] = 'Close'
-            elif text == 'volume':
-                rename_map[column] = 'Volume'
-        if rename_map:
-            frame = frame.rename(columns=rename_map)
-        if not {'Open', 'High', 'Low', 'Close'}.issubset(frame.columns):
-            return pd.DataFrame()
-        if 'Volume' not in frame.columns:
-            frame['Volume'] = 0.0
-        frame = frame.loc[:, [column for column in ('Open', 'High', 'Low', 'Close', 'Volume') if column in frame.columns]].copy()
-        frame.index = self._p10_normalize_datetime_index(frame.index)
-        frame = frame[~frame.index.duplicated(keep='last')].sort_index()
-        frame = frame.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
-        return frame
+        return self._get_chart_data_service().normalize_frame(symbol, df)
 
     def _chart_load_cached_frame(self, symbol: Any, *, period: Any, interval: Any) -> Any:
         """Return one normalized cached frame when it is present and long enough."""
-        cache = self._get_cache_manager()
-        frame = self._chart_normalize_frame(symbol, cache.get_data(symbol, interval))
-        if frame is None or frame.empty:
-            return None
-        if interval in ('1d', '1wk', '1mo') and (not self._chart_cache_covers_period(frame, period)):
-            return None
+        frame, _cache_meta = self._get_chart_data_service().load_cached_frame(symbol, period=period, interval=interval)
         return frame
 
     def _chart_fetch_base_frame(self, symbol: Any, *, period: Any, interval: Any, force_refresh: bool=False) -> Any:
         """Fetch one normalized OHLCV frame, optionally bypassing cache."""
-        symbol_text = str(symbol or '').upper().strip()
-        cache = self._get_cache_manager()
-        frame = None if force_refresh else self._chart_load_cached_frame(symbol_text, period=period, interval=interval)
+        payload = self._get_chart_data_service().fetch_base_frame_payload(
+            symbol,
+            period=period,
+            interval=interval,
+            force_refresh=force_refresh,
+        )
+        self._p10_last_chart_fetch_payload = payload
+        frame = payload.get('df') if isinstance(payload, dict) else None
         if frame is None or frame.empty:
-            raw_df = yf.download(symbol_text, period=period, interval=interval, progress=False, auto_adjust=False)
-            frame = self._chart_normalize_frame(symbol_text, raw_df)
-            if frame is not None and not frame.empty and interval in ('1d', '1wk', '1mo'):
-                cache.save_data(symbol_text, interval, frame)
-        if frame is None or frame.empty:
-            raise ValueError(f'No chart data returned for {symbol_text}.')
+            meta = market_data_meta(payload)
+            raise ValueError(meta.get('failure_reason') or f'No chart data returned for {symbol}.')
         return frame
 
     def _p10_on_show(self) -> None:
@@ -1040,30 +977,9 @@ class ChartsPageMixin:
 
     def _p10_fetch_compare_frames_batch(self, symbols: Any, *, period: Any, interval: Any) -> tuple[dict[str, Any], list[str]]:
         """Fetch several compare frames with one yfinance batch request."""
-        batch_symbols = [str(symbol or '').upper().strip() for symbol in list(symbols or []) if str(symbol or '').upper().strip()]
-        if not batch_symbols:
-            return {}, []
-        raw_batch = yf.download(
-            batch_symbols,
-            period=period,
-            interval=interval,
-            group_by='ticker',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-        )
-        frame_map = {}
-        missing = []
-        cache = self._get_cache_manager()
-        for symbol in batch_symbols:
-            frame = self._chart_normalize_frame(symbol, raw_batch)
-            if frame is None or frame.empty:
-                missing.append(symbol)
-                continue
-            frame_map[symbol] = frame
-            if interval in ('1d', '1wk', '1mo'):
-                cache.save_data(symbol, interval, frame)
-        return frame_map, missing
+        payload = self._get_chart_data_service().fetch_compare_frames_batch_payload(symbols, period=period, interval=interval)
+        self._p10_last_compare_batch_payload = payload
+        return dict(payload.get('frames', {})), list(payload.get('missing', []))
 
     def _p10_add_compare_symbol(self) -> None:
         """Add one ticker to the saved compare list."""
@@ -2246,6 +2162,16 @@ class ChartsPageMixin:
             return
         errors = list(payload.get('errors', [])) if isinstance(payload, dict) else []
         symbols = list(payload.get('symbols', [])) if isinstance(payload, dict) else []
+        if errors and hasattr(self, '_record_data_health_event'):
+            self._record_data_health_event(
+                'Compare charts',
+                severity='warning',
+                source='yfinance/cache',
+                freshness='partial',
+                reason=f'{len(errors)} compare ticker(s) failed.',
+                symbols=symbols,
+                errors=errors,
+            )
         interval_label = str(payload.get('interval_label', self.p10_compare_interval_label) or self.p10_compare_interval_label) if isinstance(payload, dict) else self.p10_compare_interval_label
         range_label = str(payload.get('range_label', self.p10_compare_range_label) or self.p10_compare_range_label) if isinstance(payload, dict) else self.p10_compare_range_label
         series_map = dict(payload.get('series_map', {})) if isinstance(payload, dict) else {}
@@ -2432,6 +2358,7 @@ class ChartsPageMixin:
     def _chart_fetch_payload(self, symbol: Any, *, period: Any, interval: Any, timeframe_label: Any, include_rsi: bool=True, include_ma200: bool=True, force_refresh: bool=False) -> Any:
         """Fetch and normalize a single-chart dataset for any page."""
         df = self._chart_fetch_base_frame(symbol, period=period, interval=interval, force_refresh=force_refresh)
+        base_payload = getattr(self, '_p10_last_chart_fetch_payload', {})
         ma200_series = self._p10_fetch_daily_ma200(symbol, df) if include_ma200 else None
         rsi_series = self._p10_calculate_rsi(df['Close']) if include_rsi else None
         rsi_ma_series = self._p10_calculate_rsi_ma(rsi_series) if include_rsi else None
@@ -2440,7 +2367,7 @@ class ChartsPageMixin:
         last_close = float(latest['Close'])
         change_value = last_close - prev_close
         change_pct = change_value / prev_close * 100 if prev_close else 0.0
-        return {
+        payload = {
             'symbol': symbol,
             'timeframe_label': timeframe_label,
             'period': period,
@@ -2459,6 +2386,11 @@ class ChartsPageMixin:
             'rsi_ma': rsi_ma_series,
             'ma200': ma200_series,
         }
+        return attach_market_data_result(
+            payload,
+            meta=market_data_meta(base_payload),
+            errors=market_data_errors(base_payload),
+        )
 
     def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any, *, force_refresh: bool=False) -> Any:
         """Fetch a single chart dataset plus summary stats."""
@@ -2539,35 +2471,8 @@ class ChartsPageMixin:
 
     def _p10_fetch_daily_ma200(self, symbol: Any, source_df: Any) -> Any:
         """Build a 200-day moving average aligned to the active chart index."""
-        cache = self._get_cache_manager()
-        daily_df = cache.get_data(symbol, '1d')
-        if daily_df is None or daily_df.empty:
-            daily_df = yf.download(symbol, period='5y', interval='1d', progress=False, auto_adjust=False)
-            if daily_df is not None and not daily_df.empty:
-                cache.save_data(symbol, '1d', daily_df)
-        if daily_df is None or daily_df.empty:
-            return pd.Series(index=source_df.index, dtype=float)
-        if isinstance(daily_df.columns, pd.MultiIndex):
-            daily_df.columns = daily_df.columns.get_level_values(0)
-        rename_map = {}
-        for column in list(daily_df.columns):
-            if str(column).strip().lower() == 'close':
-                rename_map[column] = 'Close'
-        if rename_map:
-            daily_df = daily_df.rename(columns=rename_map)
-        daily_df = daily_df.dropna(subset=['Close']).copy()
-        if daily_df.empty:
-            return pd.Series(index=source_df.index, dtype=float)
-        daily_ma = pd.Series(daily_df['Close']).astype(float).rolling(200, min_periods=200).mean().dropna()
-        if daily_ma.empty:
-            return pd.Series(index=source_df.index, dtype=float)
-        source_index = self._p10_normalize_datetime_index(source_df.index)
-        daily_index = self._p10_normalize_datetime_index(daily_ma.index)
-        source_frame = pd.DataFrame(index=source_index).sort_index()
-        daily_frame = pd.DataFrame({'ma200': list(daily_ma.values)}, index=daily_index).sort_index()
-        aligned = pd.merge_asof(source_frame, daily_frame, left_index=True, right_index=True, direction='backward')['ma200']
-        aligned.index = source_df.index
-        return aligned
+        payload = self._get_chart_data_service().fetch_daily_ma200_payload(symbol, source_df)
+        return payload.get('series') if isinstance(payload, dict) else pd.Series(index=source_df.index, dtype=float)
 
     def _p10_portfolio_avg_price(self, symbol: Any) -> Any:
         """Return the user's tracked average purchase price for one symbol."""
@@ -2649,6 +2554,12 @@ class ChartsPageMixin:
         """Render fetched chart payload if it is the latest request."""
         if request_id != self._p10_active_request:
             return
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload(
+                'Charts',
+                payload,
+                symbols=[payload.get('symbol')] if isinstance(payload, dict) else None,
+            )
         df = payload['df']
         symbol = payload['symbol']
         interval = payload['interval']
@@ -2678,8 +2589,9 @@ class ChartsPageMixin:
         self._p10_rebuild_watchlists()
         self._p10_pending_x_range = None
         self._p10_update_indicator_panel_labels()
-        self._set_data_collection_info(['yfinance'])
-        self._p10_set_status(f'Loaded {symbol} {self.p10_timeframe_label}.', 'positive')
+        self._set_data_collection_info(data_sources_from_meta(payload, 'yfinance'))
+        status_text, status_type = describe_market_data_status(payload, f'Loaded {symbol} {self.p10_timeframe_label}.')
+        self._p10_set_status(status_text, status_type)
 
     def _p10_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, rsi_ma_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main candlestick chart and lower indicator panels."""
@@ -2790,6 +2702,8 @@ class ChartsPageMixin:
         """Show a chart fetch error if it belongs to the latest request."""
         if request_id != self._p10_active_request:
             return
+        if hasattr(self, '_record_data_health_exception'):
+            self._record_data_health_exception('Charts', message, symbols=[getattr(self, 'p10_symbol', '')])
         self._p10_chart_dirty = True
         self.p10_load_btn.setEnabled(True)
         self._p10_set_status(f'Chart load failed: {message}', 'negative')

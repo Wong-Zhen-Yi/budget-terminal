@@ -37,7 +37,7 @@ That script will:
 
 1. Activate `.venv`
 2. Install `requirements.txt` and `pyinstaller`
-3. Remove old `build\` and `dist\` folders
+3. Remove old `build\` output and only the current-version `dist\` target
 4. Build the executable with `packaging\budget_terminal.spec`
 5. Create the release zip in `release\`
 

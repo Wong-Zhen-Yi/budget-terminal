@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -9,18 +10,21 @@ if __package__ in {None, ''}:
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
     from budget_terminal_app import __version__ as APP_VERSION
-    from budget_terminal_app.dependencies import *
+    from budget_terminal_app.dependencies import datetime, json, logger, math, pd
     from budget_terminal_app.paths import legacy_documents_user_data_path, user_data_path
+    from budget_terminal_app.persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
 else:
     from . import __version__ as APP_VERSION
-    from .dependencies import *
+    from .dependencies import datetime, json, logger, math, pd
     from .paths import legacy_documents_user_data_path, user_data_path
+    from .persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
-USER_DATA_BACKUP_VERSION = 8
+USER_DATA_BACKUP_VERSION = USER_DATA_SCHEMA_VERSION
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 ROLLBACK_BACKUPS_DIR = user_data_path('backups', 'rollbacks')
+CORRUPT_USER_DATA_BACKUPS_DIR = user_data_path('backups', 'corrupt')
 LEGACY_NOTES_IMAGES_DIR = user_data_path('notes_images')
 DEFAULT_CHART_PAGE_SETTINGS = {
     'symbol': 'SPY',
@@ -64,21 +68,60 @@ PORTFOLIO_METRICS_LOOKBACK_CHOICES = ('1y', '3y', '5y', 'max')
 
 def _read_json(path: Any, default: Any) -> Any:
     """Read JSON from disk, returning a fallback on failure."""
+    target = Path(path)
     try:
-        with Path(path).open() as f:
+        with target.open(encoding='utf-8') as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
         return default
+    except json.JSONDecodeError as exc:
+        backup_path = _backup_unreadable_json_file(target, reason='invalid_json')
+        logger.error('Unable to parse JSON from %s: %s. A backup was written to %s.', target, exc, backup_path)
+    except OSError as exc:
+        logger.error('Unable to read JSON from %s: %s', target, exc)
+    return default
+
+
+def _backup_unreadable_json_file(path: Any, *, reason: str='unreadable') -> str:
+    """Copy an unreadable user-data JSON file to a timestamped backup path."""
+    source = Path(path)
+    if not source.exists() or not source.is_file():
+        return ''
+    safe_reason = ''.join(char if char.isalnum() or char in {'_', '-'} else '_' for char in str(reason or 'unreadable')).strip('_') or 'unreadable'
+    backup_root = Path(CORRUPT_USER_DATA_BACKUPS_DIR)
+    backup_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = backup_root / f'{source.stem}_{safe_reason}_{timestamp}{source.suffix or ".json"}'
+    suffix = 2
+    while backup_path.exists():
+        backup_path = backup_root / f'{source.stem}_{safe_reason}_{timestamp}_{suffix}{source.suffix or ".json"}'
+        suffix += 1
+    try:
+        shutil.copy2(source, backup_path)
+    except OSError as exc:
+        logger.error('Unable to create unreadable JSON backup for %s: %s', source, exc)
+        return ''
+    return str(backup_path)
 
 
 def _write_json(path: Any, data: Any, *, indent: Any=None) -> None:
     """Write JSON data to disk."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target.with_suffix(f'{target.suffix}.tmp')
-    with temp_path.open('w', encoding='utf-8') as f:
-        json.dump(data, f, indent=indent)
-    temp_path.replace(target)
+    timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
+    temp_path = target.with_name(f'.{target.name}.{os.getpid()}.{timestamp}.tmp')
+    try:
+        with temp_path.open('w', encoding='utf-8') as f:
+            json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(temp_path), str(target))
+    except OSError:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug('Unable to remove temporary JSON file %s after write failure.', temp_path)
+        raise
 
 
 def _portfolio_payload_with_chart_slots(data: Any, chart_slots: Any=None) -> Any:
@@ -213,6 +256,17 @@ def _normalize_portfolio_names(raw_names: Any) -> Any:
     return names
 
 
+def _normalize_cash_balance(value: Any) -> float:
+    """Normalize a persisted brokerage cash balance."""
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    return max(amount, 0.0)
+
+
 def _empty_multi_portfolio_payload(chart_slots: Any=None) -> Any:
     """Create an empty normalized multi-portfolio payload."""
     return {'chart_slots': _normalize_chart_slots(chart_slots), 'portfolios': {portfolio_id: [] for portfolio_id in PORTFOLIO_IDS}}
@@ -283,6 +337,7 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
             'tickers': _normalize_unique_symbol_list(raw_entry.get('tickers', raw_entry.get('portfolio', []))),
             'tracker_data': tracker_data,
             'options_data': options_data,
+            'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
         }
     return {
         'chart_slots': base['chart_slots'],
@@ -306,6 +361,7 @@ def _default_portfolio_entry(portfolio_id: Any, chart_slots: Any=None) -> Any:
         'chart_slots': _sanitize_chart_slots(chart_slots),
         'portfolio_tracker': {},
         'options_tracker': [],
+        'cash_balance': 0.0,
     }
 
 
@@ -416,6 +472,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'chart_slots': _sanitize_chart_slots(portfolio_payload.get('chart_slots')),
             'portfolio_tracker': tracker_payload if isinstance(tracker_payload, dict) else {},
             'options_tracker': list(options_payload) if isinstance(options_payload, list) else [],
+            'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
         }
     if 'portfolio' in payload or 'portfolio_tracker' in payload or 'options_tracker' in payload:
         legacy_portfolio = _portfolio_payload_with_chart_slots(payload.get('portfolio', []), chart_slots)
@@ -430,6 +487,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'chart_slots': _sanitize_chart_slots(legacy_portfolio.get('chart_slots')),
             'portfolio_tracker': legacy_tracker if isinstance(legacy_tracker, dict) else {},
             'options_tracker': list(legacy_options) if isinstance(legacy_options, list) else [],
+            'cash_balance': _normalize_cash_balance(payload.get('cash_balance')),
         }
         normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), normalized['portfolio_order'], DEFAULT_MAIN_PORTFOLIO_ID)
         normalized['active_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']), normalized['portfolio_order'], normalized['main_portfolio_id'])
@@ -481,13 +539,67 @@ def _normalize_networth_payload(data: Any) -> Any:
     """Normalize persisted net-worth lists into the supported shape."""
     payload = data if isinstance(data, dict) else {}
     cash = payload.get('cash', [])
-    pension_insurance = payload.get('pension_insurance', [])
     debt = payload.get('debt', [])
+    recurring_bills_payload = payload.get('recurring_bills', [])
+    recurring_bills = []
+    if isinstance(recurring_bills_payload, list):
+        for item in recurring_bills_payload:
+            bill = item if isinstance(item, dict) else {}
+            desc = str(bill.get('desc', bill.get('description', 'Recurring Bill')) or 'Recurring Bill').strip()[:80] or 'Recurring Bill'
+            try:
+                amount = float(bill.get('amount', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if not math.isfinite(amount):
+                amount = 0.0
+            frequency = str(bill.get('frequency', 'monthly') or 'monthly').strip().lower()
+            if frequency not in ('monthly', 'yearly'):
+                frequency = 'monthly'
+            currency = str(bill.get('currency', 'SGD') or 'SGD').upper().strip()
+            if currency not in ('SGD', 'USD'):
+                currency = 'SGD'
+            recurring_bills.append({
+                'desc': desc,
+                'amount': max(amount, 0.0),
+                'frequency': frequency,
+                'currency': currency,
+            })
+    totals_currency = str(payload.get('totals_currency', 'SGD') or 'SGD').upper().strip()
+    if totals_currency not in ('SGD', 'USD'):
+        totals_currency = 'SGD'
+    goal_payload = payload.get('goal', {})
+    goal = goal_payload if isinstance(goal_payload, dict) else {}
+    goal_title = str(goal.get('title', 'Net Worth Goal') or 'Net Worth Goal').strip()[:64] or 'Net Worth Goal'
+    goal_currency = str(goal.get('currency', totals_currency) or totals_currency).upper().strip()
+    if goal_currency not in ('SGD', 'USD'):
+        goal_currency = totals_currency
+    try:
+        goal_target = float(goal.get('target_amount', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        goal_target = 0.0
+    if not math.isfinite(goal_target):
+        goal_target = 0.0
     return {
         'cash': list(cash) if isinstance(cash, list) else [],
-        'pension_insurance': list(pension_insurance) if isinstance(pension_insurance, list) else [],
         'debt': list(debt) if isinstance(debt, list) else [],
+        'recurring_bills': recurring_bills,
+        'totals_currency': totals_currency,
+        'goal': {
+            'title': goal_title,
+            'target_amount': max(goal_target, 0.0),
+            'currency': goal_currency,
+        },
     }
+
+
+def default_networth_data() -> Any:
+    """Return a normalized empty Personal Finance payload."""
+    return _normalize_networth_payload({})
+
+
+def normalize_networth_data(data: Any) -> Any:
+    """Return a normalized Personal Finance payload for runtime use."""
+    return _normalize_networth_payload(data)
 
 
 def _normalize_theme_payload(settings: Any) -> Any:
@@ -561,7 +673,7 @@ def _default_user_data_document() -> Any:
         'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
-        'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
+        'net_worth': default_networth_data(),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'time_12h': False,
@@ -571,7 +683,8 @@ def _default_user_data_document() -> Any:
 def _normalize_user_data_document(payload: Any) -> Any:
     """Normalize persisted single-file user data into the canonical shape."""
     default = _default_user_data_document()
-    saved = payload if isinstance(payload, dict) else {}
+    migration = migrate_user_data_payload(payload, default)
+    saved = migration.payload if isinstance(migration.payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
     chart_page_payload = saved.get('chart_page', default['chart_page'])
     exported_compare_presets = saved.get('compare_presets')
@@ -681,6 +794,7 @@ def load_active_portfolio_state(portfolio_id: Any=None) -> Any:
         'chart_slots': _sanitize_chart_slots(active.get('chart_slots')),
         'portfolio_tracker': dict(active.get('portfolio_tracker', {})),
         'options_tracker': list(active.get('options_tracker', [])),
+        'cash_balance': _normalize_cash_balance(active.get('cash_balance')),
     }
 
 def load_tickers() -> Any:
@@ -724,12 +838,12 @@ def save_options_data(data: Any, portfolio_id: Any=None) -> None:
 
 def load_networth_data() -> Any:
     """Load networth data."""
-    return _normalize_networth_payload(_load_user_data_document().get('net_worth'))
+    return normalize_networth_data(_load_user_data_document().get('net_worth'))
 
 def save_networth_data(data: Any) -> None:
     """Save networth data."""
     document = _load_user_data_document()
-    document['net_worth'] = _normalize_networth_payload(data)
+    document['net_worth'] = normalize_networth_data(data)
     _save_user_data_document(document)
 
 
@@ -872,6 +986,7 @@ def _validate_backup_payload(payload: Any) -> Any:
     """Validate imported backup data and return a normalized payload."""
     if not isinstance(payload, dict):
         raise ValueError('Backup file must contain a JSON object.')
+    payload = migrate_user_data_payload(payload, _default_user_data_document(), strict_future=True).payload
     has_multi_portfolios = isinstance(payload.get('portfolios'), dict)
     has_legacy_payload = any((key in payload for key in ('portfolio', 'portfolio_tracker', 'options_tracker')))
     if not has_multi_portfolios and not has_legacy_payload:
@@ -880,8 +995,8 @@ def _validate_backup_payload(payload: Any) -> Any:
         networth_payload = payload.get('net_worth')
         if not isinstance(networth_payload, dict):
             raise ValueError('Backup net worth data must be a JSON object.')
-        if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('pension_insurance', []), list) or not isinstance(networth_payload.get('debt', []), list):
-            raise ValueError('Backup net worth data must include cash, pension_insurance, and debt lists.')
+        if not isinstance(networth_payload.get('cash', []), list) or not isinstance(networth_payload.get('debt', []), list):
+            raise ValueError('Backup net worth data must include cash and debt lists.')
     return _normalize_user_data_document(payload)
 
 
@@ -915,7 +1030,7 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
-        'net_worth': {'cash': [], 'pension_insurance': [], 'debt': []},
+        'net_worth': default_networth_data(),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'time_12h': False,

@@ -12,6 +12,7 @@ if project_root not in sys.path:
 from budget_terminal_app import __version__
 
 app_name = f'BudgetTerminal-v{__version__}'
+icon_path = os.path.join(project_root, 'budget_terminal_app', 'assets', 'app_icon.ico')
 
 datas = collect_data_files('budget_terminal_app', includes=['assets/app_icon.png'])
 datas += collect_data_files('tzdata')
@@ -40,8 +41,10 @@ hiddenimports += [
     'yt_dlp',
 ]
 
+launcher_path = os.path.join(project_root, 'budget_terminal.py')
+
 a = Analysis(
-    ['budget_terminal.py'],
+    [launcher_path],
     pathex=[project_root],
     binaries=[],
     datas=datas,
@@ -70,5 +73,5 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon='budget_terminal_app/assets/app_icon.ico',
+    icon=icon_path,
 )

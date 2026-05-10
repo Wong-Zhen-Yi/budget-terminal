@@ -3,6 +3,7 @@ import math
 import time
 from typing import Any
 from ..compat import *
+from budget_terminal_app.data_service.results import data_sources_from_meta, describe_market_data_status
 from budget_terminal_app.workers.data import DataWorker
 
 _P1_LEFT_SPLITTER_CONFIG = user_data_path('p1_left_splitter.json')
@@ -37,6 +38,8 @@ Format the response with these exact sections:
 
 
 class DashboardMixin:
+    _DASHBOARD_DATA_SERVICE_WAIT_SECONDS = 0.75
+
     def _dashboard_portfolio_panel_is_read_only(self) -> bool:
         """Keep the dashboard portfolio panel in view-only mode."""
         return True
@@ -1035,6 +1038,8 @@ class DashboardMixin:
             self._dashboard_set_status('Refreshing portfolio holdings...', 'info')
         else:
             self._dashboard_set_status(f'Loading {self.dashboard_symbol} {self.dashboard_timeframe_label}...', 'info')
+            if not getattr(self, '_startup_dashboard_data_done', False):
+                self._startup_progress_begin('dashboard_data', 'Dashboard Data')
         self.worker_thread = threading.Thread(
             target=self.run_worker,
             args=(request_id, chart_configs_snapshot, refresh_reason, allow_non_chart_reuse),
@@ -1042,9 +1047,54 @@ class DashboardMixin:
         )
         self.worker_thread.start()
 
+    def _complete_startup_dashboard_data(
+        self,
+        label: str='Dashboard Data',
+        *,
+        actual: bool=True,
+        succeeded: bool=True,
+    ) -> None:
+        """Mark first Dashboard data load as no longer blocking startup."""
+        if actual:
+            self._startup_dashboard_data_actual_done = True
+            self._startup_dashboard_timeout_pending = False
+            self._startup_metrics_set_stage(
+                'dashboard_data',
+                status='complete' if succeeded else 'failed',
+                detail='First dashboard data loaded.' if succeeded else 'First dashboard data failed.',
+            )
+        if getattr(self, '_startup_dashboard_data_done', False):
+            if actual and succeeded and hasattr(self, '_schedule_startup_cache_warmup'):
+                self._schedule_startup_cache_warmup()
+            return
+        self._startup_dashboard_data_done = True
+        self._startup_progress_complete('dashboard_data', label)
+        self._startup_progress_finish_if_complete()
+        if actual and succeeded and hasattr(self, '_schedule_startup_cache_warmup'):
+            self._schedule_startup_cache_warmup()
+
+    def _dashboard_wait_for_data_service_client(self, timeout_seconds: float | None = None) -> Any:
+        """Wait briefly for startup service readiness from a background worker thread."""
+        if timeout_seconds is None:
+            timeout_seconds = getattr(self, '_DASHBOARD_DATA_SERVICE_WAIT_SECONDS', 0.75)
+        client = getattr(self, '_data_service_client', None)
+        if client is not None or not getattr(self, '_data_service_startup_pending', False):
+            return client
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+        while time.monotonic() < deadline:
+            client = getattr(self, '_data_service_client', None)
+            if client is not None:
+                return client
+            if not getattr(self, '_data_service_startup_pending', False):
+                break
+            time.sleep(0.05)
+        return getattr(self, '_data_service_client', None)
+
     def run_worker(self, request_id: int, chart_configs_snapshot: Any, refresh_reason: str, allow_non_chart_reuse: bool) -> None:
         """Run the shared market data worker."""
         client = getattr(self, '_data_service_client', None)
+        if client is None:
+            client = self._dashboard_wait_for_data_service_client()
         if client is not None:
             try:
                 data = client.fetch_dashboard(
@@ -1058,6 +1108,12 @@ class DashboardMixin:
                 return
             except Exception as exc:
                 logger.warning('Embedded data service request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback(
+                        'Dashboard',
+                        exc,
+                        symbols=self._get_fetch_tickers(),
+                    )
         worker = DataWorker(
             self._get_fetch_tickers(),
             chart_configs_snapshot,
@@ -1074,8 +1130,11 @@ class DashboardMixin:
     def handle_error(self, error_msg: Any) -> None:
         """Handle data refresh errors."""
         logger.error('UI received error: %s', error_msg)
+        if hasattr(self, '_record_data_health_exception'):
+            self._record_data_health_exception('Dashboard', error_msg, symbols=self._get_fetch_tickers())
         self.dashboard_load_btn.setEnabled(True)
         self._dashboard_set_status(f'Refresh failed: {error_msg}', 'negative')
+        self._complete_startup_dashboard_data('Dashboard Data failed', succeeded=False)
 
     def open_news_link(self, item: Any) -> None:
         """Open news link."""
@@ -1425,7 +1484,8 @@ class DashboardMixin:
         self.dashboard_load_btn.setEnabled(True)
         self.dashboard_pending_x_range = None
         self._dashboard_update_indicator_panel_labels()
-        self._dashboard_set_status(f'Loaded {symbol} {self.dashboard_timeframe_label}.', 'positive')
+        status_text, status_type = describe_market_data_status(data, f'Loaded {symbol} {self.dashboard_timeframe_label}.')
+        self._dashboard_set_status(status_text, status_type)
         return True
 
     def _dashboard_response_chart_symbol(self, data: Any) -> str:
@@ -1489,8 +1549,15 @@ class DashboardMixin:
         )
         had_previous_data = bool(getattr(self, 'last_data', None))
         self.last_data = data
-        self._set_data_collection_info(['yfinance'])
         symbol = response_symbol or str(getattr(self, 'dashboard_symbol', '') or '').upper().strip()
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload(
+                'Dashboard',
+                data,
+                symbols=[symbol] if symbol else self._get_fetch_tickers(),
+                expected_symbols=self._get_fetch_tickers(),
+            )
+        self._set_data_collection_info(data_sources_from_meta(data, 'yfinance'))
         apply_non_chart = (not non_chart_reused) or (not had_previous_data)
         ui_non_chart_ms = 0.0
         if apply_non_chart:
@@ -1527,6 +1594,7 @@ class DashboardMixin:
         )
         if not had_previous_data:
             self._startup_profiler_stamp('startup_refresh_complete')
+            self._complete_startup_dashboard_data('Dashboard Data')
 
     def _apply_dashboard_theme(self) -> None:
         """Refresh dashboard colors after a theme change."""

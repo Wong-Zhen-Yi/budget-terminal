@@ -29,11 +29,21 @@ class OptionsTableRowsMixin:
 
     def _add_options_row(self) -> None:
         """Add a blank options position row."""
-        pos = {'ticker': '', 'strategy': 'Calls', 'expiry': '', 'strike': 0.0, 'contracts': 1, 'premium': 0.0, 'current_price': 0.0, 'iv': 0.0, 'delta': 0.0, 'theta': 0.0, 'status': 'Open', 'open_date': datetime.date.today().isoformat()}
+        pos = {'ticker': '', 'strategy': 'Calls', 'expiry': '', 'strike': 0.0, 'contracts': 1, 'premium': 0.0, 'current_price': 0.0, 'volume': 0.0, 'open_interest': 0.0, 'iv': 0.0, 'status': 'Open', 'open_date': datetime.date.today().isoformat()}
         self._ensure_option_row_id(pos)
         self.options_data.append(pos)
         self._save_active_options_data()
         self._insert_options_row(pos)
+
+    def _format_option_count(self, value: Any) -> str:
+        """Format volume and open interest as compact whole numbers."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        if math.isnan(number) or math.isinf(number):
+            number = 0.0
+        return f'{int(round(number)):,}'
 
     def _insert_options_row(self, pos: Any) -> Any:
         """Insert one row into p4_opt_table for the given position dict."""
@@ -72,9 +82,9 @@ class OptionsTableRowsMixin:
         t.setItem(row, 5, _item(f"{pos.get('contracts', 1):g}"))
         t.setItem(row, 6, _item(f"{pos.get('premium', 0.0):.2f}"))
         t.setItem(row, 7, _item(f"{pos.get('current_price', 0.0):.2f}", editable=False))
-        t.setItem(row, 8, _item(f"{pos.get('iv', 0.0) * 100:.1f}%", editable=False))
-        t.setItem(row, 9, _item(f"{pos.get('delta', 0.0):.3f}", editable=False))
-        t.setItem(row, 10, _item(f"{pos.get('theta', 0.0):.3f}", editable=False))
+        t.setItem(row, 8, _item(self._format_option_count(pos.get('volume', pos.get('vol', 0.0))), editable=False))
+        t.setItem(row, 9, _item(self._format_option_count(pos.get('open_interest', pos.get('openInterest', 0.0))), editable=False))
+        t.setItem(row, 10, _item(f"{pos.get('iv', 0.0) * 100:.1f}%", editable=False))
         t.setItem(row, 11, _item('$0.00', editable=False))
         t.setItem(row, 12, _item('0.0%', editable=False))
         t.setItem(row, 13, _item('0.0%', editable=False))
@@ -115,14 +125,14 @@ class OptionsTableRowsMixin:
             if isinstance(s_combo, QComboBox) and ticker_item:
                 try:
                     s_combo.currentTextChanged.disconnect()
-                except:
+                except (TypeError, RuntimeError):
                     pass
                 s_combo.currentTextChanged.connect(partial(self._on_strategy_changed_item, ticker_item))
             e_combo = t.cellWidget(r, 2)
             if isinstance(e_combo, QComboBox) and ticker_item:
                 try:
                     e_combo.currentIndexChanged.disconnect()
-                except:
+                except (TypeError, RuntimeError):
                     pass
                 e_combo.currentIndexChanged.connect(partial(self._on_expiry_combo_changed, ticker_item, e_combo))
         t.blockSignals(False)

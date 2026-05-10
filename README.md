@@ -1,72 +1,109 @@
-# Budget Terminal v0.829
+# Budget Terminal v0.904
 
-## Architecture
-This project is organized as a small package around the `BudgetTerminalApp` Qt main window. The root `budget_terminal.py` file remains the launcher so existing run commands still work.
+Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio data, market context, options chains, news, ETF analysis, charts, and related research workflows. The top-level `budget_terminal.py` launcher remains the stable entry point, while the live application code is organized under `budget_terminal_app/`.
 
-## Layout
-- `budget_terminal_app/app.py`: composed `BudgetTerminalApp` class
-- `budget_terminal_app/mixins/`: page-specific and feature-specific window behavior
-- `budget_terminal_app/workers/`: background workers for market data, fundamentals, news, calendar events, and Polygon/Massive data
-- `budget_terminal_app/widgets/`: custom chart and pie-chart widgets
-- `budget_terminal_app/persistence.py`: JSON persistence helpers and numeric formatting
-- `budget_terminal_app/cache.py`: SQLite cache manager
-- `budget_terminal_app/constants.py`: color palettes, sector definitions, table metadata, and sentiment vocabularies
-- `budget_terminal_app/dependencies.py`: shared imports and logging setup
+## Features
 
-## Runtime Flow
-`main.py` creates the Qt application and palette, then instantiates `BudgetTerminalApp`. The main window delegates page initialization and updates to mixins. Long-running data fetches stay in worker objects and report results back through Qt signals so the UI stays responsive.
+- Portfolio dashboard, net worth tracking, holdings metrics, and sector views
+- Options-chain fetching, table rendering, and related Yahoo Finance smoke tests
+- News hub with deterministic headline briefings, politics, calendar, pre-market, and YouTube helpers
+- Fundamentals, earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
+- Theme support through reusable theme tokens and packaged theme implementations
+- Embedded local data service for background market-data coordination, with direct-worker fallback
 
-## News Briefing
-The News Hub briefing is built into the app and does not use an LLM.
+## Project Layout
 
-- The briefing is generated from headline text, ticker, source, time, and category only.
-- Full briefings auto-refresh when news updates load.
-- Clicking a headline row still produces a single-item summary.
-- `Generate Briefing` reruns the full deterministic digest manually.
-- The output includes overall tone, theme counts, portfolio names, macro drivers, latest headlines, notable headlines, and brief headline-only cautions.
+- `budget_terminal.py`: top-level launcher; auto-runs through `.venv` when available
+- `budget_terminal_app/main.py`: Qt application setup, startup loading screen, app icon, and embedded data-service startup
+- `budget_terminal_app/app.py`: composed `BudgetTerminalApp` main-window class
+- `budget_terminal_app/mixins/`: page, window, and feature behavior
+- `budget_terminal_app/workers/`: background data fetchers and signal-driven tasks
+- `budget_terminal_app/widgets/`: custom charts, pie/bar charts, and heatmap widgets
+- `budget_terminal_app/themes/`: theme tokens and theme implementations
+- `budget_terminal_app/data_service/`: embedded FastAPI/HTTP data service runtime, client, coordinator, and serialization helpers
+- `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
+- `scripts/`: ad hoc diagnostics and smoke tests
+- `packaging/`: PyInstaller specs and build scripts
+- `build/`, `dist/`, `release/`: generated build outputs
 
-## Development
-Install the app dependencies with:
+## Setup
+
+Create a virtual environment and install dependencies:
 
 ```powershell
-python -m pip install -r requirements.txt
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Run the desktop app with:
+Run the app:
 
 ```powershell
 python budget_terminal.py
 ```
 
-## Windows .exe Build
-This is a `PyQt6` desktop GUI app, so the recommended packaging target is a windowed PyInstaller build using the top-level launcher `budget_terminal.py`.
+When `.venv` exists, the launcher re-executes itself with `.\.venv\Scripts\python.exe` unless `BUDGET_TERMINAL_SKIP_LOCAL_VENV=1` is set.
 
-### Build prerequisites
-- A working virtual environment at `.venv`
-- `pyinstaller` installed in that environment
+## Development
 
-If the environment does not exist yet:
+Use the checks that match the code you touched. Common commands:
 
 ```powershell
-python -m venv .venv
+python -m compileall budget_terminal.py budget_terminal_app
+python scripts\test_options_fetch.py
+python scripts\test_startup_profile.py
+```
+
+Helpful diagnostics include:
+
+- `python scripts\debug_yf.py`
+- `python scripts\debug_yf_extended.py`
+- `python scripts\inspect_cache.py`
+- `python scripts\check_news.py`
+
+There is no formal `pytest` suite in this checkout, so UI and data-fetching changes should be verified with focused smoke tests and, when relevant, a manual app launch.
+
+## Runtime Flow
+
+`budget_terminal_app/main.py` creates the Qt application, applies the Fusion style, configures pyqtgraph, shows the startup loading screen, imports `BudgetTerminalApp`, and prepares the main window before first show. After the first usable view is visible, the embedded data service starts in the background. If it is unavailable, the app logs the issue and continues with direct worker behavior.
+
+Long-running fetches live in worker objects and report results back through Qt signals so the UI stays responsive. Writable user data is resolved through `budget_terminal_app/paths.py` instead of being stored beside the packaged executable.
+
+## News Briefing
+
+The News Hub briefing is generated inside the app and does not use an LLM.
+
+- Briefings are generated from headline text, ticker, source, time, and category
+- Full briefings auto-refresh when news updates load
+- Clicking a headline row produces a single-item summary
+- `Generate Briefing` reruns the deterministic digest manually
+- Output includes overall tone, theme counts, portfolio names, macro drivers, latest headlines, notable headlines, and headline-only cautions
+
+## Windows Executable Build
+
+This is a PyQt6 desktop GUI app, so the standard packaging target is a windowed PyInstaller build from `budget_terminal.py`.
+
+Install build prerequisites:
+
+```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
 ```
 
-### Build command
-Run:
+Build the executable package:
 
-```bat
-packaging\build_exe.bat
+```powershell
+.\packaging\build_exe.bat
 ```
 
-The script will:
-- activate `.venv`
-- install `requirements.txt` plus `pyinstaller`
-- remove old `build/` and `dist/` folders
-- build the packaged app from `packaging\budget_terminal.spec`
-- create `release\BudgetTerminal-v*-windows.zip`
+The build script:
 
-### Packaged run notes
-- The app is built as windowed/no-console.
-- Only required application assets are embedded into the packaged executable.
-- User-writable files are stored under `%LOCALAPPDATA%\BudgetTerminal` instead of beside the executable.
+- activates `.venv`
+- installs `requirements.txt` plus `pyinstaller`
+- removes old `build/` output and only the current-version `dist/` target
+- builds from `packaging\budget_terminal.spec`
+- creates `release\BudgetTerminal-v*-windows.zip`
+
+See `packaging\PACKAGING.md` for the one-dir build flow, release outputs, and troubleshooting notes.
+
+## User Data Safety
+
+Do not commit personal portfolio data, API keys, generated cache databases, or machine-specific runtime files. Packaged builds store writable app data under `%LOCALAPPDATA%\BudgetTerminal`, with user-facing document data under `Documents\Budget Terminal User Data` when needed.

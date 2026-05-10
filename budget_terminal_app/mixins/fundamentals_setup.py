@@ -602,15 +602,29 @@ class FundamentalsSetupMixin:
         }
         self.p2_analyze_btn.setEnabled(False)
         self.set_status_text(self.p2_status_lbl, f'Loading {ticker}...', status='warning')
-        self.p2_fund_worker = FundamentalsWorker(ticker)
-        self.p2_fund_thread = QThread()
-        self.p2_fund_worker.moveToThread(self.p2_fund_thread)
-        self.p2_fund_thread.started.connect(self.p2_fund_worker.run)
-        self.p2_fund_worker.finished.connect(lambda data, req=request_id: self._p2_handle_result(req, data))
-        self.p2_fund_worker.finished.connect(self.p2_fund_thread.quit)
-        self.p2_fund_worker.error.connect(lambda msg, req=request_id: self._page2_error(req, msg))
-        self.p2_fund_worker.error.connect(self.p2_fund_thread.quit)
-        self.p2_fund_thread.start()
+        worker = FundamentalsWorker(ticker)
+        thread = QThread()
+        self.p2_fund_worker = worker
+        self.p2_fund_thread = thread
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda data, req=request_id: self._p2_handle_result(req, data))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(lambda msg, req=request_id: self._page2_error(req, msg))
+        worker.error.connect(thread.quit)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda req=request_id, w=worker, t=thread: self._p2_cleanup_worker_refs(req, w, t))
+        thread.start()
+
+    def _p2_cleanup_worker_refs(self, request_id: int, worker: Any, thread: Any) -> None:
+        """Clear stale Fundamentals worker references after Qt has finished the thread."""
+        if getattr(self, 'p2_fund_worker', None) is worker:
+            self.p2_fund_worker = None
+        if getattr(self, 'p2_fund_thread', None) is thread:
+            self.p2_fund_thread = None
+        self._p2_request_contexts.pop(request_id, None)
 
     def _p2_handle_result(self, request_id: int, data: Any) -> None:
         """Apply one Fundamentals response only when it is still current."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.data_service.results import strip_market_data_keys
 from budget_terminal_app.workers.market_metrics import MarketCapWorker
 
 
@@ -469,6 +470,8 @@ class SectorsMixin:
                 results = client.fetch_market_caps(needed) if client is not None else MarketCapWorker(needed).fetch()
             except Exception as exc:
                 logger.warning('Embedded data service sector market-cap request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback('Sectors market caps', exc, symbols=needed)
                 results = MarketCapWorker(needed).fetch()
             self._invoke_main.emit(lambda payload=results: self._p8_on_market_caps_ready(payload))
 
@@ -481,8 +484,11 @@ class SectorsMixin:
         request_tickers = set(getattr(self, '_p8_mktcap_inflight_tickers', set()))
         self._p8_mktcap_inflight_tickers = set()
         self._p8_mktcap_worker = None
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Sectors market caps', results, symbols=request_tickers)
         updates = {}
         fetched_at = self._p8_mktcap_cache_now()
+        results = strip_market_data_keys(results) if isinstance(results, dict) else results
         if isinstance(results, dict):
             for ticker, mc in results.items():
                 symbol = str(ticker or '').strip().upper()
@@ -700,8 +706,8 @@ class SectorsMixin:
                 **self.chart_page_state,
                 'symbol': symbol,
             }
-        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
-        target_index = page_index if page_index >= 0 else 8
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 9
+        target_index = page_index if page_index >= 0 else 9
         page_ready = self._page_initialized(index=target_index)
         self.switch_page(target_index)
         if hasattr(self, 'p10_symbol_input'):

@@ -1,6 +1,9 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.data_service.results import strip_market_data_keys
+from budget_terminal_app.workers.market_metrics import MonthReturnWorker
+from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
 
 _P4_POSITIONS_SPLITTER_CONFIG = user_data_path('p4_splitter.json')
 _P4_STOCK_TABLE_WIDTHS_CONFIG = user_data_path('p4_stock_table_widths.json')
@@ -10,6 +13,15 @@ _P4_STOCK_SECTION_MIN_HEIGHT = 260
 _P4_OPTIONS_SECTION_MIN_HEIGHT = 180
 _P4_TABLE_FIXED_ACTION_WIDTH = 36
 _P4_TABLE_RESIZE_DEBOUNCE_MS = 120
+_P4_HEATMAP_INTERVALS = (
+    ('live', 'Live'),
+    ('1d', '1D'),
+    ('1w', '1W'),
+    ('1m', '1M'),
+    ('3m', '3M'),
+    ('ytd', 'YTD'),
+    ('1y', '1Y'),
+)
 
 class PortfolioSetupMixin:
 
@@ -102,6 +114,8 @@ class PortfolioSetupMixin:
             self.p4_delete_portfolio_btn.setEnabled(len(slots) > 1)
         if hasattr(self, 'port_header_lbl'):
             self.port_header_lbl.setText(f'{self._p4_portfolio_name(main_index)} ({len(getattr(self, "tickers", []))})')
+        if hasattr(self, '_p4_sync_cash_input'):
+            self._p4_sync_cash_input()
 
     def _p4_save_positions_splitter_sizes(self, *_: Any) -> None:
         """Persist the page-4 stock/options splitter sizes to disk."""
@@ -319,6 +333,8 @@ class PortfolioSetupMixin:
     def _p4_on_show(self) -> None:
         """Refresh page-4 table widths when the Portfolio tab becomes visible."""
         self._p4_apply_portfolio_table_widths()
+        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
     def _p4_on_content_tab_changed(self, index: int) -> None:
         """Refresh the visible Portfolio sub-tab after a tab switch."""
@@ -327,6 +343,9 @@ class PortfolioSetupMixin:
         widget = self.p4_content_tabs.widget(index)
         if widget is getattr(self, 'p4_positions_page', None):
             QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
+            return
+        if widget is getattr(self, 'p4_heatmap_page', None) and hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            QTimer.singleShot(0, lambda: self._p4_refresh_portfolio_heatmap_view(reset_view=False))
             return
         if widget is getattr(self, 'p4_momentum_page', None) and hasattr(self, '_p4_refresh_active_momentum_view'):
             QTimer.singleShot(0, self._p4_refresh_active_momentum_view)
@@ -373,12 +392,549 @@ class PortfolioSetupMixin:
             self._p4_apply_table_width_preferences('stock')
             if hasattr(self, '_p4_refresh_active_momentum_view'):
                 self._p4_refresh_active_momentum_view()
+            if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+                self._p4_refresh_portfolio_heatmap_view(reset_view=True)
         if (
             hasattr(self, 'p4_content_tabs')
             and self.p4_content_tabs.currentWidget() is getattr(self, 'p4_metrics_page', None)
             and hasattr(self, '_p4_refresh_portfolio_metrics_view')
         ):
             self._p4_refresh_portfolio_metrics_view()
+
+    def _p4_build_portfolio_heatmap_page(self) -> Any:
+        """Build the active portfolio heatmap sub-tab."""
+        self._p4_heatmap_rows = []
+        self._p4_heatmap_selected_row = None
+        self._p4_heatmap_interval_key = 'live'
+        self._p4_heatmap_return_cache = {}
+        self._p4_heatmap_return_fetching = {}
+        self._p4_heatmap_interval_buttons = {}
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        summary_frame = QFrame()
+        self.set_theme_role(summary_frame, 'panel')
+        self.p4_heatmap_summary_frame = summary_frame
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(12, 6, 12, 6)
+        summary_layout.setSpacing(0)
+        self.p4_heatmap_summary_labels = {}
+        for index, (key, label, default) in enumerate((
+            ('holdings', 'Holdings', '--'),
+            ('cash', 'Cash', '--'),
+            ('coverage', 'Coverage', '--'),
+            ('weighted', 'Weighted Move', '--'),
+            ('largest', 'Largest', '--'),
+            ('strongest', 'Strongest', '--'),
+            ('weakest', 'Weakest', '--'),
+        )):
+            sep = None
+            if index:
+                sep = QFrame()
+                sep.setFixedWidth(1)
+                summary_layout.addWidget(sep)
+            cell = QVBoxLayout()
+            cell.setContentsMargins(10, 2, 10, 2)
+            cell.setSpacing(1)
+            header = QLabel(label)
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value = QLabel(default)
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cell.addWidget(header)
+            cell.addWidget(value)
+            summary_layout.addLayout(cell, 1)
+            self.p4_heatmap_summary_labels[key] = value
+            self.p4_heatmap_summary_labels[f'{key}_header'] = header
+            self.p4_heatmap_summary_labels[f'{key}_sep'] = sep
+        layout.addWidget(summary_frame)
+
+        interval_row = QHBoxLayout()
+        interval_row.setContentsMargins(0, 0, 0, 0)
+        interval_row.setSpacing(6)
+        interval_label = QLabel('Interval')
+        self.set_theme_role(interval_label, 'muted')
+        interval_row.addWidget(interval_label)
+        self.p4_heatmap_interval_group = QButtonGroup(page)
+        self.p4_heatmap_interval_group.setExclusive(True)
+        for key, label in _P4_HEATMAP_INTERVALS:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setMinimumHeight(28)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, interval_key=key: self._p4_select_heatmap_interval(interval_key))
+            interval_row.addWidget(button)
+            self.p4_heatmap_interval_group.addButton(button)
+            self._p4_heatmap_interval_buttons[key] = button
+        self._p4_heatmap_interval_buttons[self._p4_heatmap_interval_key].setChecked(True)
+        interval_row.addStretch()
+        layout.addLayout(interval_row)
+
+        self.p4_heatmap_status_lbl = QLabel('Ready')
+        self.p4_heatmap_status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.set_theme_role(self.p4_heatmap_status_lbl, 'status_muted')
+        layout.addWidget(self.p4_heatmap_status_lbl)
+
+        self.p4_heatmap = EtfHeatmapWidget()
+        self.p4_heatmap.set_empty_message('Add positive-share holdings and refresh market data to render the portfolio heatmap')
+        self.p4_heatmap.holdingSelected.connect(self._p4_on_heatmap_holding_selected)
+        self.p4_heatmap.holdingActivated.connect(self._p4_open_heatmap_symbol_in_charts)
+        layout.addWidget(self.p4_heatmap, 1)
+
+        detail_frame = QFrame()
+        self.set_theme_role(detail_frame, 'panel')
+        self.p4_heatmap_detail_frame = detail_frame
+        detail_layout = QHBoxLayout(detail_frame)
+        detail_layout.setContentsMargins(12, 8, 12, 8)
+        detail_layout.setSpacing(18)
+        self.p4_heatmap_detail_symbol_lbl = QLabel('Select a holding')
+        self.p4_heatmap_detail_sector_lbl = QLabel('Sector: --')
+        self.p4_heatmap_detail_weight_lbl = QLabel('Weight: --')
+        self.p4_heatmap_detail_price_lbl = QLabel('Price: --')
+        self.p4_heatmap_detail_value_lbl = QLabel('Market Value: --')
+        self.p4_heatmap_detail_change_lbl = QLabel('Day Change: --')
+        for label in (
+            self.p4_heatmap_detail_symbol_lbl,
+            self.p4_heatmap_detail_sector_lbl,
+            self.p4_heatmap_detail_weight_lbl,
+            self.p4_heatmap_detail_price_lbl,
+            self.p4_heatmap_detail_value_lbl,
+            self.p4_heatmap_detail_change_lbl,
+        ):
+            label.setMinimumHeight(22)
+            detail_layout.addWidget(label)
+        detail_layout.addStretch()
+        layout.addWidget(detail_frame)
+
+        self._apply_portfolio_heatmap_theme()
+        self._p4_refresh_portfolio_heatmap_view(reset_view=True)
+        return page
+
+    def _p4_heatmap_tab_visible(self) -> bool:
+        """Return whether the Portfolio Heatmap sub-tab is currently visible."""
+        return (
+            hasattr(self, 'p4_content_tabs')
+            and self.p4_content_tabs.currentWidget() is getattr(self, 'p4_heatmap_page', None)
+        )
+
+    def _p4_select_heatmap_interval(self, interval_key: Any) -> None:
+        """Switch the Portfolio Heatmap interval."""
+        key = str(interval_key or 'live').strip().lower()
+        if key not in dict(_P4_HEATMAP_INTERVALS):
+            key = 'live'
+        self._p4_heatmap_interval_key = key
+        for button_key, button in getattr(self, '_p4_heatmap_interval_buttons', {}).items():
+            button.blockSignals(True)
+            button.setChecked(button_key == key)
+            button.blockSignals(False)
+        self._p4_style_heatmap_interval_buttons()
+        self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+
+    def _p4_heatmap_interval_label(self, interval_key: Any = None) -> str:
+        """Return the user-facing label for one Portfolio Heatmap interval."""
+        key = str(interval_key or getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        return dict(_P4_HEATMAP_INTERVALS).get(key, 'Live')
+
+    def _p4_heatmap_uses_snapshot_returns(self, interval_key: Any = None) -> bool:
+        """Return whether an interval can use the latest quote snapshot."""
+        key = str(interval_key or getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        return key in {'live', '1d'}
+
+    def _p4_heatmap_interval_config(self, interval_key: Any) -> dict[str, Any]:
+        """Return fetch config for one Portfolio Heatmap interval."""
+        key = str(interval_key or 'live').strip().lower()
+        today = datetime.date.today()
+        return {
+            '1w': {'start': (today - datetime.timedelta(days=7)).isoformat(), 'interval': '1d'},
+            '1m': {'period': '1mo', 'interval': '1d'},
+            '3m': {'period': '3mo', 'interval': '1d'},
+            'ytd': {'start': f'{today.year}-01-01', 'interval': '1d'},
+            '1y': {'period': '1y', 'interval': '1d'},
+        }.get(key, {'period': '1mo', 'interval': '1d'})
+
+    def _p4_heatmap_stock_symbols(self) -> list[str]:
+        """Return positive-share stock symbols for interval-return fetches."""
+        tracker_data = self._p4_active_tracker_data() if hasattr(self, '_p4_active_tracker_data') else {}
+        symbols = []
+        seen = set()
+        for ticker in self._p4_active_tickers() if hasattr(self, '_p4_active_tickers') else []:
+            symbol = str(ticker or '').strip().upper()
+            if not symbol or symbol == 'CASH' or symbol in seen:
+                continue
+            try:
+                shares = float((tracker_data.get(ticker, {}) or tracker_data.get(symbol, {}) or {}).get('shares', 0) or 0)
+            except (AttributeError, TypeError, ValueError):
+                shares = 0.0
+            if shares > 0.0:
+                symbols.append(symbol)
+                seen.add(symbol)
+        return symbols
+
+    def _p4_heatmap_returns_cache_key(self, interval_key: Any = None, portfolio_id: Any = None) -> tuple[Any, ...]:
+        """Build a cache key for Portfolio Heatmap interval returns."""
+        key = str(interval_key or getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        pid = str(portfolio_id or getattr(self, 'active_portfolio_id', ''))
+        return (pid, key, tuple(sorted(self._p4_heatmap_stock_symbols())))
+
+    def _p4_fetch_heatmap_returns_for_interval(self, interval_key: Any) -> bool:
+        """Fetch longer-interval stock returns for the Portfolio Heatmap."""
+        key = str(interval_key or 'live').strip().lower()
+        if self._p4_heatmap_uses_snapshot_returns(key):
+            return False
+        cache_key = self._p4_heatmap_returns_cache_key(key)
+        cache = getattr(self, '_p4_heatmap_return_cache', {})
+        fetching = getattr(self, '_p4_heatmap_return_fetching', {})
+        if cache_key in cache or fetching.get(cache_key):
+            return False
+        symbols = list(cache_key[2])
+        if not symbols:
+            cache[cache_key] = {}
+            self._p4_heatmap_return_cache = cache
+            return False
+        fetching[cache_key] = True
+        self._p4_heatmap_return_fetching = fetching
+        config = self._p4_heatmap_interval_config(key)
+        if hasattr(self, 'p4_heatmap_status_lbl'):
+            self.set_status_text(self.p4_heatmap_status_lbl, f'Loading {self._p4_heatmap_interval_label(key)} heatmap returns...', status='warning')
+
+        def _run() -> None:
+            try:
+                client = getattr(self, '_data_service_client', None)
+                if client is not None:
+                    results = client.fetch_month_returns(
+                        symbols,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    )
+                else:
+                    results = MonthReturnWorker(
+                        symbols,
+                        period=config.get('period', '1mo'),
+                        interval=config.get('interval', '1d'),
+                        start=config.get('start'),
+                    ).fetch()
+            except Exception as exc:
+                logger.warning('Portfolio heatmap interval return request failed; falling back to direct worker: %s', exc)
+                results = MonthReturnWorker(
+                    symbols,
+                    period=config.get('period', '1mo'),
+                    interval=config.get('interval', '1d'),
+                    start=config.get('start'),
+                ).fetch()
+            self._invoke_main.emit(lambda payload=results, requested_key=key, requested_cache_key=cache_key: self._p4_on_heatmap_returns_ready(requested_key, requested_cache_key, payload))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+
+    def _p4_on_heatmap_returns_ready(self, interval_key: Any, cache_key: Any, results: Any) -> None:
+        """Cache fetched heatmap interval returns and refresh if still active."""
+        fetching = getattr(self, '_p4_heatmap_return_fetching', {})
+        fetching[cache_key] = False
+        self._p4_heatmap_return_fetching = fetching
+        cache = getattr(self, '_p4_heatmap_return_cache', {})
+        normalized = {}
+        results = strip_market_data_keys(results) if isinstance(results, dict) else results
+        if isinstance(results, dict):
+            for ticker, value in results.items():
+                symbol = str(ticker or '').strip().upper()
+                if isinstance(value, (int, float)):
+                    normalized[symbol] = float(value)
+        cache[cache_key] = normalized
+        self._p4_heatmap_return_cache = cache
+        if str(interval_key or '').strip().lower() == str(getattr(self, '_p4_heatmap_interval_key', 'live')).strip().lower():
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+
+    def _p4_heatmap_sector_lookup(self) -> dict[str, str]:
+        """Return a symbol-to-sector lookup based on the app's sector universe."""
+        cached = getattr(self, '_p4_heatmap_sector_by_ticker', None)
+        if isinstance(cached, dict):
+            return cached
+        lookup = {}
+        for sector, tickers in SECTOR_DATA.items():
+            for ticker in tickers:
+                symbol = str(ticker or '').strip().upper()
+                if symbol:
+                    lookup.setdefault(symbol, sector)
+        self._p4_heatmap_sector_by_ticker = lookup
+        return lookup
+
+    def _p4_heatmap_sector_for_symbol(self, symbol: Any) -> str:
+        """Resolve one portfolio ticker into a heatmap sector bucket."""
+        text = str(symbol or '').strip().upper()
+        if not text:
+            return 'Unclassified'
+        lookup = self._p4_heatmap_sector_lookup()
+        return lookup.get(text) or lookup.get(text.replace('.', '-')) or lookup.get(text.replace('-', '.')) or 'Unclassified'
+
+    def _p4_portfolio_heatmap_rows(self, portfolio: Any, interval_key: Any = None, interval_returns: Any = None) -> list[dict[str, Any]]:
+        """Build heatmap rows from active portfolio tracker metrics."""
+        if not isinstance(portfolio, dict):
+            portfolio = {}
+        interval_key = str(interval_key or getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        interval_label = self._p4_heatmap_interval_label(interval_key)
+        interval_returns = interval_returns if isinstance(interval_returns, dict) else {}
+        metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+        if total_market_value <= 0:
+            return []
+        rows = []
+        for ticker in sorted(
+            self._p4_active_tickers(),
+            key=lambda symbol: metrics_map.get(symbol, {}).get('market_value', 0.0),
+            reverse=True,
+        ):
+            symbol = str(ticker or '').strip().upper()
+            metrics = metrics_map.get(ticker, {})
+            try:
+                shares = float(metrics.get('shares', 0.0) or 0.0)
+                market_value = float(metrics.get('market_value', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if shares <= 0.0 or market_value <= 0.0:
+                continue
+            price = metrics.get('price')
+            if self._p4_heatmap_uses_snapshot_returns(interval_key):
+                change = metrics.get('change')
+            else:
+                change = interval_returns.get(symbol)
+            rows.append({
+                'symbol': symbol,
+                'name': '',
+                'sector': self._p4_heatmap_sector_for_symbol(symbol),
+                'weight': market_value / total_market_value,
+                'price': price if isinstance(price, (int, float)) else None,
+                'change_pct': change if isinstance(change, (int, float)) else None,
+                'change_label': f'{interval_label} Change',
+                'interval_label': interval_label,
+                'market_value': market_value,
+                'shares': shares,
+                'is_cash': False,
+                'neutral_heat': False,
+            })
+        return rows
+
+    def _p4_refresh_portfolio_heatmap_view(self, *, reset_view: bool=False) -> None:
+        """Render the active portfolio heatmap from the latest quote snapshot."""
+        if not hasattr(self, 'p4_heatmap'):
+            return
+        data = getattr(self, 'last_data', None)
+        portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
+        interval_key = str(getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        cache_key = self._p4_heatmap_returns_cache_key(interval_key)
+        cache = getattr(self, '_p4_heatmap_return_cache', {})
+        fetching = getattr(self, '_p4_heatmap_return_fetching', {})
+        fetch_started = False
+        if not self._p4_heatmap_uses_snapshot_returns(interval_key) and cache_key not in cache:
+            fetch_started = self._p4_fetch_heatmap_returns_for_interval(interval_key)
+        rows = self._p4_portfolio_heatmap_rows(portfolio, interval_key, cache.get(cache_key, {}))
+        self._p4_heatmap_rows = rows
+        self.p4_heatmap.set_data(rows, reset_view=reset_view)
+        self._p4_update_heatmap_summary(rows)
+        selected_symbol = str((getattr(self, '_p4_heatmap_selected_row', None) or {}).get('symbol') or '').upper().strip()
+        selected = next((row for row in rows if row.get('symbol') == selected_symbol), None)
+        self._p4_on_heatmap_holding_selected(selected or (rows[0] if rows else None))
+        is_loading = fetch_started or bool(fetching.get(cache_key))
+        status = 'warning' if is_loading else ('positive' if rows else 'warning')
+        if is_loading:
+            message = f'Loading {self._p4_heatmap_interval_label(interval_key)} heatmap returns...'
+        elif rows:
+            message = f'Loaded {len(rows)} stock holding{"s" if len(rows) != 1 else ""} for {self._p4_heatmap_interval_label(interval_key)}.'
+        else:
+            message = 'No positive-share stock holdings to display.'
+        if hasattr(self, 'p4_heatmap_status_lbl'):
+            self.set_status_text(self.p4_heatmap_status_lbl, message, status=status)
+
+    def _p4_update_heatmap_summary(self, rows: Any) -> None:
+        """Update Portfolio Heatmap summary values."""
+        labels = getattr(self, 'p4_heatmap_summary_labels', {})
+        if not labels:
+            return
+        rows = list(rows or [])
+        quoted = [row for row in rows if isinstance(row.get('change_pct'), (int, float))]
+        labels['holdings'].setText(str(len(rows)) if rows else '--')
+        cash_label = labels.get('cash')
+        if cash_label is not None:
+            cash_label.setText(self._p4_heatmap_cash_metric_text(rows))
+        labels['coverage'].setText(f'{len(quoted)}/{len(rows)}' if rows else '--')
+        weighted = self._p4_heatmap_weighted_change(quoted)
+        self._p4_set_heatmap_change_label(labels.get('weighted'), weighted)
+        largest = max(rows, key=lambda row: float(row.get('weight', 0.0) or 0.0), default=None)
+        self._p4_set_heatmap_symbol_weight_label(labels.get('largest'), largest)
+        strongest = max(quoted, key=lambda row: float(row.get('change_pct', 0.0) or 0.0), default=None)
+        weakest = min(quoted, key=lambda row: float(row.get('change_pct', 0.0) or 0.0), default=None)
+        self._p4_set_heatmap_symbol_change_label(labels.get('strongest'), strongest)
+        self._p4_set_heatmap_symbol_change_label(labels.get('weakest'), weakest)
+
+    def _p4_heatmap_cash_metric_text(self, rows: Any) -> str:
+        """Return the cash metric shown outside the heatmap."""
+        cash_balance = self._p4_active_cash_balance() if hasattr(self, '_p4_active_cash_balance') else 0.0
+        stock_value = 0.0
+        for row in rows or []:
+            value = row.get('market_value') if isinstance(row, dict) else None
+            if isinstance(value, (int, float)):
+                stock_value += float(value)
+        total_value = stock_value + cash_balance
+        if cash_balance <= 0.0:
+            return '$0'
+        cash_pct = cash_balance / total_value * 100.0 if total_value > 0.0 else 0.0
+        return f'${cash_balance:,.0f} / {cash_pct:.1f}%'
+
+    def _p4_heatmap_weighted_change(self, rows: Any) -> Any:
+        """Return weighted day move across rows with usable quote changes."""
+        numerator = 0.0
+        denominator = 0.0
+        for row in rows or []:
+            weight = row.get('weight')
+            change = row.get('change_pct')
+            if isinstance(weight, (int, float)) and isinstance(change, (int, float)):
+                numerator += float(weight) * float(change)
+                denominator += float(weight)
+        return numerator / denominator if denominator > 0 else None
+
+    def _p4_set_heatmap_change_label(self, label: Any, value: Any, *, prefix: str='') -> None:
+        """Style one heatmap change label."""
+        if label is None:
+            return
+        if not isinstance(value, (int, float)):
+            label.setText(f'{prefix}--')
+            label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; font-weight: bold; border: none;')
+            return
+        sign = '+' if float(value) >= 0 else ''
+        label.setText(f'{prefix}{sign}{float(value):.2f}%')
+        color = self.theme_color('accent_positive' if float(value) >= 0 else 'accent_negative')
+        label.setStyleSheet(f'color: {color}; font-size: 12px; font-weight: bold; border: none;')
+
+    def _p4_set_heatmap_symbol_change_label(self, label: Any, row: Any) -> None:
+        """Show one symbol/change compact summary."""
+        if label is None:
+            return
+        if not isinstance(row, dict) or not isinstance(row.get('change_pct'), (int, float)):
+            label.setText('--')
+            label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; font-weight: bold; border: none;')
+            return
+        symbol = str(row.get('symbol') or '--')
+        value = float(row.get('change_pct') or 0.0)
+        sign = '+' if value >= 0 else ''
+        label.setText(f'{symbol} {sign}{value:.2f}%')
+        color = self.theme_color('accent_positive' if value >= 0 else 'accent_negative')
+        label.setStyleSheet(f'color: {color}; font-size: 12px; font-weight: bold; border: none;')
+
+    def _p4_set_heatmap_symbol_weight_label(self, label: Any, row: Any) -> None:
+        """Show one symbol/weight compact summary."""
+        if label is None:
+            return
+        if not isinstance(row, dict):
+            label.setText('--')
+            label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; font-weight: bold; border: none;')
+            return
+        label.setText(f'{row.get("symbol") or "--"} {float(row.get("weight", 0.0) or 0.0) * 100.0:.1f}%')
+        label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: bold; border: none;')
+
+    def _p4_on_heatmap_holding_selected(self, row: Any) -> None:
+        """Render selected portfolio heatmap holding details."""
+        payload = row if isinstance(row, dict) else {}
+        if not hasattr(self, 'p4_heatmap_detail_symbol_lbl'):
+            return
+        if not payload:
+            self._p4_heatmap_selected_row = None
+            self.p4_heatmap_detail_symbol_lbl.setText('Select a holding')
+            self.p4_heatmap_detail_sector_lbl.setText('Sector: --')
+            self.p4_heatmap_detail_weight_lbl.setText('Weight: --')
+            self.p4_heatmap_detail_price_lbl.setText('Price: --')
+            self.p4_heatmap_detail_value_lbl.setText('Market Value: --')
+            change_label = self._p4_heatmap_interval_label()
+            self.p4_heatmap_detail_change_lbl.setText(f'{change_label} Change: --')
+            self._p4_set_heatmap_change_label(self.p4_heatmap_detail_change_lbl, None, prefix=f'{change_label} Change: ')
+            return
+        self._p4_heatmap_selected_row = dict(payload)
+        self.p4_heatmap_detail_symbol_lbl.setText(str(payload.get('symbol') or '--'))
+        self.p4_heatmap_detail_sector_lbl.setText(f'Sector: {payload.get("sector") or "Unclassified"}')
+        self.p4_heatmap_detail_weight_lbl.setText(f'Weight: {float(payload.get("weight", 0.0) or 0.0) * 100.0:.2f}%')
+        price = payload.get('price')
+        self.p4_heatmap_detail_price_lbl.setText(f'Price: ${float(price):,.2f}' if isinstance(price, (int, float)) else 'Price: --')
+        market_value = payload.get('market_value')
+        self.p4_heatmap_detail_value_lbl.setText(f'Market Value: ${float(market_value):,.2f}' if isinstance(market_value, (int, float)) else 'Market Value: --')
+        change_label = str(payload.get('change_label') or f'{self._p4_heatmap_interval_label()} Change')
+        self._p4_set_heatmap_change_label(self.p4_heatmap_detail_change_lbl, payload.get('change_pct'), prefix=f'{change_label}: ')
+
+    def _p4_open_heatmap_symbol_in_charts(self, symbol: Any) -> None:
+        """Open a portfolio heatmap symbol in the Charts page."""
+        ticker = str(symbol or '').upper().strip()
+        if not ticker or ticker == 'CASH':
+            return
+        self.p10_symbol = ticker
+        if isinstance(getattr(self, 'chart_page_state', None), dict):
+            self.chart_page_state = {**self.chart_page_state, 'symbol': ticker}
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 9
+        self.switch_page(page_index if page_index >= 0 else 9)
+        if hasattr(self, 'p10_symbol_input'):
+            self.p10_symbol_input.setText(ticker)
+        if hasattr(self, '_p10_load_from_input'):
+            self._p10_load_from_input()
+
+    def _apply_portfolio_heatmap_theme(self) -> None:
+        """Refresh Portfolio Heatmap colors after a theme change."""
+        if not hasattr(self, 'p4_heatmap'):
+            return
+        panel_style = (
+            f'background: {self.theme_color("panel_background")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px;'
+        )
+        for frame in (getattr(self, 'p4_heatmap_summary_frame', None), getattr(self, 'p4_heatmap_detail_frame', None)):
+            if frame is not None:
+                frame.setStyleSheet(panel_style)
+        for key, label in getattr(self, 'p4_heatmap_summary_labels', {}).items():
+            if label is None:
+                continue
+            if key.endswith('_header'):
+                label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; border: none;')
+            elif key.endswith('_sep'):
+                label.setStyleSheet(f'background: {self.theme_color("panel_border")};')
+            elif key not in ('weighted', 'strongest', 'weakest'):
+                label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: bold; border: none;')
+        for label in (
+            getattr(self, 'p4_heatmap_detail_symbol_lbl', None),
+            getattr(self, 'p4_heatmap_detail_sector_lbl', None),
+            getattr(self, 'p4_heatmap_detail_weight_lbl', None),
+            getattr(self, 'p4_heatmap_detail_price_lbl', None),
+            getattr(self, 'p4_heatmap_detail_value_lbl', None),
+        ):
+            if label is not None:
+                label.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
+        self._p4_style_heatmap_interval_buttons()
+        self.p4_heatmap.set_theme(
+            background=self.theme_color('background_primary'),
+            panel=self.theme_color('panel_background'),
+            border=self.theme_color('panel_border'),
+            text=self.theme_color('text_primary'),
+            muted=self.theme_color('text_muted'),
+            up=self.theme_color('accent_positive'),
+            down=self.theme_color('accent_negative'),
+            accent=self.theme_color('accent'),
+        )
+        self._p4_update_heatmap_summary(getattr(self, '_p4_heatmap_rows', []))
+        self._p4_on_heatmap_holding_selected(getattr(self, '_p4_heatmap_selected_row', None))
+        if hasattr(self, 'p4_heatmap_status_lbl'):
+            self.set_status_text(
+                self.p4_heatmap_status_lbl,
+                self.p4_heatmap_status_lbl.text(),
+                status=self.p4_heatmap_status_lbl.property('bt_status') or 'muted',
+            )
+
+    def _p4_style_heatmap_interval_buttons(self) -> None:
+        """Refresh checked-state styling for Portfolio Heatmap interval buttons."""
+        active_key = str(getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
+        for key, button in getattr(self, '_p4_heatmap_interval_buttons', {}).items():
+            is_active = key == active_key
+            background = self.theme_color('button_checked_bg' if is_active else 'panel_background')
+            text = self.theme_color('text_primary')
+            border = self.theme_color('button_checked_border' if is_active else 'panel_border')
+            button.setStyleSheet(
+                f'QPushButton {{ background: {background}; color: {text}; border: 1px solid {border}; '
+                'border-radius: 4px; padding: 3px 8px; font-weight: bold; }}'
+            )
 
     def _p4_rename_active_portfolio(self) -> None:
         """Prompt the user to rename the selected portfolio slot."""
@@ -478,6 +1034,7 @@ class PortfolioSetupMixin:
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         summary_bar = QHBoxLayout()
+        summary_bar.setSpacing(8)
         title_lbl = QLabel('<b>Portfolio</b>')
         self.set_theme_role(title_lbl, 'page_title')
         self.p4_total_label = QLabel('Total:  $0.00  USD')
@@ -486,11 +1043,37 @@ class PortfolioSetupMixin:
         self.set_theme_role(self.p4_stock_positions_label, 'badge')
         self.p4_opt_pl_label = QLabel('Options P&L:  $0.00')
         self.set_theme_role(self.p4_opt_pl_label, 'badge')
+        self.p4_cash_chip = QFrame()
+        self.set_theme_role(self.p4_cash_chip, 'summary_chip')
+        cash_chip_layout = QHBoxLayout(self.p4_cash_chip)
+        cash_chip_layout.setContentsMargins(10, 4, 8, 4)
+        cash_chip_layout.setSpacing(8)
+        cash_label = QLabel('BROKERAGE CASH')
+        self.set_theme_role(cash_label, 'summary_chip_label')
+        self.p4_cash_input = QDoubleSpinBox()
+        self.p4_cash_input.setRange(0.0, 999999999999.99)
+        self.p4_cash_input.setDecimals(2)
+        self.p4_cash_input.setPrefix('$')
+        self.p4_cash_input.setSingleStep(100.0)
+        if hasattr(self.p4_cash_input, 'setGroupSeparatorShown'):
+            self.p4_cash_input.setGroupSeparatorShown(True)
+        self.p4_cash_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.p4_cash_input.setKeyboardTracking(False)
+        self.p4_cash_input.setMinimumWidth(122)
+        self.p4_cash_input.setMaximumWidth(150)
+        self.p4_cash_input.setMinimumHeight(24)
+        self.p4_cash_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.set_theme_role(self.p4_cash_input, 'cash_input')
+        self.p4_cash_input.valueChanged.connect(self._p4_on_cash_balance_changed)
+        cash_chip_layout.addWidget(cash_label)
+        cash_chip_layout.addWidget(self.p4_cash_input)
         summary_bar.addWidget(title_lbl)
-        summary_bar.addStretch()
+        summary_bar.addSpacing(8)
+        summary_bar.addWidget(self.p4_cash_chip)
         summary_bar.addWidget(self.p4_opt_pl_label)
         summary_bar.addWidget(self.p4_stock_positions_label)
         summary_bar.addWidget(self.p4_total_label)
+        summary_bar.addStretch()
         layout.addLayout(summary_bar)
         selector_bar = QHBoxLayout()
         selector_bar.setSpacing(8)
@@ -582,6 +1165,8 @@ class PortfolioSetupMixin:
         self.p4_table.verticalHeader().setDefaultSectionSize(52)
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
         self.p4_table.itemSelectionChanged.connect(self._p4_update_remove_stock_button_state)
+        hh.setSortIndicator(P4_PORTFOLIO_COL_MARKET_VALUE, Qt.SortOrder.DescendingOrder)
+        self.p4_table.setSortingEnabled(True)
         self._p4_apply_table_width_preferences('stock')
         hh.sectionResized.connect(lambda logical, old, new: self._p4_on_table_section_resized('stock', logical, old, new))
         stock_layout.addWidget(self.p4_table, 1)
@@ -687,12 +1272,15 @@ class PortfolioSetupMixin:
         momentum_page_layout.setContentsMargins(0, 0, 0, 0)
         momentum_page_layout.setSpacing(0)
         momentum_page_layout.addWidget(momentum_container)
+        self.p4_heatmap_page = self._p4_build_portfolio_heatmap_page()
         self.p4_metrics_page = self._build_portfolio_metrics_page() if hasattr(self, '_build_portfolio_metrics_page') else QWidget()
         self.p4_content_tabs.addTab(self.p4_positions_page, 'Positions')
+        self.p4_content_tabs.addTab(self.p4_heatmap_page, 'Portfolio Heatmap')
         self.p4_content_tabs.addTab(self.p4_momentum_page, 'Momentum Tracker')
         self.p4_content_tabs.addTab(self.p4_metrics_page, 'Portfolio Metrics')
         layout.addWidget(self.p4_content_tabs, 1)
         QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
+        self._p4_sync_cash_input()
         self._p4_refresh_portfolio_selector()
 
     def _on_add_stock_clicked(self) -> None:
@@ -799,7 +1387,7 @@ class PortfolioSetupMixin:
         header.addStretch()
         layout.addLayout(header)
         self.p4_opt_table = QTableWidget(0, 14)
-        self.p4_opt_table.setHorizontalHeaderLabels(['Ticker', 'Type', 'Expiry', 'DTE', 'Strike', 'Qty', 'Premium', 'Market Price', 'IV (%)', 'Delta', 'Theta', 'P&L ($)', 'Return %', 'Annual %'])
+        self.p4_opt_table.setHorizontalHeaderLabels(['Ticker', 'Type', 'Expiry', 'DTE', 'Strike', 'Qty', 'Premium', 'Market Price', 'Vol', 'OI', 'IV', 'P&L ($)', 'Return %', 'Annual %'])
         oh = self.p4_opt_table.horizontalHeader()
         for col in range(14):
             oh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -816,10 +1404,94 @@ class PortfolioSetupMixin:
         oh.sectionResized.connect(lambda logical, old, new: self._p4_on_table_section_resized('options', logical, old, new))
         return options_widget
 
+    def _p4_option_sync_snapshots(self) -> list[dict[str, Any]]:
+        """Capture option-row state on the Qt thread before background syncing."""
+        table = self.p4_opt_table
+        portfolio_id = str(getattr(self, 'active_portfolio_id', '') or '').strip()
+        portfolio_prices = {}
+        if isinstance(getattr(self, 'last_data', None), dict):
+            raw_portfolio = self.last_data.get('portfolio', {})
+            portfolio_prices = dict(raw_portfolio) if isinstance(raw_portfolio, dict) else {}
+        snapshots: list[dict[str, Any]] = []
+        needs_save = False
+        for row in range(table.rowCount()):
+            if row >= len(self.options_data) or not isinstance(self.options_data[row], dict):
+                continue
+            pos = self.options_data[row]
+            before_row_id = str(pos.get('row_id', '') or '').strip()
+            row_id = self._ensure_option_row_id(pos)
+            needs_save = needs_save or (bool(row_id) and row_id != before_row_id)
+            ticker_item = table.item(row, 0)
+            ticker = (ticker_item.text() if ticker_item is not None else pos.get('ticker', '')).strip().upper()
+            if not ticker:
+                continue
+            strategy_widget = table.cellWidget(row, 1)
+            strategy = strategy_widget.currentText() if isinstance(strategy_widget, QComboBox) else pos.get('strategy', 'Calls')
+            expiry_widget = table.cellWidget(row, 2)
+            expiry = ''
+            if isinstance(expiry_widget, QComboBox):
+                expiry = str(expiry_widget.currentData() or expiry_widget.currentText() or '').split()[0].strip()
+            if not expiry:
+                expiry = str(pos.get('expiry', '') or '').strip()
+            strike_item = table.item(row, 4)
+            strike_value = strike_item.text() if strike_item is not None else pos.get('strike', 0.0)
+            strike = self._clean_option_number(str(strike_value).replace('$', '').replace(',', ''), self._clean_option_number(pos.get('strike', 0.0)))
+            underlying_price = 0.0
+            raw_underlying = portfolio_prices.get(ticker, {})
+            if isinstance(raw_underlying, dict):
+                underlying_price = self._clean_option_number(raw_underlying.get('price', 0.0))
+            snapshots.append({
+                'row_index': row,
+                'row_id': row_id,
+                'portfolio_id': portfolio_id,
+                'ticker': ticker,
+                'strategy': strategy,
+                'expiry': expiry,
+                'strike': strike,
+                'underlying_price': underlying_price,
+            })
+        if needs_save:
+            self._save_active_options_data()
+        return snapshots
+
+    def _p4_set_option_sync_fetching(self, row_id: Any, ticker: Any, portfolio_id: Any=None) -> None:
+        """Mark a still-live option row as fetching from the Qt thread."""
+        row = self._resolve_active_option_row_by_id(row_id, ticker, portfolio_id)
+        if row is not None:
+            self._set_row_fetching_status(row)
+
+    def _p4_apply_option_sync_result(
+        self,
+        row_id: Any,
+        ticker: Any,
+        expiries: Any,
+        selected_expiry: Any,
+        data_package: Any,
+        portfolio_id: Any=None,
+    ) -> None:
+        """Apply a bulk-sync result without triggering a second quote fetch."""
+        row = self._resolve_active_option_row_by_id(row_id, ticker, portfolio_id)
+        if row is None:
+            return
+        expiry_list = [str(expiry) for expiry in list(expiries or []) if expiry]
+        expiry = str(selected_expiry or '').strip()
+        if expiry_list:
+            self._set_expiry_combo(
+                row_id,
+                ticker,
+                expiry_list,
+                portfolio_id,
+                selected_expiry=expiry if expiry in expiry_list else None,
+                fetch_price=False,
+            )
+        elif not expiry:
+            self._reset_expiry_placeholder(row_id, ticker, 'N/A', portfolio_id)
+        self._update_option_price_ui(row_id, ticker, data_package, portfolio_id)
+
     def _sync_all_options(self) -> None:
         """Refresh expiries and current prices for all options in the table sequentially."""
-        t = self.p4_opt_table
-        if t.rowCount() == 0:
+        snapshots = self._p4_option_sync_snapshots()
+        if not snapshots:
             return
         self.set_status_text(self.status_bar, 'Syncing all options...', status='accent')
 
@@ -827,23 +1499,32 @@ class PortfolioSetupMixin:
             """Handle run sync."""
             success_count = 0
             fail_count = 0
-            total = t.rowCount()
-            for row in range(total):
-                ticker_item = t.item(row, 0)
-                if not ticker_item:
-                    continue
-                ticker = ticker_item.text().strip().upper()
-                if not ticker:
-                    continue
-                self._invoke_main.emit(lambda r=row, sym=ticker: self.status_bar.setText(f'Syncing {sym} ({r + 1}/{total})...'))
-                self._invoke_main.emit(lambda r=row: self._set_row_fetching_status(r))
-                self._fetch_option_expiries_sync(row, ticker)
-                self._fetch_single_option_price_sync(row)
-                price_item = t.item(row, 7)
-                if price_item and 'Err' in price_item.text():
+            total = len(snapshots)
+            for index, snapshot in enumerate(snapshots):
+                ticker = snapshot['ticker']
+                row_id = snapshot['row_id']
+                portfolio_id = snapshot['portfolio_id']
+                self._invoke_main.emit(lambda r=index, sym=ticker: self.status_bar.setText(f'Syncing {sym} ({r + 1}/{total})...'))
+                self._invoke_main.emit(lambda rid=row_id, sym=ticker, pid=portfolio_id: self._p4_set_option_sync_fetching(rid, sym, pid))
+                expiries = self._fetch_option_expiries_list_sync(ticker)
+                selected_expiry = snapshot.get('expiry', '')
+                if expiries and selected_expiry not in expiries:
+                    selected_expiry = expiries[0]
+                data_package = self._fetch_option_quote_for_values_sync(
+                    ticker,
+                    selected_expiry,
+                    snapshot.get('strike', 0.0),
+                    snapshot.get('strategy', 'Calls'),
+                    underlying_price=snapshot.get('underlying_price', 0.0),
+                )
+                if isinstance(data_package, dict) and data_package.get('error'):
                     fail_count += 1
                 else:
                     success_count += 1
+                self._invoke_main.emit(
+                    lambda rid=row_id, sym=ticker, exp=list(expiries), selected=selected_expiry, data=data_package, pid=portfolio_id:
+                    self._p4_apply_option_sync_result(rid, sym, exp, selected, data, pid)
+                )
             msg = f'Sync Complete: {success_count} succeeded, {fail_count} failed'
             status = 'positive' if fail_count == 0 else 'warning'
             self._invoke_main.emit(lambda: self.set_status_text(self.status_bar, msg, status=status))
@@ -858,3 +1539,5 @@ class PortfolioSetupMixin:
             self.style_plot_widget(chart)
         if hasattr(self, 'p4_weight_chart'):
             self.style_plot_widget(self.p4_weight_chart)
+        if hasattr(self, '_apply_portfolio_heatmap_theme'):
+            self._apply_portfolio_heatmap_theme()

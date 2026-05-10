@@ -27,7 +27,8 @@ set "APP_DIR=dist\%APP_BASE%"
 set "APP_ZIP=%APP_BASE%-windows-onedir.zip"
 
 if exist "build" rmdir /s /q "build"
-if exist "dist" rmdir /s /q "dist"
+if not exist "dist" mkdir "dist"
+if exist "%APP_DIR%" rmdir /s /q "%APP_DIR%"
 
 pyinstaller --noconfirm packaging\budget_terminal_onedir.spec
 if errorlevel 1 exit /b 1

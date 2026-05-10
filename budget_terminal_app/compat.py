@@ -8,4 +8,7 @@ from .widgets.charts import CandlestickItem, DateAxisItem, FmtAxisItem, PercentA
 from .widgets.bar_chart import BarChartWidget
 from .widgets.pie_chart import PieChartWidget
 
-__all__ = [name for name in globals() if name != "__all__"]
+__all__ = [
+    name for name in globals()
+    if name != "__all__" and not (name.startswith("__") and name.endswith("__"))
+]

@@ -437,12 +437,16 @@ class PreMarketMixin:
 
     def _p14_start_auto_refresh(self) -> None:
         """Initialize the Pre-Market page and keep it refreshed in the background."""
-        if hasattr(self, '_ensure_page_initialized'):
-            self._ensure_page_initialized(12)
+        if hasattr(self, '_page_initialized') and hasattr(self, '_build_page_now'):
+            if not self._page_initialized(page_attr='page14'):
+                entry = self._lazy_page_entry(page_attr='page14') if hasattr(self, '_lazy_page_entry') else None
+                if entry is not None:
+                    self._build_page_now(entry.get('index'))
         timer = getattr(self, '_p14_auto_refresh_timer', None)
         if timer is not None and not timer.isActive():
             timer.start()
-        self._p14_refresh(auto_trigger=True)
+        if hasattr(self, 'p14_status_lbl'):
+            self._p14_refresh(auto_trigger=True)
 
     def _p14_auto_refresh_tick(self) -> None:
         """Run one scheduled Pre-Market refresh when no fetch is already active."""
@@ -450,9 +454,11 @@ class PreMarketMixin:
         if hasattr(self, '_page_initialized'):
             page_initialized = self._page_initialized(page_attr='page14')
         if not page_initialized:
-            if hasattr(self, '_ensure_page_initialized'):
-                self._ensure_page_initialized(12)
-        self._p14_refresh(auto_trigger=True)
+            entry = self._lazy_page_entry(page_attr='page14') if hasattr(self, '_lazy_page_entry') else None
+            if entry is not None and hasattr(self, '_build_page_now'):
+                self._build_page_now(entry.get('index'))
+        if hasattr(self, 'p14_status_lbl'):
+            self._p14_refresh(auto_trigger=True)
 
     def _p14_on_show(self) -> None:
         """Refresh visible Pre-Market data only when the cached view is stale or empty."""

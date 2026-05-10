@@ -100,7 +100,7 @@ class OptionsTableEventsMixin:
         self._recalc_options_row(row)
 
     def _recalc_options_row(self, row: Any) -> Any:
-        """Recalculate DTE, Greeks, P&L, return %, and ITM status."""
+        """Recalculate DTE, P&L, return %, and ITM status."""
         if row >= len(self.options_data):
             return
         t = self.p4_opt_table
@@ -113,7 +113,6 @@ class OptionsTableEventsMixin:
         strike = pos.get('strike', 0.0)
         strategy = pos.get('strategy', 'Calls')
         expiry = pos.get('expiry', '')
-        delta = pos.get('delta', 0.0)
         is_seller = strategy in ('Covered Call', 'Cash Secured Put')
         is_call = 'Call' in strategy or strategy == 'Calls'
         underlying_price = 0.0
@@ -124,7 +123,7 @@ class OptionsTableEventsMixin:
             try:
                 exp_date = datetime.datetime.strptime(expiry, '%Y-%m-%d').date()
                 dte = max(0, (exp_date - datetime.date.today()).days)
-            except:
+            except (TypeError, ValueError):
                 pass
         itm_text = '—'
         itm_color = self.theme_color('text_muted')
@@ -148,7 +147,7 @@ class OptionsTableEventsMixin:
                 od = datetime.datetime.strptime(open_date_str, '%Y-%m-%d').date()
                 ed = datetime.datetime.strptime(expiry, '%Y-%m-%d').date()
                 dte_at_open = max(1, (ed - od).days)
-            except:
+            except (TypeError, ValueError):
                 pass
         annual_pct = return_pct * (365.0 / max(1, dte_at_open))
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
@@ -163,9 +162,6 @@ class OptionsTableEventsMixin:
             return it
         dte_color = self.theme_color('accent_negative' if 0 < dte <= 7 else 'warning' if dte <= 30 else 'text_muted')
         t.setItem(row, 3, _ro(f'{dte}d ({itm_text})' if expiry else '—', dte_color if not expiry else itm_color))
-        if delta:
-            prob_itm = abs(delta) * 100
-            t.setItem(row, 9, _ro(f'{delta:.3f} ({prob_itm:.0f}%)', self.theme_color('text_secondary')))
         pl_clr = self.theme_color('accent_positive' if pl_dollar >= 0 else 'accent_negative')
         t.setItem(row, 11, _ro(f'{pl_dollar:+.2f}', pl_clr))
         t.setItem(row, 12, _ro(f'{return_pct:+.1f}%', pl_clr))

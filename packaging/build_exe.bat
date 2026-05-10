@@ -26,7 +26,8 @@ set "APP_EXE=%APP_BASE%.exe"
 set "APP_ZIP=%APP_BASE%-windows.zip"
 
 if exist "build" rmdir /s /q "build"
-if exist "dist" rmdir /s /q "dist"
+if not exist "dist" mkdir "dist"
+if exist "dist\%APP_EXE%" del /f /q "dist\%APP_EXE%"
 
 pyinstaller --noconfirm packaging\budget_terminal.spec
 if errorlevel 1 exit /b 1

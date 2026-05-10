@@ -112,8 +112,20 @@ class _BaseIssuerProvider:
 class InvescoIssuerProvider(_BaseIssuerProvider):
     issuer = "Invesco"
     holdings_url = "https://www.invesco.com/us/financial-products/etfs/holdings"
+    qqq_about_url = "https://www.invesco.com/qqq-etf/en/about.html"
+    qqq_holdings_api_url = "https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/QQQ/holdings/fund"
+    qqq_holdings_resource_path = (
+        "/content/invesco/qqq-etf/en/about/jcr:content/root/container/container_742249799/"
+        "sectioncomponent_1252524195/container/view_all_holdings"
+    )
+    _DYNAMIC_NON_EQUITY_CODES = {"CURR", "CURRCOL", "IFUT", "SYN"}
+    _DYNAMIC_NON_EQUITY_TEXT = ("cash", "currency", "future", "synthetic", "collateral")
 
     def fetch(self, ticker: str) -> EtfHoldingsResult | None:
+        if str(ticker or "").upper().strip() == "QQQ":
+            result = self._fetch_qqq_dynamic_holdings(ticker)
+            if result is not None:
+                return result
         response = self._get(
             self.holdings_url,
             params={"audienceType": "Investor", "ticker": ticker},
@@ -184,6 +196,72 @@ class InvescoIssuerProvider(_BaseIssuerProvider):
             if rows:
                 return rows
         return []
+
+    def _fetch_qqq_dynamic_holdings(self, ticker: str) -> EtfHoldingsResult | None:
+        response = self.session.get(
+            self.qqq_holdings_api_url,
+            params={"idType": "ticker", "interval": "monthly", "productType": "ETF"},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://www.invesco.com",
+                "Referer": self.qqq_about_url,
+                "ResourcePath": self.qqq_holdings_resource_path,
+                "AppId": "invesco",
+                "ComponentType": "view-all-holdings",
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        holdings = self._extract_dynamic_holdings(payload)
+        if not holdings:
+            return None
+        symbol = str(ticker or "").upper().strip()
+        return EtfHoldingsResult(
+            ticker=symbol,
+            fund_name=f"Invesco {symbol}",
+            issuer=self.issuer,
+            as_of_date=self._clean_text(payload.get("effectiveDate")),
+            holdings=holdings,
+            source_url=response.url,
+        )
+
+    def _extract_dynamic_holdings(self, payload: Any) -> list[EtfHolding]:
+        rows = payload.get("holdings") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return []
+        holdings: list[EtfHolding] = []
+        for row in rows:
+            if not isinstance(row, dict) or not self._is_dynamic_equity_row(row):
+                continue
+            symbol = self._clean_text(row.get("ticker")).upper()
+            weight = self._normalize_weight(row.get("percentageOfTotalNetAssets"), scale="percent")
+            if not symbol or weight is None:
+                continue
+            holdings.append(
+                EtfHolding(
+                    symbol=symbol,
+                    name=self._clean_text(row.get("issuerName")),
+                    weight=weight,
+                    sector=self._clean_text(row.get("sectorName")),
+                )
+            )
+        return holdings
+
+    def _is_dynamic_equity_row(self, row: dict[str, Any]) -> bool:
+        symbol = self._clean_text(row.get("ticker")).upper()
+        if not symbol:
+            return False
+        security_code = self._clean_text(row.get("securityTypeCode")).upper()
+        security_type = self._clean_text(row.get("securityTypeName")).casefold()
+        if security_code in self._DYNAMIC_NON_EQUITY_CODES:
+            return False
+        return not any(token in security_type for token in self._DYNAMIC_NON_EQUITY_TEXT)
 
 
 class SpdrIssuerProvider(_BaseIssuerProvider):

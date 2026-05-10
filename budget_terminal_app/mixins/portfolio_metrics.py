@@ -3,11 +3,40 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.data_service.results import describe_market_data_status, strip_market_data_keys
 from budget_terminal_app.workers.market_metrics import MarketCapWorker, MonthReturnWorker, PortfolioAnalyticsWorker, PortfolioMomentumWorker
 
 _P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
 _P4_MOMENTUM_REFRESH_DEBOUNCE_MS = 250
 _P4_METRICS_REFRESH_DEBOUNCE_MS = 350
+_P4_NUMERIC_SORT_ROLE = Qt.ItemDataRole.UserRole
+_P4_MISSING_NUMERIC_SORT_VALUE = float('-inf')
+_P4_TRACKER_NUMERIC_COLUMNS = {
+    P4_PORTFOLIO_COL_SHARES,
+    P4_PORTFOLIO_COL_AVG_PRICE,
+    P4_PORTFOLIO_COL_COST,
+    P4_PORTFOLIO_COL_PRICE,
+    P4_PORTFOLIO_COL_DAY_CHANGE,
+    P4_PORTFOLIO_COL_MARKET_VALUE,
+    P4_PORTFOLIO_COL_WEIGHT,
+    P4_PORTFOLIO_COL_DOLLAR_GAIN,
+    P4_PORTFOLIO_COL_GROWTH,
+    P4_PORTFOLIO_COL_MARKET_CAP,
+}
+
+
+class _P4NumericTableWidgetItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by a stored numeric value."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        try:
+            left = float(self.data(_P4_NUMERIC_SORT_ROLE))
+            right = float(other.data(_P4_NUMERIC_SORT_ROLE))
+            return left < right
+        except Exception:
+            return super().__lt__(other)
+
+
 _P4_METRICS_CARD_SPECS = (
     ('beta', 'Portfolio Beta', 'Shows how strongly the portfolio tends to move relative to the benchmark.'),
     ('alpha', 'Alpha', 'Measures performance above or below what beta alone would imply.'),
@@ -78,7 +107,8 @@ class PortfolioMetricsMixin:
 
     def _p4_momentum_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
         """Build the cache key for one portfolio momentum timeframe pair."""
-        return (str(portfolio_id or self.active_portfolio_id), str(timeframe_key))
+        pid = str(portfolio_id or self.active_portfolio_id)
+        return (pid, str(timeframe_key), round(self._p4_active_cash_balance(pid), 2))
 
     def _p4_invalidate_momentum_cache(self, portfolio_id: Any = None) -> None:
         """Drop cached momentum metrics for one portfolio slot."""
@@ -86,12 +116,12 @@ class PortfolioMetricsMixin:
         self._momentum_metrics_cache = {
             key: value
             for key, value in self._momentum_metrics_cache.items()
-            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+            if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == pid)
         }
         self._momentum_metrics_fetching = {
             key: value
             for key, value in self._momentum_metrics_fetching.items()
-            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+            if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == pid)
         }
 
     def _p4_active_tickers(self) -> Any:
@@ -105,6 +135,77 @@ class PortfolioMetricsMixin:
             'active_tracker_data',
             self._get_portfolio_entry(self.active_portfolio_id).setdefault('portfolio_tracker', {}),
         )
+
+    def _p4_active_cash_balance(self, portfolio_id: Any = None) -> float:
+        """Return the active portfolio's brokerage cash balance."""
+        if portfolio_id is None or str(portfolio_id) == str(getattr(self, 'active_portfolio_id', '')):
+            value = getattr(self, 'active_cash_balance', None)
+            if value is None:
+                value = self._get_portfolio_entry(getattr(self, 'active_portfolio_id', None)).get('cash_balance', 0.0)
+        else:
+            value = self._get_portfolio_entry(portfolio_id).get('cash_balance', 0.0)
+        try:
+            amount = float(value or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if not math.isfinite(amount):
+            amount = 0.0
+        return max(amount, 0.0)
+
+    def _p4_set_active_cash_balance(self, value: Any) -> None:
+        """Persist the active portfolio's brokerage cash balance and refresh dependent views."""
+        try:
+            amount = float(value or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if not math.isfinite(amount):
+            amount = 0.0
+        amount = max(amount, 0.0)
+        self.active_cash_balance = amount
+        entry = self._get_portfolio_entry(self.active_portfolio_id)
+        entry['cash_balance'] = amount
+        if self.active_portfolio_id == self.main_portfolio_id:
+            self.cash_balance = amount
+        self._persist_all_portfolios()
+        self._p4_invalidate_momentum_cache()
+        self._p4_invalidate_portfolio_analytics_cache()
+        last_data = getattr(self, 'last_data', None)
+        if last_data:
+            self.update_page4(last_data)
+        else:
+            self._p4_update_cash_dependent_views()
+        if hasattr(self, '_p6_populate_tables'):
+            self._p6_populate_tables(force_progress_rebuild=True)
+        self._p4_schedule_momentum_refresh()
+        self._p4_schedule_portfolio_metrics_refresh()
+
+    def _p4_sync_cash_input(self) -> None:
+        """Reflect the active portfolio cash value into the summary editor."""
+        control = getattr(self, 'p4_cash_input', None)
+        if control is None:
+            return
+        control.blockSignals(True)
+        control.setValue(self._p4_active_cash_balance())
+        control.blockSignals(False)
+
+    def _p4_on_cash_balance_changed(self, value: float) -> None:
+        """Handle user edits to brokerage cash."""
+        self._p4_set_active_cash_balance(value)
+
+    def _p4_update_cash_dependent_views(self) -> None:
+        """Refresh total and allocation displays when only cash changed."""
+        portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
+        metrics_map, total_value = self._p4_build_tracker_metrics_map(portfolio)
+        weights = {symbol: item.get('weight', 0.0) for symbol, item in metrics_map.items()}
+        cash_balance = self._p4_active_cash_balance()
+        if cash_balance > 0.0 and total_value > 0.0:
+            weights['CASH'] = cash_balance / total_value * 100.0
+        if hasattr(self, 'p4_total_label'):
+            self.p4_total_label.setText(f'Total:  ${total_value:,.2f}  USD')
+        if hasattr(self, 'p4_weight_chart'):
+            self._update_weight_chart(weights)
+        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
     def _build_portfolio_metrics_page(self) -> Any:
         """Build the Portfolio Metrics sub-tab content."""
@@ -371,6 +472,9 @@ class PortfolioMetricsMixin:
                 shares = 0.0
             if shares > 0:
                 signature.append((symbol, round(shares, 8)))
+        cash_balance = self._p4_active_cash_balance(portfolio_id)
+        if cash_balance > 0.0:
+            signature.append(('CASH', round(cash_balance, 2)))
         return tuple(sorted(signature))
 
     def _p4_portfolio_analytics_cache_key(
@@ -564,6 +668,7 @@ class PortfolioMetricsMixin:
         """Render one normalized analytics payload into the Portfolio Metrics sub-tab."""
         if not isinstance(payload, dict):
             payload = {}
+        metadata_status_text, metadata_status = describe_market_data_status(payload, 'Portfolio metrics loaded.')
         metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
         exposure = payload.get('exposure', {}) if isinstance(payload.get('exposure'), dict) else {}
         for metric_key, label in getattr(self, 'p4_metrics_value_labels', {}).items():
@@ -599,8 +704,10 @@ class PortfolioMetricsMixin:
             self._p4_set_portfolio_metrics_status(reason, status='warning')
         elif note:
             self._p4_set_portfolio_metrics_status(note, status='warning')
+        elif metadata_status != 'positive':
+            self._p4_set_portfolio_metrics_status(metadata_status_text, status=metadata_status)
         else:
-            self._p4_set_portfolio_metrics_status('Portfolio metrics loaded.', status='positive')
+            self._p4_set_portfolio_metrics_status(metadata_status_text, status='positive')
 
     def _fetch_portfolio_analytics(self, *, force: bool=False) -> None:
         """Fetch portfolio analytics for the active portfolio and selected benchmark."""
@@ -629,6 +736,7 @@ class PortfolioMetricsMixin:
         shares_map = self._p4_active_momentum_shares_map()
         tickers = list(self._p4_active_tickers())
         prices_map = self._p4_metrics_price_map()
+        cash_amount = self._p4_active_cash_balance()
         self._portfolio_analytics_fetching[cache_key] = True
         self._p4_set_portfolio_metrics_status(
             f'Loading {lookback_key.upper()} metrics versus {benchmark_symbol}...',
@@ -645,6 +753,7 @@ class PortfolioMetricsMixin:
                         prices_map=prices_map,
                         benchmark_symbol=benchmark_symbol,
                         lookback_key=lookback_key,
+                        cash_amount=cash_amount,
                     )
                 else:
                     payload = PortfolioAnalyticsWorker(
@@ -653,15 +762,19 @@ class PortfolioMetricsMixin:
                         prices_map=prices_map,
                         benchmark_symbol=benchmark_symbol,
                         lookback_key=lookback_key,
+                        cash_amount=cash_amount,
                     ).fetch()
             except Exception as exc:
                 logger.warning('Embedded data service analytics request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback('Portfolio analytics', exc, symbols=tickers)
                 payload = PortfolioAnalyticsWorker(
                     tickers,
                     shares_map,
                     prices_map=prices_map,
                     benchmark_symbol=benchmark_symbol,
                     lookback_key=lookback_key,
+                    cash_amount=cash_amount,
                 ).fetch()
             self._invoke_main.emit(
                 lambda result=payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, result)
@@ -671,6 +784,8 @@ class PortfolioMetricsMixin:
 
     def _on_portfolio_analytics_ready(self, cache_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle one portfolio-analytics worker result becoming ready."""
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Portfolio analytics', payload, symbols=self._p4_active_tickers())
         self._portfolio_analytics_fetching[cache_key] = False
         self._portfolio_analytics_cache[cache_key] = payload
         current_key = self._p4_portfolio_analytics_cache_key(
@@ -725,8 +840,9 @@ class PortfolioMetricsMixin:
         """Export the active portfolio's stock and options data to clipboard for LLM analysis."""
         portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
         tickers = self._p4_active_tickers()
-        tracker_data = self._p4_active_tracker_data()
         options_data = getattr(self, 'active_options_data', getattr(self, 'options_data', []))
+        cash_balance = self._p4_active_cash_balance()
+        metrics_map, total_mv = self._p4_build_tracker_metrics_map(portfolio)
         active_index = self._p4_get_active_portfolio_index()
         portfolio_name = self._p4_portfolio_name(active_index)
         lines = []
@@ -738,7 +854,6 @@ class PortfolioMetricsMixin:
             lines.append('(no stock positions)')
             lines.append('')
         else:
-            metrics_map, total_mv = self._p4_build_tracker_metrics_map(portfolio)
             sorted_tickers = sorted(tickers, key=lambda t: metrics_map.get(t, {}).get('market_value', 0), reverse=True)
             for ticker in sorted_tickers:
                 m = metrics_map.get(ticker, {})
@@ -763,8 +878,11 @@ class PortfolioMetricsMixin:
                 lines.append(f'  P&L: {gain_sign}${gain:,.2f} | Growth: {growth_sign}{growth:.1f}%')
                 lines.append(f'  Market Cap: {mc_str}')
                 lines.append('')
-            lines.append(f'Total Portfolio Value: ${total_mv:,.2f}')
-            lines.append('')
+        lines.append('--- BROKERAGE CASH ---')
+        lines.append('')
+        lines.append(f'Cash Balance: ${cash_balance:,.2f}')
+        lines.append(f'Total Portfolio Value: ${total_mv:,.2f}')
+        lines.append('')
         lines.append('--- OPTIONS POSITIONS ---')
         lines.append('')
         if not options_data:
@@ -780,8 +898,16 @@ class PortfolioMetricsMixin:
                 premium = pos.get('premium', 0)
                 current = pos.get('current_price', 0)
                 iv = pos.get('iv', 0)
-                delta = pos.get('delta', 0)
-                theta = pos.get('theta', 0)
+                volume = pos.get('volume', pos.get('vol', 0))
+                open_interest = pos.get('open_interest', pos.get('openInterest', 0))
+                try:
+                    volume = float(volume)
+                except (TypeError, ValueError):
+                    volume = 0.0
+                try:
+                    open_interest = float(open_interest)
+                except (TypeError, ValueError):
+                    open_interest = 0.0
                 is_seller = strategy in ('Covered Call', 'Cash Secured Put')
                 if is_seller:
                     pl = (premium - current) * contracts * 100
@@ -790,11 +916,11 @@ class PortfolioMetricsMixin:
                 pl_sign = '+' if pl >= 0 else ''
                 lines.append(f'{ticker} | {strategy} | Strike: ${strike:.2f} | Expiry: {expiry}')
                 lines.append(f'  Contracts: {contracts} | Premium: ${premium:.2f} | Current: ${current:.2f}')
-                lines.append(f'  IV: {iv:.1f}% | Delta: {delta:.3f} | Theta: {theta:.3f}')
+                lines.append(f'  Vol: {volume:,.0f} | OI: {open_interest:,.0f} | IV: {iv * 100:.1f}%')
                 lines.append(f'  P&L: {pl_sign}${pl:,.2f}')
                 lines.append('')
         text = '\n'.join(lines)
-        total_items = len(tickers) + len(options_data)
+        total_items = len(tickers) + len(options_data) + (1 if cash_balance > 0 else 0)
         QApplication.clipboard().setText(text)
         self.set_status_text(self.status_bar, f'Exported {portfolio_name} ({total_items} positions) to clipboard', status='positive')
 
@@ -854,7 +980,7 @@ class PortfolioMetricsMixin:
         tracker_data = self._p4_active_tracker_data()
         tickers = self._p4_active_tickers()
         metrics_map = {}
-        total_market_value = 0.0
+        stock_market_value = 0.0
         for ticker in tickers:
             tracker_entry = tracker_data.get(ticker, {})
             shares = tracker_entry.get('shares', 0)
@@ -873,7 +999,9 @@ class PortfolioMetricsMixin:
                 'market_value': market_value,
                 'dollar_gain': dollar_gain,
             }
-            total_market_value += market_value
+            stock_market_value += market_value
+        cash_balance = self._p4_active_cash_balance()
+        total_market_value = stock_market_value + cash_balance
         for item in metrics_map.values():
             cost = item['cost']
             market_value = item['market_value']
@@ -887,29 +1015,40 @@ class PortfolioMetricsMixin:
         metrics = metrics_map.get(ticker)
         if metrics is None:
             return
+        sorting_enabled = self.p4_table.isSortingEnabled()
         self.p4_table.blockSignals(True)
-        self._set_tracker_row(
-            row,
-            ticker,
-            metrics['shares'],
-            metrics['avg_price'],
-            metrics['price'],
-            metrics['change'],
-            metrics['cost'],
-            metrics['market_value'],
-            metrics['weight'],
-            metrics['dollar_gain'],
-            metrics['growth'],
-        )
-        self.p4_table.blockSignals(False)
+        self.p4_table.setSortingEnabled(False)
+        try:
+            self._set_tracker_row(
+                row,
+                ticker,
+                metrics['shares'],
+                metrics['avg_price'],
+                metrics['price'],
+                metrics['change'],
+                metrics['cost'],
+                metrics['market_value'],
+                metrics['weight'],
+                metrics['dollar_gain'],
+                metrics['growth'],
+            )
+        finally:
+            self.p4_table.setSortingEnabled(sorting_enabled)
+            self.p4_table.blockSignals(False)
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
-        self._update_weight_chart({symbol: item['weight'] for symbol, item in metrics_map.items()})
+        weights = {symbol: item['weight'] for symbol, item in metrics_map.items()}
+        cash_balance = self._p4_active_cash_balance()
+        if cash_balance > 0.0 and total_market_value > 0.0:
+            weights['CASH'] = cash_balance / total_market_value * 100.0
+        self._update_weight_chart(weights)
+        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
     def _p4_ensure_tracker_item(self, row: Any, col: Any, flags: Any) -> Any:
         """Return an existing tracker cell item or create it once."""
         item = self.p4_table.item(row, col)
         if item is None:
-            item = QTableWidgetItem('')
+            item = _P4NumericTableWidgetItem('') if col in _P4_TRACKER_NUMERIC_COLUMNS else QTableWidgetItem('')
             self.p4_table.setItem(row, col, item)
         item.setFlags(flags)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -920,6 +1059,7 @@ class PortfolioMetricsMixin:
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
         item.setText('--')
+        item.setData(_P4_NUMERIC_SORT_ROLE, _P4_MISSING_NUMERIC_SORT_VALUE)
         item.setForeground(self.theme_qcolor('text_muted'))
 
     def _set_tracker_row(
@@ -943,24 +1083,26 @@ class PortfolioMetricsMixin:
         gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
         change_color = self.theme_qcolor('accent_positive' if change >= 0 else 'accent_negative')
 
-        def _update_item(col: Any, text: Any, flags: Any = ro_flags, color: Any = None) -> None:
+        def _update_item(col: Any, text: Any, flags: Any = ro_flags, color: Any = None, sort_value: Any = None) -> None:
             item = self._p4_ensure_tracker_item(row, col, flags)
             item.setText(text)
+            if col in _P4_TRACKER_NUMERIC_COLUMNS:
+                item.setData(_P4_NUMERIC_SORT_ROLE, sort_value if sort_value is not None else _P4_MISSING_NUMERIC_SORT_VALUE)
             item.setForeground(color if color is not None else default_text_color)
 
         _update_item(P4_PORTFOLIO_COL_SYMBOL, ticker)
-        _update_item(P4_PORTFOLIO_COL_SHARES, f'{shares:g}', ed_flags)
-        _update_item(P4_PORTFOLIO_COL_AVG_PRICE, f'{avg_price:.2f}', ed_flags)
-        _update_item(P4_PORTFOLIO_COL_COST, f'${cost:,.2f}')
-        _update_item(P4_PORTFOLIO_COL_PRICE, f'${price:.2f}')
+        _update_item(P4_PORTFOLIO_COL_SHARES, f'{shares:g}', ed_flags, sort_value=shares)
+        _update_item(P4_PORTFOLIO_COL_AVG_PRICE, f'{avg_price:.2f}', ed_flags, sort_value=avg_price)
+        _update_item(P4_PORTFOLIO_COL_COST, f'${cost:,.2f}', sort_value=cost)
+        _update_item(P4_PORTFOLIO_COL_PRICE, f'${price:.2f}', sort_value=price)
         sign = '+' if change >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_DAY_CHANGE, f'{sign}{change:.2f}%', color=change_color)
-        _update_item(P4_PORTFOLIO_COL_MARKET_VALUE, f'${mkt_val:,.2f}')
-        _update_item(P4_PORTFOLIO_COL_WEIGHT, f'{weight:.1f}%')
+        _update_item(P4_PORTFOLIO_COL_DAY_CHANGE, f'{sign}{change:.2f}%', color=change_color, sort_value=change)
+        _update_item(P4_PORTFOLIO_COL_MARKET_VALUE, f'${mkt_val:,.2f}', sort_value=mkt_val)
+        _update_item(P4_PORTFOLIO_COL_WEIGHT, f'{weight:.1f}%', sort_value=weight)
         gain_sign = '+' if dollar_gain >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_DOLLAR_GAIN, f'{gain_sign}${dollar_gain:,.2f}', color=gain_color)
+        _update_item(P4_PORTFOLIO_COL_DOLLAR_GAIN, f'{gain_sign}${dollar_gain:,.2f}', color=gain_color, sort_value=dollar_gain)
         growth_sign = '+' if growth >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_GROWTH, f'{growth_sign}{growth:.1f}%', color=gain_color)
+        _update_item(P4_PORTFOLIO_COL_GROWTH, f'{growth_sign}{growth:.1f}%', color=gain_color, sort_value=growth)
 
     def _p4_remove_active_ticker(self, ticker: Any) -> None:
         """Remove a ticker from the currently selected page-4 portfolio."""
@@ -998,6 +1140,8 @@ class PortfolioMetricsMixin:
             self.p4_table.setRowCount(0)
             self.p4_table.blockSignals(False)
             self._p4_update_stock_positions_label()
+            if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+                self._p4_refresh_portfolio_heatmap_view(reset_view=True)
             self._p4_refresh_active_momentum_view()
             if self._p4_metrics_tab_visible():
                 self._p4_refresh_portfolio_metrics_view(force=True)
@@ -1094,6 +1238,9 @@ class PortfolioMetricsMixin:
         included = list(payload.get('included_tickers', []) or [])
         excluded = list(payload.get('excluded_tickers', []) or [])
         if reason or not returns:
+            if not reason:
+                metadata_text, metadata_status = describe_market_data_status(payload, 'No momentum data available')
+                reason = metadata_text if metadata_status != 'positive' else ''
             self.p4_momentum_summary_label.setText(reason or 'No momentum data available')
             return
         total_return = float(returns[-1]) if returns else 0.0
@@ -1191,7 +1338,8 @@ class PortfolioMetricsMixin:
             return
         tickers = list(self._p4_active_tickers())
         shares_map = self._p4_active_momentum_shares_map()
-        if not tickers:
+        cash_amount = self._p4_active_cash_balance()
+        if not tickers and cash_amount <= 0.0:
             payload = self._p4_empty_momentum_payload('No portfolio holdings available')
             self._momentum_metrics_cache[cache_key] = payload
             self._momentum_metrics_fetching[cache_key] = False
@@ -1211,6 +1359,7 @@ class PortfolioMetricsMixin:
                         period=config.get('period', '1mo'),
                         interval=config.get('interval', '1d'),
                         start=config.get('start'),
+                        cash_amount=cash_amount,
                     )
                 else:
                     payload = PortfolioMomentumWorker(
@@ -1219,15 +1368,19 @@ class PortfolioMetricsMixin:
                         period=config.get('period', '1mo'),
                         interval=config.get('interval', '1d'),
                         start=config.get('start'),
+                        cash_amount=cash_amount,
                     ).fetch()
             except Exception as exc:
                 logger.warning('Embedded data service momentum request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback('Portfolio momentum', exc, symbols=tickers)
                 payload = PortfolioMomentumWorker(
                     tickers,
                     shares_map,
                     period=config.get('period', '1mo'),
                     interval=config.get('interval', '1d'),
                     start=config.get('start'),
+                    cash_amount=cash_amount,
                 ).fetch()
             self._invoke_main.emit(
                 lambda result=payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, result)
@@ -1237,6 +1390,8 @@ class PortfolioMetricsMixin:
 
     def _on_momentum_ready(self, timeframe_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle portfolio momentum data becoming ready."""
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Portfolio momentum', payload, symbols=self._p4_active_tickers())
         cache_key = self._p4_momentum_cache_key(timeframe_key, portfolio_id)
         self._momentum_metrics_fetching[cache_key] = False
         self._momentum_metrics_cache[cache_key] = payload
@@ -1308,6 +1463,8 @@ class PortfolioMetricsMixin:
                     ).fetch()
             except Exception as exc:
                 logger.warning('Embedded data service returns request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback('Portfolio returns', exc, symbols=tickers)
                 results = MonthReturnWorker(
                     tickers,
                     period=config.get('period', '1mo'),
@@ -1322,6 +1479,9 @@ class PortfolioMetricsMixin:
 
     def _on_returns_ready(self, timeframe_key: Any, portfolio_id: Any, results: Any) -> None:
         """Handle return metrics ready."""
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Portfolio returns', results, symbols=self._p4_active_tickers())
+        results = strip_market_data_keys(results) if isinstance(results, dict) else results
         cache_key = self._p4_returns_cache_key(timeframe_key, portfolio_id)
         self._return_metrics_fetching[cache_key] = False
         self._return_metrics_cache[cache_key] = results
@@ -1443,6 +1603,8 @@ class PortfolioMetricsMixin:
                 results = client.fetch_market_caps(symbols) if client is not None else MarketCapWorker(symbols).fetch()
             except Exception as exc:
                 logger.warning('Embedded data service market-cap request failed; falling back to direct worker: %s', exc)
+                if hasattr(self, '_record_data_health_fallback'):
+                    self._record_data_health_fallback('Market caps', exc, symbols=symbols)
                 results = MarketCapWorker(symbols).fetch()
             self._invoke_main.emit(lambda payload=results: self._on_market_caps_ready(payload))
 
@@ -1452,16 +1614,15 @@ class PortfolioMetricsMixin:
     def _update_mktcap_item(self, row: Any, ticker: Any, mc: Any) -> None:
         """Handle update mktcap item."""
         text = self._format_market_cap(mc)
-        item = self.p4_table.item(row, P4_PORTFOLIO_COL_MARKET_CAP)
         ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         self.p4_table.blockSignals(True)
-        if item is None:
-            item = QTableWidgetItem(text)
-            item.setFlags(ro_flags)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.p4_table.setItem(row, P4_PORTFOLIO_COL_MARKET_CAP, item)
-        else:
-            item.setText(text)
+        item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
+        item.setText(text)
+        try:
+            sort_value = float(mc)
+        except (TypeError, ValueError):
+            sort_value = _P4_MISSING_NUMERIC_SORT_VALUE
+        item.setData(_P4_NUMERIC_SORT_ROLE, sort_value)
         self.p4_table.blockSignals(False)
         item.setForeground(QColor(self._mktcap_color(mc)))
 
@@ -1482,6 +1643,9 @@ class PortfolioMetricsMixin:
         self._mktcap_fetching = False
         request_tickers = set(getattr(self, '_mktcap_inflight_tickers', set()))
         self._mktcap_inflight_tickers = set()
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload('Market caps', results, symbols=request_tickers)
+        results = strip_market_data_keys(results) if isinstance(results, dict) else results
         normalized_results = {}
         if isinstance(results, dict) and results:
             fetched_at = self._p4_mktcap_cache_now()
@@ -1492,11 +1656,16 @@ class PortfolioMetricsMixin:
                 normalized_results[symbol] = mc
                 self._mktcap_cache[symbol] = mc
                 self._mktcap_cache_ts[symbol] = fetched_at
-        for row in range(self.p4_table.rowCount()):
-            item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
-            symbol = str(item.text() if item else '').strip().upper()
-            if symbol and symbol in normalized_results:
-                self._update_mktcap_item(row, symbol, normalized_results[symbol])
+        sorting_enabled = self.p4_table.isSortingEnabled()
+        self.p4_table.setSortingEnabled(False)
+        try:
+            for row in range(self.p4_table.rowCount()):
+                item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+                symbol = str(item.text() if item else '').strip().upper()
+                if symbol and symbol in normalized_results:
+                    self._update_mktcap_item(row, symbol, normalized_results[symbol])
+        finally:
+            self.p4_table.setSortingEnabled(sorting_enabled)
         queued = list(getattr(self, '_mktcap_queued_tickers', set()))
         self._mktcap_queued_tickers = set()
         if queued:
@@ -1509,7 +1678,9 @@ class PortfolioMetricsMixin:
         tickers = self._p4_active_tickers()
         metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
         weights = {}
+        sorting_enabled = self.p4_table.isSortingEnabled()
         self.p4_table.blockSignals(True)
+        self.p4_table.setSortingEnabled(False)
         self.p4_table.setUpdatesEnabled(False)
         try:
             self.p4_table.setRowCount(len(tickers))
@@ -1541,7 +1712,11 @@ class PortfolioMetricsMixin:
                     self._p4_clear_mktcap_item(i)
         finally:
             self.p4_table.setUpdatesEnabled(True)
+            self.p4_table.setSortingEnabled(sorting_enabled)
             self.p4_table.blockSignals(False)
+        cash_balance = self._p4_active_cash_balance()
+        if cash_balance > 0.0 and total_market_value > 0.0:
+            weights['CASH'] = cash_balance / total_market_value * 100.0
         if hasattr(self, '_p4_update_remove_stock_button_state'):
             self._p4_update_remove_stock_button_state()
         if hasattr(self, '_p4_apply_table_width_preferences'):
@@ -1549,6 +1724,8 @@ class PortfolioMetricsMixin:
         self._p4_update_stock_positions_label(len(tickers))
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         self._update_weight_chart(weights)
+        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
         if not tickers:
             self._return_metrics_cache[active_cache_key] = {}
@@ -1562,7 +1739,7 @@ class PortfolioMetricsMixin:
         else:
             self._fetch_returns_for_timeframe(self._active_return_timeframe)
         active_momentum_cache_key = self._p4_momentum_cache_key(self._active_momentum_timeframe)
-        if not tickers:
+        if not tickers and cash_balance <= 0.0:
             payload = self._p4_empty_momentum_payload('No portfolio holdings available')
             self._momentum_metrics_cache[active_momentum_cache_key] = payload
             self._momentum_metrics_fetching[active_momentum_cache_key] = False
