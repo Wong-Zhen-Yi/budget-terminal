@@ -62,7 +62,7 @@ MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
-SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'],)
+SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'], 'cyberpunk_terminal')
 PORTFOLIO_METRICS_LOOKBACK_CHOICES = ('1y', '3y', '5y', 'max')
 
 

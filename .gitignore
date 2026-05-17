@@ -12,13 +12,13 @@ build/
 build_release/
 build_fixed/
 develop-eggs/
-dist/
+/dist/
 dist_fixed/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -55,6 +55,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+test-results/
 
 # Translations
 *.mo
@@ -156,6 +157,10 @@ cython_debug/
 
 # Project specific
 .claude/
+node_modules/
+Web UI/dist/
+Web UI/node_modules/.vite/
+Web UI/node_modules/.vite-temp/
 stock_cache.db
 budget_cache.db
 portfolio.json

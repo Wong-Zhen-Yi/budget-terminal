@@ -310,6 +310,10 @@ class NetWorthMixin:
         self.p6_cash_table.itemChanged.connect(lambda: self._p6_on_data_changed('cash'))
         cash_layout.addLayout(cash_hdr)
         cash_layout.addWidget(self.p6_cash_table)
+        self.p6_cash_total_label = QLabel('')
+        self.p6_cash_total_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.p6_cash_total_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: 600; background: transparent;')
+        cash_layout.addWidget(self.p6_cash_total_label)
         tables_splitter.addWidget(cash_widget)
         debt_widget = QWidget()
         debt_layout = QVBoxLayout(debt_widget)
@@ -340,6 +344,10 @@ class NetWorthMixin:
         self.p6_debt_table.itemChanged.connect(lambda: self._p6_on_data_changed('debt'))
         debt_layout.addLayout(debt_hdr)
         debt_layout.addWidget(self.p6_debt_table)
+        self.p6_debt_total_label = QLabel('')
+        self.p6_debt_total_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.p6_debt_total_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: 600; background: transparent;')
+        debt_layout.addWidget(self.p6_debt_total_label)
         tables_splitter.addWidget(debt_widget)
         self.p6_bills_box = QGroupBox('Recurring Bills')
         self.set_theme_role(self.p6_bills_box, 'panel')
@@ -559,6 +567,16 @@ class NetWorthMixin:
             value = 0.0
         return max(value, 0.0) * (12.0 if self._p6_bill_frequency(frequency) == 'monthly' else 1.0)
 
+    @staticmethod
+    def _p6_format_bill_amount(amount: Any) -> str:
+        try:
+            value = float(amount or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not math.isfinite(value):
+            value = 0.0
+        return f'${max(value, 0.0):,.2f}'
+
     def _p6_recurring_bills_annual_total(self, display_currency: Any=None) -> tuple[float, bool]:
         display = self._p6_normalize_totals_currency(display_currency or self._p6_selected_totals_currency())
         total = 0.0
@@ -587,6 +605,28 @@ class NetWorthMixin:
             return
         prefix = self._p6_goal_prefix(display_currency)
         label.setText(f'Annual total ({display_currency}): {prefix}{total:,.2f}')
+
+    def _p6_category_total(self, category: Any) -> float:
+        total = 0.0
+        for item in self.networth_data.get(category, []):
+            row = item if isinstance(item, dict) else {}
+            try:
+                amount = float(row.get('amount', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if math.isfinite(amount):
+                total += max(amount, 0.0)
+        return total
+
+    def _p6_update_cash_debt_totals(self) -> None:
+        for category, label_name, title in (
+            ('cash', 'p6_cash_total_label', 'Cash total'),
+            ('debt', 'p6_debt_total_label', 'Debt total'),
+        ):
+            label = getattr(self, label_name, None)
+            if label is None:
+                continue
+            label.setText(f'{title}: S${self._p6_category_total(category):,.2f}')
 
     def _p6_normalize_goal_data(self, payload: Any) -> dict[str, Any]:
         goal = payload if isinstance(payload, dict) else {}
@@ -1036,7 +1076,8 @@ class NetWorthMixin:
         except (TypeError, ValueError):
             amount_value = 0.0
         desc_item = QTableWidgetItem(str(desc or ''))
-        amt_item = QTableWidgetItem(f'{amount_value:.2f}')
+        amount_text = self._p6_format_bill_amount(amount_value) if category == 'recurring_bills' else f'{amount_value:.2f}'
+        amt_item = QTableWidgetItem(amount_text)
         amt_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, 0, desc_item)
         table.setItem(row, 1, amt_item)
@@ -1103,6 +1144,11 @@ class NetWorthMixin:
                     currency = self._p6_normalize_totals_currency(
                         currency_combo.currentData() if isinstance(currency_combo, QComboBox) else self._p6_selected_totals_currency()
                     )
+                    formatted_amount = self._p6_format_bill_amount(amt)
+                    if a_item.text() != formatted_amount:
+                        table.blockSignals(True)
+                        a_item.setText(formatted_amount)
+                        table.blockSignals(False)
                     new_data.append({
                         'desc': d_item.text(),
                         'amount': max(amt, 0.0),
@@ -1171,6 +1217,7 @@ class NetWorthMixin:
         self._p6_update_progress_chart(progress_series, progress=current_progress)
         goal_progress = self._p6_goal_anim_progress if hasattr(self, '_p6_goal_anim_timer') and self._p6_goal_anim_timer.isActive() else 1.0
         self._p6_update_goal_panel(animation_progress=goal_progress)
+        self._p6_update_cash_debt_totals()
         self._p6_update_recurring_bills_total()
 
     def _p6_toggle_scale(self) -> None:
@@ -1190,9 +1237,10 @@ class NetWorthMixin:
                 label = getattr(self, label_name, None)
                 if label is not None:
                     label.setStyleSheet(f'color: {self.theme_color("text_secondary")}; font-size: 11px; background: transparent;')
-            bills_total_label = getattr(self, 'p6_bills_total_label', None)
-            if bills_total_label is not None:
-                bills_total_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: 600; background: transparent;')
+            for label_name in ('p6_cash_total_label', 'p6_debt_total_label', 'p6_bills_total_label'):
+                total_label = getattr(self, label_name, None)
+                if total_label is not None:
+                    total_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: 600; background: transparent;')
             if hasattr(self, 'p6_goal_visual'):
                 self.p6_goal_visual.set_theme(self.theme_color('accent'), self.theme_color('text_primary'), self.theme_color('text_secondary'), self.theme_color('panel_border'))
             self.p6_silo_bar.set_theme(self.theme_color('text_primary'))

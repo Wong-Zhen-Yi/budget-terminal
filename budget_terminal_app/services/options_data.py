@@ -1,13 +1,31 @@
 from __future__ import annotations
 
+import datetime
 import math
 import time
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - older Python / missing tzdata fallback
+    ZoneInfo = None
 
 from ..cache import CacheManager
 from ..data_service.results import attach_market_data_result, make_market_data_error, make_market_data_meta, market_data_errors, market_data_meta
 from ..data_service.tasks import MarketDataTaskRunner
 from ..dependencies import YF_LOCK, logger, pd, yf
+
+
+def _options_market_timezone() -> datetime.tzinfo:
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo("America/New_York")
+        except Exception:
+            pass
+    return datetime.timezone(datetime.timedelta(hours=-5))
+
+
+OPTIONS_MARKET_TIMEZONE = _options_market_timezone()
 
 
 class OptionsMarketDataService:
@@ -40,16 +58,21 @@ class OptionsMarketDataService:
         now = time.time()
         cached_memory = self.expiry_memory_cache.get(ticker_key)
         if cached_memory and (now - cached_memory[0]) < self.expiry_memory_ttl_seconds:
-            return attach_market_data_result(
-                {"expiries": list(cached_memory[1])},
-                meta=make_market_data_meta(source="memory cache", freshness="fresh", cache_age_seconds=now - cached_memory[0]),
-            )
+            expiry_list = self._filter_live_expiries(cached_memory[1])
+            if expiry_list:
+                self.expiry_memory_cache[ticker_key] = (cached_memory[0], list(expiry_list))
+                return attach_market_data_result(
+                    {"expiries": expiry_list},
+                    meta=make_market_data_meta(source="memory cache", freshness="fresh", cache_age_seconds=now - cached_memory[0]),
+                )
+            self.expiry_memory_cache.pop(ticker_key, None)
         cached = self.cache_manager.get_options_expiries(ticker_key, return_metadata=True)
         if cached:
             expiries, cache_meta = cached
-            expiry_list = [str(expiry) for expiry in list(expiries or []) if expiry]
+            expiry_list = self._filter_live_expiries(expiries)
             if expiry_list:
                 self.expiry_memory_cache[ticker_key] = (now, list(expiry_list))
+                self.cache_manager.save_options_expiries(ticker_key, expiry_list)
                 return attach_market_data_result(
                     {"expiries": expiry_list},
                     meta=make_market_data_meta(
@@ -59,14 +82,14 @@ class OptionsMarketDataService:
                     ),
                 )
         stale_cached = self.cache_manager.get_options_expiries(ticker_key, allow_stale=True, return_metadata=True)
-        stale_expiries = list(stale_cached[0] or []) if stale_cached else []
+        stale_expiries = self._filter_live_expiries(stale_cached[0]) if stale_cached else []
         stale_meta = stale_cached[1] if stale_cached and isinstance(stale_cached[1], dict) else {}
 
         def fetch_expiries() -> list[str]:
             with YF_LOCK:
-                expiries = list(yf.Ticker(ticker_key).options or [])
+                expiries = self._filter_live_expiries(yf.Ticker(ticker_key).options)
             if not expiries:
-                raise ValueError(f"No option expiries returned for {ticker_key}.")
+                raise ValueError(f"No current option expiries returned for {ticker_key}.")
             self.cache_manager.save_options_expiries(ticker_key, expiries)
             self.expiry_memory_cache[ticker_key] = (time.time(), list(expiries))
             return list(expiries)
@@ -78,9 +101,9 @@ class OptionsMarketDataService:
             cache_fallback=(lambda: stale_expiries) if stale_expiries else None,
             cache_age_seconds=stale_meta.get("cache_age_seconds"),
             success_check=lambda values: bool(values),
-            failure_reason=f"No option expiries returned for {ticker_key}.",
+            failure_reason=f"No current option expiries returned for {ticker_key}.",
         )
-        return attach_market_data_result({"expiries": list(result.data or [])}, meta=result.meta, errors=result.errors)
+        return attach_market_data_result({"expiries": self._filter_live_expiries(result.data or [])}, meta=result.meta, errors=result.errors)
 
     def fetch_chain_payload(self, ticker: Any, expiry: Any) -> dict[str, Any]:
         ticker_key = str(ticker or "").strip().upper()
@@ -89,6 +112,15 @@ class OptionsMarketDataService:
             return attach_market_data_result(
                 {"chain": pd.DataFrame()},
                 meta=make_market_data_meta(source="input", freshness="failed", failure_reason="Ticker and expiry are required."),
+            )
+        if self._is_past_expiry(expiry_key):
+            return attach_market_data_result(
+                {"chain": pd.DataFrame()},
+                meta=make_market_data_meta(
+                    source="input",
+                    freshness="failed",
+                    failure_reason=f"Option expiry {expiry_key} has passed.",
+                ),
             )
         now = time.time()
         cache_key = (ticker_key, expiry_key)
@@ -161,6 +193,15 @@ class OptionsMarketDataService:
             return attach_market_data_result(
                 {"error": "Incomplete Data"},
                 meta=make_market_data_meta(source="input", freshness="failed", failure_reason="Option expiry is missing."),
+            )
+        if self._is_past_expiry(expiry_key):
+            return attach_market_data_result(
+                {"error": "Expired"},
+                meta=make_market_data_meta(
+                    source="input",
+                    freshness="failed",
+                    failure_reason=f"Option expiry {expiry_key} has passed.",
+                ),
             )
         chain_payload = self.fetch_chain_payload(ticker_key, expiry_key)
         chain_df = chain_payload.get("chain") if isinstance(chain_payload, dict) else None
@@ -237,6 +278,27 @@ class OptionsMarketDataService:
             chain_df["expiration"] = expiry
         if "type" not in chain_df.columns:
             chain_df["type"] = ""
+
+    def _is_past_expiry(self, expiry: Any) -> bool:
+        """Return True when an ISO option expiration date has passed in the US market timezone."""
+        try:
+            expiry_date = datetime.date.fromisoformat(str(expiry or "").strip())
+        except ValueError:
+            return False
+        market_today = datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
+        return expiry_date < market_today
+
+    def _filter_live_expiries(self, expiries: Any) -> list[str]:
+        """Return unique non-expired expiry strings, preserving source order."""
+        live_expiries: list[str] = []
+        seen: set[str] = set()
+        for expiry in list(expiries or []):
+            expiry_text = str(expiry or "").strip()
+            if not expiry_text or expiry_text in seen or self._is_past_expiry(expiry_text):
+                continue
+            seen.add(expiry_text)
+            live_expiries.append(expiry_text)
+        return live_expiries
 
     def _clean_number(self, value: Any, default: float = 0.0) -> float:
         if value is None:

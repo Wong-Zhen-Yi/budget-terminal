@@ -655,6 +655,86 @@ class ProSharesIssuerProvider(_BaseIssuerProvider):
         return holdings
 
 
+class ArkIssuerProvider(_BaseIssuerProvider):
+    issuer = "ARK Invest"
+    base_url = "https://assets.ark-funds.com/fund-documents/funds-etf-csv"
+    file_names = {
+        "ARKK": "ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv",
+        "ARKQ": "ARK_AUTONOMOUS_TECH._&_ROBOTICS_ETF_ARKQ_HOLDINGS.csv",
+        "ARKW": "ARK_NEXT_GENERATION_INTERNET_ETF_ARKW_HOLDINGS.csv",
+        "ARKG": "ARK_GENOMIC_REVOLUTION_ETF_ARKG_HOLDINGS.csv",
+        "ARKF": "ARK_FINTECH_INNOVATION_ETF_ARKF_HOLDINGS.csv",
+        "ARKX": "ARK_SPACE_EXPLORATION_&_INNOVATION_ETF_ARKX_HOLDINGS.csv",
+        "PRNT": "THE_3D_PRINTING_ETF_PRNT_HOLDINGS.csv",
+        "IZRL": "ARK_ISRAEL_INNOVATIVE_TECHNOLOGY_ETF_IZRL_HOLDINGS.csv",
+    }
+    fund_names = {
+        "ARKK": "ARK Innovation ETF",
+        "ARKQ": "ARK Autonomous Technology & Robotics ETF",
+        "ARKW": "ARK Next Generation Internet ETF",
+        "ARKG": "ARK Genomic Revolution ETF",
+        "ARKF": "ARK Fintech Innovation ETF",
+        "ARKX": "ARK Space Exploration & Innovation ETF",
+        "PRNT": "The 3D Printing ETF",
+        "IZRL": "ARK Israel Innovative Technology ETF",
+    }
+
+    def fetch(self, ticker: str) -> EtfHoldingsResult | None:
+        symbol = str(ticker or "").upper().strip()
+        file_name = self.file_names.get(symbol)
+        if not file_name:
+            return None
+        url = f"{self.base_url}/{file_name}"
+        response = self._get(url)
+        holdings, as_of_date, total_market_value = self._parse_holdings_csv(response.content)
+        if not holdings:
+            return None
+        return EtfHoldingsResult(
+            ticker=symbol,
+            fund_name=self.fund_names.get(symbol, symbol),
+            issuer=self.issuer,
+            as_of_date=as_of_date,
+            net_assets=self._format_large_number(total_market_value) if total_market_value is not None else "--",
+            holdings=holdings,
+            source_url=url,
+        )
+
+    def _parse_holdings_csv(self, content: bytes) -> tuple[list[EtfHolding], str, float | None]:
+        text = content.decode("utf-8-sig", errors="replace")
+        rows = list(csv.DictReader(io.StringIO(text)))
+        holdings: list[EtfHolding] = []
+        as_of_date = ""
+        total_market_value = 0.0
+        has_market_value = False
+        for row in rows:
+            normalized = {
+                self._clean_text(key).lower(): value
+                for key, value in row.items()
+                if key is not None
+            }
+            if not as_of_date:
+                as_of_date = self._clean_text(normalized.get("date"))
+            symbol = self._clean_text(normalized.get("ticker")).upper()
+            name = self._clean_text(normalized.get("company"))
+            weight = self._normalize_weight(normalized.get("weight (%)"), scale="percent")
+            if symbol and weight is not None:
+                holdings.append(EtfHolding(symbol=symbol, name=name, weight=weight))
+            market_value = self._parse_currency(normalized.get("market value ($)"))
+            if market_value is not None:
+                total_market_value += market_value
+                has_market_value = True
+        return holdings, as_of_date, (total_market_value if has_market_value else None)
+
+    def _parse_currency(self, value: Any) -> float | None:
+        text = self._clean_text(value).replace("$", "").replace(",", "")
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+
 SECTOR_DISPLAY_NAMES: dict[str, str] = {
     "realestate": "Real Estate",
     "real_estate": "Real Estate",
@@ -683,6 +763,7 @@ class EtfHoldingsService:
             }
         )
         self.providers = (
+            ArkIssuerProvider(self.session),
             IsharesIssuerProvider(self.session),
             SpdrIssuerProvider(self.session),
             InvescoIssuerProvider(self.session),

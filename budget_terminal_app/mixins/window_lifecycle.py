@@ -413,15 +413,6 @@ class WindowLifecycleMixin:
                 from budget_terminal_app.etf_holdings import EtfHoldingsService
 
                 result = EtfHoldingsService().load(ticker)
-                if bool(getattr(result, 'is_partial', False)) and hasattr(self, '_record_data_health_event'):
-                    self._record_data_health_event(
-                        'Warmup ETF holdings',
-                        severity='warning',
-                        source=getattr(result, 'issuer', '') or 'ETF holdings source',
-                        freshness='partial',
-                        reason=f'{ticker} holdings warmup used a partial fallback source.',
-                        symbols=[ticker],
-                    )
                 logger.info('Startup ETF holdings warmup finished for %s.', ticker)
             except Exception as exc:
                 logger.warning('Startup ETF holdings warmup failed for %s: %s', ticker, exc)

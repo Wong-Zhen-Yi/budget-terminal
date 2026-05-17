@@ -10,6 +10,13 @@ from .midnight_blue_theme import MIDNIGHT_BLUE_THEME
 from .theme_tokens import ThemeTokens
 from .trading_dark_theme import TRADING_DARK_THEME
 
+try:
+    from .cyberpunk_terminal_theme import CYBERPUNK_TERMINAL_THEME
+except ModuleNotFoundError as exc:
+    if exc.name != "budget_terminal_app.themes.cyberpunk_terminal_theme":
+        raise
+    CYBERPUNK_TERMINAL_THEME = None
+
 
 DEFAULT_THEME_ID = "trading_dark"
 THEME_REGISTRY: dict[str, ThemeTokens] = {
@@ -19,8 +26,10 @@ THEME_REGISTRY: dict[str, ThemeTokens] = {
     "high_contrast": HIGH_CONTRAST_THEME,
     "market_terminal": MARKET_TERMINAL_THEME,
 }
+if CYBERPUNK_TERMINAL_THEME is not None:
+    THEME_REGISTRY["cyberpunk_terminal"] = CYBERPUNK_TERMINAL_THEME
 # Keep the registry multi-theme so future themes only need to be re-added here.
-SELECTABLE_THEME_IDS: tuple[str, ...] = (DEFAULT_THEME_ID,)
+SELECTABLE_THEME_IDS: tuple[str, ...] = (DEFAULT_THEME_ID, "cyberpunk_terminal")
 
 
 def build_theme_stylesheet(theme: ThemeTokens) -> str:
@@ -73,6 +82,15 @@ QLabel[bt_role="muted"], QLabel[bt_role="status_muted"] {{
 }}
 QLabel[bt_role="accent"] {{
     color: {theme.accent};
+}}
+QLabel[bt_role="theme_preview"] {{
+    background: {theme.accent_soft};
+    border: 1px solid {theme.accent};
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: {theme.accent};
+    font-size: 12px;
+    font-weight: 700;
 }}
 QLabel[bt_role="metric"] {{
     color: {theme.warning};
@@ -158,6 +176,61 @@ QDoubleSpinBox[bt_role="cash_input"]:focus {{
 }}
 QComboBox::drop-down {{
     border: none;
+}}
+QComboBox[bt_role="theme_selector"] {{
+    background: {theme.background_secondary};
+    color: {theme.text_primary};
+    border: 1px solid {theme.accent};
+    border-radius: 7px;
+    padding: 8px 42px 8px 12px;
+    min-height: 20px;
+    font-weight: 700;
+}}
+QComboBox[bt_role="theme_selector"]:hover {{
+    background: {theme.hover_bg};
+    border-color: {theme.warning};
+}}
+QComboBox[bt_role="theme_selector"]:focus {{
+    border-color: {theme.input_focus_border};
+}}
+QComboBox[bt_role="theme_selector"]::drop-down {{
+    width: 36px;
+    border-left: 1px solid {theme.panel_border};
+    background: {theme.accent_soft};
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+}}
+QComboBox[bt_role="theme_selector"]::down-arrow {{
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid {theme.accent};
+    margin-right: 12px;
+}}
+QAbstractItemView[bt_role="theme_menu"] {{
+    background: {theme.panel_background};
+    color: {theme.text_primary};
+    border: 1px solid {theme.accent};
+    border-radius: 7px;
+    outline: 0;
+    padding: 6px;
+    selection-background-color: {theme.selected_bg};
+    selection-color: {theme.text_primary};
+}}
+QAbstractItemView[bt_role="theme_menu"]::item {{
+    min-height: 34px;
+    padding: 8px 12px;
+    border-radius: 5px;
+}}
+QAbstractItemView[bt_role="theme_menu"]::item:hover {{
+    background: {theme.hover_bg};
+    color: {theme.warning};
+}}
+QAbstractItemView[bt_role="theme_menu"]::item:selected {{
+    background: {theme.button_checked_bg};
+    color: {theme.text_primary};
+    border: 1px solid {theme.button_checked_border};
 }}
 QTabWidget::pane {{
     border: 1px solid {theme.panel_border};

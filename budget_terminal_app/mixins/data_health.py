@@ -96,6 +96,41 @@ class DataHealthMixin:
             'errors': normalized_errors[:5],
             'error_count': len(normalized_errors),
         }
+        fingerprint = (
+            event['severity'],
+            event['subsystem'],
+            event['source'],
+            event['freshness'],
+            event['reason'],
+            tuple(event['symbols']),
+            tuple(event['errors']),
+        )
+        for existing in reversed(self._data_health_events[-5:]):
+            existing_fingerprint = (
+                existing.get('severity'),
+                existing.get('subsystem'),
+                existing.get('source'),
+                existing.get('freshness'),
+                existing.get('reason'),
+                tuple(existing.get('symbols') or []),
+                tuple(existing.get('errors') or []),
+            )
+            if existing_fingerprint != fingerprint:
+                continue
+            existing_ts = existing.get('timestamp')
+            try:
+                age_seconds = abs((event['timestamp'] - existing_ts).total_seconds())
+            except Exception:
+                age_seconds = 0.0
+            if age_seconds <= 5.0:
+                logger.info(
+                    'Duplicate data health %s skipped for %s: %s',
+                    event['severity'],
+                    event['subsystem'],
+                    event['reason'],
+                )
+                self._refresh_data_health_views()
+                return
         self._data_health_events.append(event)
         overflow = len(self._data_health_events) - int(getattr(self, '_DATA_HEALTH_MAX_EVENTS', 120))
         if overflow > 0:

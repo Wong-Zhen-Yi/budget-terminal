@@ -4,7 +4,7 @@ from .theme_tokens import ThemeTokens
 
 
 TRADING_DARK_THEME = ThemeTokens(
-    name="Trading Dark",
+    name="Default",
     background_primary="#0b1020",
     background_secondary="#11182b",
     panel_background="#141d31",

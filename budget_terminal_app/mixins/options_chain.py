@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.services.options_data import OPTIONS_MARKET_TIMEZONE
 
 
 class OptionsChainMixin:
@@ -271,8 +272,8 @@ class OptionsChainMixin:
         """Convert the fetched yfinance expiration list into ordered UI bucket metadata."""
         parsed = []
         seen = set()
-        today = datetime.date.today()
-        for expiry in list(expiries or []):
+        today = self._p5_current_options_market_date()
+        for expiry in self._p5_filter_live_expiries(expiries):
             expiry_text = str(expiry or '').strip()
             if not expiry_text or expiry_text in seen:
                 continue
@@ -287,6 +288,30 @@ class OptionsChainMixin:
             (expiry_text, expiry_text, max((expiry_date - today).days, 0))
             for expiry_text, expiry_date in parsed
         )
+
+    def _p5_current_options_market_date(self) -> datetime.date:
+        """Return today's date in the US options market timezone."""
+        return datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
+
+    def _p5_is_past_expiry(self, expiry: Any) -> bool:
+        """Return whether an expiry is before the current US options market date."""
+        try:
+            expiry_date = datetime.date.fromisoformat(str(expiry or '').strip())
+        except ValueError:
+            return False
+        return expiry_date < self._p5_current_options_market_date()
+
+    def _p5_filter_live_expiries(self, expiries: Any) -> list[str]:
+        """Return unique non-expired expiry strings, preserving source order."""
+        live_expiries = []
+        seen = set()
+        for expiry in list(expiries or []):
+            expiry_text = str(expiry or '').strip()
+            if not expiry_text or expiry_text in seen or self._p5_is_past_expiry(expiry_text):
+                continue
+            seen.add(expiry_text)
+            live_expiries.append(expiry_text)
+        return live_expiries
 
     def _p5_set_top_volume_bucket_config(self, view_key: str, bucket_config: tuple[tuple[str, str, int], ...]) -> None:
         """Rebuild one dynamic top-volume grid so it matches the fetched expirations."""
@@ -677,13 +702,13 @@ class OptionsChainMixin:
     def _p5_restore_expiry_selection(self, expiry: str) -> None:
         """Restore the shared expiry selector from cached state."""
         expiry_text = str(expiry or '').strip()
-        if not hasattr(self, 'p5_expiry_combo') or not expiry_text:
+        if not hasattr(self, 'p5_expiry_combo') or not expiry_text or self._p5_is_past_expiry(expiry_text):
             return
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
         try:
             expiry_date = datetime.datetime.strptime(expiry_text, '%Y-%m-%d').date()
-            dte = (expiry_date - datetime.date.today()).days
+            dte = (expiry_date - self._p5_current_options_market_date()).days
             label = f'{expiry_text} ({dte}d)'
         except Exception:
             label = expiry_text
@@ -697,6 +722,8 @@ class OptionsChainMixin:
         if shared_ticker:
             self.p5_shared_ticker_input.setText(shared_ticker)
         selected_expiry = str(payload.get('selected_expiry', '') or payload.get('chain_expiry', '') or '').strip()
+        if self._p5_is_past_expiry(selected_expiry):
+            selected_expiry = ''
         if selected_expiry:
             self._p5_restore_expiry_selection(selected_expiry)
         strategy = str(payload.get('strategy', 'None') or 'None')
@@ -717,7 +744,7 @@ class OptionsChainMixin:
         else:
             self.p5_price_lbl.setText('')
         chain_df = deserialize_session_value(payload.get('chain_df'))
-        if isinstance(chain_df, pd.DataFrame) and not chain_df.empty:
+        if selected_expiry and isinstance(chain_df, pd.DataFrame) and not chain_df.empty:
             self._p5_populate_tables(chain_df, selected_expiry or str(payload.get('chain_expiry', '') or ''))
             self.set_status_text(self.p5_status_lbl, f'Restored last session for {self._p5_chain_ticker or shared_ticker}.', status='positive')
         top_volume_payloads = deserialize_session_value(payload.get('top_volume_payloads'))
@@ -1417,7 +1444,6 @@ class OptionsChainMixin:
         def _run() -> None:
             """Fetch expiries and current spot."""
             try:
-                cache = self._get_cache_manager()
                 price = None
                 try:
                     with YF_LOCK:
@@ -1425,13 +1451,7 @@ class OptionsChainMixin:
                         price = float(t_obj.fast_info['lastPrice'])
                 except Exception as pe:
                     logger.warning(f'Failed to fetch price for {ticker}: {pe}')
-                exps = cache.get_options_expiries(ticker)
-                if exps is None:
-                    with YF_LOCK:
-                        t_obj = yf.Ticker(ticker)
-                        exps = t_obj.options
-                    if exps:
-                        cache.save_options_expiries(ticker, exps)
+                exps = self._get_cached_options_expiries(ticker)
 
                 self._invoke_main.emit(
                     lambda rid=request_id, symbol=ticker, expiries=exps, spot=price, selected=preferred_expiry: self._p5_handle_loaded_expiries(
@@ -1476,14 +1496,21 @@ class OptionsChainMixin:
 
     def _p5_populate_expiries(self, exps: Any, *, preferred_expiry: str='') -> None:
         """Populate the expiry selector."""
-        if not exps:
-            self.set_status_text(self.p5_status_lbl, 'No options found.', status='muted')
+        live_exps = self._p5_filter_live_expiries(exps)
+        if not live_exps:
+            self.p5_expiry_combo.blockSignals(True)
+            self.p5_expiry_combo.clear()
+            self.p5_expiry_combo.blockSignals(False)
+            self._p5_populate_tables(pd.DataFrame(), '')
+            self.set_status_text(self.p5_status_lbl, f'No current listed options expirations were available for {self._p5_shared_ticker() or "ticker"}.', status='warning')
             return
         self.p5_expiry_combo.blockSignals(True)
         self.p5_expiry_combo.clear()
-        today = datetime.date.today()
+        today = self._p5_current_options_market_date()
         preferred = str(preferred_expiry or '').strip()
-        for exp in exps:
+        if self._p5_is_past_expiry(preferred):
+            preferred = ''
+        for exp in live_exps:
             try:
                 ed = datetime.datetime.strptime(exp, '%Y-%m-%d').date()
                 dte = (ed - today).days
@@ -1502,6 +1529,10 @@ class OptionsChainMixin:
         expiry = self.p5_expiry_combo.currentData()
         if not ticker or not expiry:
             return
+        if self._p5_is_past_expiry(expiry):
+            self._p5_populate_tables(pd.DataFrame(), '')
+            self.set_status_text(self.p5_status_lbl, f'Option expiry {expiry} has passed. Choose a current expiration.', status='warning')
+            return
         self._p5_chain_request_seq += 1
         request_id = self._p5_chain_request_seq
         self._p5_chain_latest_request_id = request_id
@@ -1511,7 +1542,6 @@ class OptionsChainMixin:
         def _run() -> None:
             """Load raw chain, enrich it, and update the UI."""
             try:
-                cache = self._get_cache_manager()
                 current_spot = spot_price
                 if current_spot <= 0:
                     try:
@@ -1519,19 +1549,9 @@ class OptionsChainMixin:
                             current_spot = float(yf.Ticker(ticker).fast_info['lastPrice'])
                     except Exception as pe:
                         logger.warning(f'Failed to refresh spot price for {ticker}: {pe}')
-                df = cache.get_options_chain(ticker, expiry)
-                if df is None:
-                    with YF_LOCK:
-                        t_obj = yf.Ticker(ticker)
-                        chain = t_obj.option_chain(expiry)
-                    if chain.calls.empty and chain.puts.empty:
-                        raise ValueError('Received empty options chain from API')
-                    c = chain.calls.copy()
-                    p = chain.puts.copy()
-                    c['type'] = 'Call'
-                    p['type'] = 'Put'
-                    df = pd.concat([c, p], ignore_index=True)
-                    cache.save_options_chain(ticker, expiry, df)
+                df = self._get_cached_option_chain(ticker, expiry)
+                if df is None or df.empty:
+                    raise ValueError(f'No option chain returned for {ticker} {expiry}.')
                 greek_inputs = self._p5_resolve_greek_inputs(ticker, current_spot)
                 current_spot = float(greek_inputs.get('spot_price', current_spot) or current_spot or 0.0)
                 enriched = self._p5_enrich_chain(
