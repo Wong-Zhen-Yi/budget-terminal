@@ -13,6 +13,36 @@ _P4_STOCK_SECTION_MIN_HEIGHT = 260
 _P4_OPTIONS_SECTION_MIN_HEIGHT = 180
 _P4_TABLE_FIXED_ACTION_WIDTH = 36
 _P4_TABLE_RESIZE_DEBOUNCE_MS = 120
+P4_OPTIONS_COLUMNS = (
+    'Ticker',
+    'Type',
+    'Expiry',
+    'Strike',
+    'Qty',
+    'Premium',
+    'Market Price',
+    'Vol',
+    'OI',
+    'IV',
+    'P&L ($)',
+    'Return %',
+    'Annual %',
+)
+P4_OPTIONS_DEFAULT_WIDTHS = {
+    0: 64,
+    1: 48,
+    2: 122,
+    3: 60,
+    4: 42,
+    5: 66,
+    6: 86,
+    7: 54,
+    8: 54,
+    9: 52,
+    10: 74,
+    11: 70,
+    12: 70,
+}
 _P4_HEATMAP_INTERVALS = (
     ('live', 'Live'),
     ('1d', '1D'),
@@ -155,7 +185,8 @@ class PortfolioSetupMixin:
             'options': {
                 'table_attr': 'p4_opt_table',
                 'config_path': _P4_OPTIONS_TABLE_WIDTHS_CONFIG,
-                'resizable_cols': tuple(range(14)),
+                'resizable_cols': tuple(range(len(P4_OPTIONS_COLUMNS))),
+                'default_widths': P4_OPTIONS_DEFAULT_WIDTHS,
                 'fixed_cols': {},
             },
         }
@@ -290,7 +321,11 @@ class PortfolioSetupMixin:
             return
         base_widths = preferred_widths or self._p4_load_table_width_preferences(table_key)
         if not base_widths:
-            base_widths = {int(col): 1 for col in spec.get('resizable_cols', ())}
+            default_widths = spec.get('default_widths', {})
+            base_widths = {
+                int(col): int(default_widths.get(int(col), 1))
+                for col in spec.get('resizable_cols', ())
+            }
         scaled = self._p4_scale_table_widths(base_widths, available_width - fixed_total)
         guard_attr = self._p4_table_width_guard_attr(table_key)
         setattr(self, guard_attr, True)
@@ -332,6 +367,9 @@ class PortfolioSetupMixin:
 
     def _p4_on_show(self) -> None:
         """Refresh page-4 table widths when the Portfolio tab becomes visible."""
+        if getattr(self, '_p4_options_fetch_deferred', False) and hasattr(self, '_reload_options_table'):
+            self._p4_options_fetch_deferred = False
+            self._reload_options_table()
         self._p4_apply_portfolio_table_widths()
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
@@ -1386,10 +1424,10 @@ class PortfolioSetupMixin:
         header.addWidget(refresh_opt_btn)
         header.addStretch()
         layout.addLayout(header)
-        self.p4_opt_table = QTableWidget(0, 14)
-        self.p4_opt_table.setHorizontalHeaderLabels(['Ticker', 'Type', 'Expiry', 'DTE', 'Strike', 'Qty', 'Premium', 'Market Price', 'Vol', 'OI', 'IV', 'P&L ($)', 'Return %', 'Annual %'])
+        self.p4_opt_table = QTableWidget(0, len(P4_OPTIONS_COLUMNS))
+        self.p4_opt_table.setHorizontalHeaderLabels(list(P4_OPTIONS_COLUMNS))
         oh = self.p4_opt_table.horizontalHeader()
-        for col in range(14):
+        for col in range(len(P4_OPTIONS_COLUMNS)):
             oh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.p4_opt_table.verticalHeader().setVisible(False)
         self.p4_opt_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1426,14 +1464,19 @@ class PortfolioSetupMixin:
             if not ticker:
                 continue
             strategy_widget = table.cellWidget(row, 1)
-            strategy = strategy_widget.currentText() if isinstance(strategy_widget, QComboBox) else pos.get('strategy', 'Calls')
+            if isinstance(strategy_widget, QComboBox):
+                strategy = strategy_widget.currentData() or strategy_widget.currentText()
+            else:
+                strategy = pos.get('strategy', 'Calls')
+            if hasattr(self, '_option_strategy_value'):
+                strategy = self._option_strategy_value(strategy)
             expiry_widget = table.cellWidget(row, 2)
             expiry = ''
             if isinstance(expiry_widget, QComboBox):
                 expiry = str(expiry_widget.currentData() or expiry_widget.currentText() or '').split()[0].strip()
             if not expiry:
                 expiry = str(pos.get('expiry', '') or '').strip()
-            strike_item = table.item(row, 4)
+            strike_item = table.item(row, 3)
             strike_value = strike_item.text() if strike_item is not None else pos.get('strike', 0.0)
             strike = self._clean_option_number(str(strike_value).replace('$', '').replace(',', ''), self._clean_option_number(pos.get('strike', 0.0)))
             underlying_price = 0.0

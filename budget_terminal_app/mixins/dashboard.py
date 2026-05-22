@@ -277,6 +277,11 @@ class DashboardMixin:
             current_main = [int(size) for size in self.dashboard_main_splitter.sizes() if int(size) > 0]
             if len(current_main) == 2:
                 main_splitter_sizes = current_main
+        left_splitter_sizes = getattr(self, 'dashboard_chart_state', {}).get('left_splitter_sizes', [3, 2, 2])
+        if hasattr(self, 'dashboard_left_splitter'):
+            current_left = [int(size) for size in self.dashboard_left_splitter.sizes() if int(size) > 0]
+            if len(current_left) == 3:
+                left_splitter_sizes = current_left
         state = normalize_dashboard_chart_settings({
             **getattr(self, 'dashboard_chart_state', {}),
             'symbol': getattr(self, 'dashboard_symbol', self.dashboard_chart_state.get('symbol', 'SPY')),
@@ -285,6 +290,7 @@ class DashboardMixin:
             'auto': getattr(self, 'dashboard_auto_follow', self.dashboard_chart_state.get('auto', True)),
             'splitter_sizes': splitter_sizes,
             'main_splitter_sizes': main_splitter_sizes,
+            'left_splitter_sizes': left_splitter_sizes,
         })
         self.dashboard_chart_state = state
         if hasattr(self, '_persist_dashboard_state'):
@@ -314,15 +320,10 @@ class DashboardMixin:
         self._dashboard_save_state()
 
     def _p1_save_left_splitter_sizes(self, *_: Any) -> None:
-        """Persist the dashboard left-column splitter sizes to disk."""
+        """Persist the dashboard left-column splitter sizes with dashboard settings."""
         if not hasattr(self, 'dashboard_left_splitter'):
             return
-        sizes = [int(s) for s in self.dashboard_left_splitter.sizes() if int(s) > 0]
-        if len(sizes) == 3:
-            try:
-                _P1_LEFT_SPLITTER_CONFIG.write_text(json.dumps(sizes))
-            except Exception:
-                pass
+        self._dashboard_save_state()
 
     def _p1_enforce_left_splitter_min_height(self) -> None:
         """Clamp the dashboard portfolio section to a compact but non-collapsed height."""
@@ -362,14 +363,20 @@ class DashboardMixin:
         self._p1_save_left_splitter_sizes()
 
     def _p1_restore_left_splitter_sizes(self) -> None:
-        """Restore saved dashboard left-column splitter sizes from disk."""
+        """Restore saved dashboard left-column splitter sizes."""
         if not hasattr(self, 'dashboard_left_splitter'):
             return
+        state = getattr(self, 'dashboard_chart_state', {})
+        sizes = state.get('left_splitter_sizes') if isinstance(state, dict) else None
+        if not sizes:
+            try:
+                sizes = json.loads(_P1_LEFT_SPLITTER_CONFIG.read_text())
+            except Exception:
+                sizes = None
+        normalized = normalize_dashboard_chart_settings({'left_splitter_sizes': sizes}).get('left_splitter_sizes', [3, 2, 2])
         try:
-            sizes = json.loads(_P1_LEFT_SPLITTER_CONFIG.read_text())
-            if isinstance(sizes, list) and len(sizes) == 3:
-                self.dashboard_left_splitter.setSizes([int(s) for s in sizes])
-                self._p1_enforce_left_splitter_min_height()
+            self.dashboard_left_splitter.setSizes([int(s) for s in normalized])
+            self._p1_enforce_left_splitter_min_height()
         except Exception:
             pass
 
@@ -1009,7 +1016,12 @@ class DashboardMixin:
     def _execute_refresh_data(self) -> None:
         """Perform the dashboard refresh immediately."""
         refresh_reason = str(getattr(self, '_dashboard_pending_refresh_reason', 'full') or 'full')
-        allow_non_chart_reuse = refresh_reason == 'portfolio_row_click'
+        allow_non_chart_reuse = refresh_reason in {
+            'portfolio_row_click',
+            'startup_blocking',
+            'startup_visible_refresh',
+            _DASHBOARD_MEMBERSHIP_REFRESH_REASON,
+        }
         membership_only_refresh = refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON
         self._dashboard_pending_refresh_reason = 'full'
         self.dashboard_symbol = str(self.dashboard_symbol_input.text() or self.dashboard_chart_state.get('symbol') or 'SPY').upper().strip()
@@ -1031,6 +1043,9 @@ class DashboardMixin:
             'period': period,
             'interval': interval,
         }
+        recent_request_keys = getattr(self, '_startup_recent_data_request_keys', None)
+        if isinstance(recent_request_keys, set):
+            recent_request_keys.add(('chart', self.dashboard_symbol, str(period), str(interval)))
         self.dashboard_pending_x_range = self._dashboard_get_current_x_range() if self.dashboard_auto_follow else (self._dashboard_get_current_x_range() or self.dashboard_manual_x_range)
         chart_configs_snapshot = list(self.chart_configs)
         self.dashboard_load_btn.setEnabled(False)
@@ -1040,6 +1055,9 @@ class DashboardMixin:
             self._dashboard_set_status(f'Loading {self.dashboard_symbol} {self.dashboard_timeframe_label}...', 'info')
             if not getattr(self, '_startup_dashboard_data_done', False):
                 self._startup_progress_begin('dashboard_data', 'Dashboard Data')
+        if refresh_reason == 'startup_visible_refresh' and not getattr(self, '_startup_dashboard_data_actual_done', False):
+            self._startup_dashboard_timeout_pending = True
+            QTimer.singleShot(self._STARTUP_DASHBOARD_DATA_TIMEOUT_MS, self._on_startup_dashboard_timeout)
         self.worker_thread = threading.Thread(
             target=self.run_worker,
             args=(request_id, chart_configs_snapshot, refresh_reason, allow_non_chart_reuse),

@@ -27,6 +27,8 @@ class OptionsTableEventsMixin:
         """Handle strategy changed item."""
         row = self.p4_opt_table.row(ticker_item)
         if 0 <= row < len(self.options_data):
+            if hasattr(self, '_option_strategy_value'):
+                strategy = self._option_strategy_value(strategy)
             self.options_data[row]['strategy'] = strategy
             self._save_active_options_data()
             self._fetch_single_option_price(row)
@@ -59,13 +61,15 @@ class OptionsTableEventsMixin:
     def _on_strategy_changed(self, row: Any, strategy: Any) -> None:
         """Handle strategy changed."""
         if row < len(self.options_data):
+            if hasattr(self, '_option_strategy_value'):
+                strategy = self._option_strategy_value(strategy)
             self.options_data[row]['strategy'] = strategy
             self._save_active_options_data()
 
     def _on_options_cell_changed(self, item: Any) -> None:
         """Handle options cell changed."""
         col = item.column()
-        if col not in (0, 4, 5, 6):
+        if col not in (0, 3, 4, 5):
             return
         row = item.row()
         if row >= len(self.options_data):
@@ -87,12 +91,12 @@ class OptionsTableEventsMixin:
                 if ticker:
                     row_id = str(pos.get('row_id', '') or '').strip()
                     self._fetch_option_expiries(row_id, ticker)
-            elif col == 4:
+            elif col == 3:
                 pos['strike'] = float(text.replace('$', '').replace(',', ''))
                 self._fetch_single_option_price(row)
-            elif col == 5:
+            elif col == 4:
                 pos['contracts'] = int(float(text))
-            elif col == 6:
+            elif col == 5:
                 pos['premium'] = float(text.replace('$', '').replace(',', ''))
         except (ValueError, TypeError):
             pass
@@ -100,7 +104,7 @@ class OptionsTableEventsMixin:
         self._recalc_options_row(row)
 
     def _recalc_options_row(self, row: Any) -> Any:
-        """Recalculate DTE, P&L, return %, and ITM status."""
+        """Recalculate P&L, return %, and annualized return."""
         if row >= len(self.options_data):
             return
         t = self.p4_opt_table
@@ -114,10 +118,6 @@ class OptionsTableEventsMixin:
         strategy = pos.get('strategy', 'Calls')
         expiry = pos.get('expiry', '')
         is_seller = strategy in ('Covered Call', 'Cash Secured Put')
-        is_call = 'Call' in strategy or strategy == 'Calls'
-        underlying_price = 0.0
-        if self.last_data and 'portfolio' in self.last_data:
-            underlying_price = self.last_data['portfolio'].get(ticker, {}).get('price', 0.0)
         dte = 0
         if expiry:
             try:
@@ -125,15 +125,6 @@ class OptionsTableEventsMixin:
                 dte = max(0, (exp_date - datetime.date.today()).days)
             except (TypeError, ValueError):
                 pass
-        itm_text = '—'
-        itm_color = self.theme_color('text_muted')
-        if underlying_price > 0 and strike > 0:
-            if is_call:
-                itm = underlying_price > strike
-            else:
-                itm = underlying_price < strike
-            itm_text = 'ITM' if itm else 'OTM'
-            itm_color = self.theme_color('warning' if itm else 'accent')
         pl_dollar = (premium - current if is_seller else current - premium) * contracts * 100
         if is_seller:
             capital = strike * contracts * 100 if strike > 0 else 0
@@ -160,11 +151,9 @@ class OptionsTableEventsMixin:
             if color:
                 it.setForeground(QColor(color))
             return it
-        dte_color = self.theme_color('accent_negative' if 0 < dte <= 7 else 'warning' if dte <= 30 else 'text_muted')
-        t.setItem(row, 3, _ro(f'{dte}d ({itm_text})' if expiry else '—', dte_color if not expiry else itm_color))
         pl_clr = self.theme_color('accent_positive' if pl_dollar >= 0 else 'accent_negative')
-        t.setItem(row, 11, _ro(f'{pl_dollar:+.2f}', pl_clr))
-        t.setItem(row, 12, _ro(f'{return_pct:+.1f}%', pl_clr))
-        t.setItem(row, 13, _ro(f'{annual_pct:+.1f}%', pl_clr))
+        t.setItem(row, 10, _ro(f'{pl_dollar:+.2f}', pl_clr))
+        t.setItem(row, 11, _ro(f'{return_pct:+.1f}%', pl_clr))
+        t.setItem(row, 12, _ro(f'{annual_pct:+.1f}%', pl_clr))
         t.blockSignals(False)
         self._update_total_pl_label()

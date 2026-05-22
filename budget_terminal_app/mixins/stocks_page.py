@@ -56,6 +56,7 @@ class StocksPageMixin:
         self._stocks_chart_interval = STOCKS_CHART_INTERVAL
         self._stocks_loaded_symbol = ''
         self._stocks_loaded_news = []
+        self._stocks_loaded_institutional_rows = []
         self._stocks_loaded_insider_rows = []
         self._stocks_info = {}
         self._stocks_metric_name_labels = []
@@ -79,31 +80,31 @@ class StocksPageMixin:
         self.stocks_target_labels = {}
 
         layout = QHBoxLayout(self.page12)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(0)
 
         left_column = QWidget()
         left_column.setMinimumWidth(300)
         left_layout = QVBoxLayout(left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
+        left_layout.setSpacing(6)
 
         ticker_frame = QFrame()
         self.set_theme_role(ticker_frame, 'panel')
-        ticker_frame.setMinimumHeight(172)
+        ticker_frame.setMinimumHeight(132)
         ticker_layout = QVBoxLayout(ticker_frame)
-        ticker_layout.setContentsMargins(14, 12, 14, 12)
-        ticker_layout.setSpacing(8)
+        ticker_layout.setContentsMargins(10, 8, 10, 8)
+        ticker_layout.setSpacing(5)
         self.stocks_symbol_input = QLineEdit(self.stocks_symbol)
         self.stocks_symbol_input.setPlaceholderText('Stock ticker')
         self.stocks_symbol_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.stocks_symbol_input.setMinimumHeight(42)
+        self.stocks_symbol_input.setMinimumHeight(32)
         self.stocks_symbol_input.returnPressed.connect(self._stocks_load_from_input)
         ticker_layout.addWidget(self.stocks_symbol_input)
         ticker_actions = QGridLayout()
         ticker_actions.setContentsMargins(0, 0, 0, 0)
-        ticker_actions.setHorizontalSpacing(8)
-        ticker_actions.setVerticalSpacing(8)
+        ticker_actions.setHorizontalSpacing(6)
+        ticker_actions.setVerticalSpacing(6)
         self.stocks_load_btn = QPushButton('Load')
         self.set_theme_variant(self.stocks_load_btn, 'accent')
         self.stocks_load_btn.clicked.connect(self._stocks_load_from_input)
@@ -129,14 +130,14 @@ class StocksPageMixin:
         fundamentals_frame = QFrame()
         self.set_theme_role(fundamentals_frame, 'panel')
         fundamentals_layout = QVBoxLayout(fundamentals_frame)
-        fundamentals_layout.setContentsMargins(14, 12, 14, 12)
-        fundamentals_layout.setSpacing(10)
+        fundamentals_layout.setContentsMargins(10, 8, 10, 8)
+        fundamentals_layout.setSpacing(5)
         self.stocks_company_label = QLabel('—')
         self.stocks_company_label.setWordWrap(True)
         fundamentals_layout.addWidget(self.stocks_company_label)
         fundamentals_grid = QGridLayout()
         fundamentals_grid.setHorizontalSpacing(12)
-        fundamentals_grid.setVerticalSpacing(4)
+        fundamentals_grid.setVerticalSpacing(2)
         for row_index, (label_text, field_key) in enumerate(STOCKS_FUNDAMENTAL_FIELDS):
             grid_row = row_index * 2
             name_label = QLabel(label_text)
@@ -164,14 +165,14 @@ class StocksPageMixin:
         price_targets_frame = QFrame()
         self.set_theme_role(price_targets_frame, 'panel')
         targets_layout = QVBoxLayout(price_targets_frame)
-        targets_layout.setContentsMargins(14, 12, 14, 12)
-        targets_layout.setSpacing(8)
+        targets_layout.setContentsMargins(10, 8, 10, 8)
+        targets_layout.setSpacing(5)
         targets_title = QLabel('Price Targets')
         self.set_theme_role(targets_title, 'section_title')
         targets_layout.addWidget(targets_title)
         targets_grid = QGridLayout()
         targets_grid.setHorizontalSpacing(12)
-        targets_grid.setVerticalSpacing(6)
+        targets_grid.setVerticalSpacing(3)
         for row_index, (label_text, field_key) in enumerate(STOCKS_PRICE_TARGET_FIELDS):
             name_label = QLabel(label_text)
             value_label = QLabel('—')
@@ -188,8 +189,8 @@ class StocksPageMixin:
         news_frame = QFrame()
         self.set_theme_role(news_frame, 'panel')
         news_layout = QVBoxLayout(news_frame)
-        news_layout.setContentsMargins(14, 12, 14, 12)
-        news_layout.setSpacing(8)
+        news_layout.setContentsMargins(10, 8, 10, 8)
+        news_layout.setSpacing(5)
         news_title = QLabel('News')
         self.set_theme_role(news_title, 'section_title')
         news_layout.addWidget(news_title)
@@ -197,32 +198,62 @@ class StocksPageMixin:
         self.stocks_news_empty.setWordWrap(True)
         news_layout.addWidget(self.stocks_news_empty)
         self.stocks_news_table = self._make_news_table(self._open_news_link_table)
-        self.stocks_news_table.verticalHeader().setDefaultSectionSize(24)
-        self.stocks_news_table.horizontalHeader().setMinimumHeight(28)
+        self.stocks_news_table.verticalHeader().setDefaultSectionSize(22)
+        self.stocks_news_table.horizontalHeader().setMinimumHeight(24)
         self.stocks_news_table.setAlternatingRowColors(True)
         self.stocks_news_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.stocks_news_table.setVisible(False)
         news_layout.addWidget(self.stocks_news_table, 1)
 
+        institutional_frame = QFrame()
+        self.set_theme_role(institutional_frame, 'panel')
+        institutional_layout = QVBoxLayout(institutional_frame)
+        institutional_layout.setContentsMargins(10, 8, 10, 8)
+        institutional_layout.setSpacing(5)
+        institutional_title = QLabel('Top Institutional holders')
+        self.set_theme_role(institutional_title, 'section_title')
+        institutional_layout.addWidget(institutional_title)
+        self.stocks_institutional_empty = QLabel('Load a ticker to inspect top institutional holders.')
+        self.stocks_institutional_empty.setWordWrap(True)
+        institutional_layout.addWidget(self.stocks_institutional_empty)
+        self.stocks_institutional_table = QTableWidget(0, 6)
+        self.stocks_institutional_table.setHorizontalHeaderLabels(['Holder', '% Held', 'Shares', 'Value', 'Change', 'Reported'])
+        self.stocks_institutional_table.verticalHeader().setVisible(False)
+        self.stocks_institutional_table.verticalHeader().setDefaultSectionSize(22)
+        self.stocks_institutional_table.setAlternatingRowColors(True)
+        self.stocks_institutional_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stocks_institutional_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.stocks_institutional_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        institutional_header = self.stocks_institutional_table.horizontalHeader()
+        institutional_header.setMinimumHeight(24)
+        institutional_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        institutional_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        institutional_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        institutional_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        institutional_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        institutional_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.stocks_institutional_table.setVisible(False)
+        institutional_layout.addWidget(self.stocks_institutional_table, 1)
+
         description_frame = QFrame()
         self.set_theme_role(description_frame, 'panel')
         description_layout = QVBoxLayout(description_frame)
-        description_layout.setContentsMargins(14, 12, 14, 12)
-        description_layout.setSpacing(8)
+        description_layout.setContentsMargins(10, 8, 10, 8)
+        description_layout.setSpacing(5)
         description_title = QLabel('Description')
         self.set_theme_role(description_title, 'section_title')
         description_layout.addWidget(description_title)
         self.stocks_description_output = QPlainTextEdit()
         self.stocks_description_output.setReadOnly(True)
         self.stocks_description_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.stocks_description_output.setMinimumHeight(120)
+        self.stocks_description_output.setMinimumHeight(80)
         description_layout.addWidget(self.stocks_description_output, 1)
 
         insider_frame = QFrame()
         self.set_theme_role(insider_frame, 'panel')
         insider_layout = QVBoxLayout(insider_frame)
-        insider_layout.setContentsMargins(14, 12, 14, 12)
-        insider_layout.setSpacing(8)
+        insider_layout.setContentsMargins(10, 8, 10, 8)
+        insider_layout.setSpacing(5)
         insider_title = QLabel('Insider transactions')
         self.set_theme_role(insider_title, 'section_title')
         insider_layout.addWidget(insider_title)
@@ -232,13 +263,13 @@ class StocksPageMixin:
         self.stocks_insider_table = QTableWidget(0, 6)
         self.stocks_insider_table.setHorizontalHeaderLabels(['Date', 'Insider', 'Title/Relation', 'Transaction', 'Shares', 'Value'])
         self.stocks_insider_table.verticalHeader().setVisible(False)
-        self.stocks_insider_table.verticalHeader().setDefaultSectionSize(24)
+        self.stocks_insider_table.verticalHeader().setDefaultSectionSize(22)
         self.stocks_insider_table.setAlternatingRowColors(True)
         self.stocks_insider_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stocks_insider_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self.stocks_insider_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         insider_header = self.stocks_insider_table.horizontalHeader()
-        insider_header.setMinimumHeight(28)
+        insider_header.setMinimumHeight(24)
         insider_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         insider_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         insider_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -251,8 +282,8 @@ class StocksPageMixin:
         chart_frame = QFrame()
         self.set_theme_role(chart_frame, 'panel')
         chart_layout = QVBoxLayout(chart_frame)
-        chart_layout.setContentsMargins(14, 12, 14, 12)
-        chart_layout.setSpacing(8)
+        chart_layout.setContentsMargins(10, 8, 10, 8)
+        chart_layout.setSpacing(5)
         chart_title_row = QHBoxLayout()
         self.stocks_chart_title = QLabel('Stock Chart')
         self.set_theme_role(self.stocks_chart_title, 'page_title')
@@ -297,7 +328,7 @@ class StocksPageMixin:
         self.stocks_mfi_plot.getPlotItem().setMenuEnabled(False)
         self.stocks_mfi_plot.getPlotItem().hideAxis('left')
         self.stocks_mfi_plot.getPlotItem().showAxis('right')
-        self.stocks_mfi_plot.setMaximumHeight(160)
+        self.stocks_mfi_plot.setMaximumHeight(120)
         self.stocks_mfi_plot.setXLink(self.stocks_plot)
         self.stocks_mfi_plot.getPlotItem().vb.sigRangeChanged.connect(self._stocks_refresh_mfi_overlay_position)
         chart_layout.addWidget(self.stocks_mfi_plot)
@@ -321,9 +352,11 @@ class StocksPageMixin:
         self.stocks_middle_splitter = QSplitter(Qt.Orientation.Vertical)
         self.stocks_middle_splitter.setHandleWidth(6)
         self.stocks_middle_splitter.addWidget(news_frame)
+        self.stocks_middle_splitter.addWidget(institutional_frame)
         self.stocks_middle_splitter.addWidget(insider_frame)
         self.stocks_middle_splitter.setStretchFactor(0, 2)
-        self.stocks_middle_splitter.setStretchFactor(1, 3)
+        self.stocks_middle_splitter.setStretchFactor(1, 2)
+        self.stocks_middle_splitter.setStretchFactor(2, 3)
         middle_layout.addWidget(self.stocks_middle_splitter, 1)
 
         right_column = QWidget()
@@ -403,7 +436,7 @@ class StocksPageMixin:
             'mfi_enabled': self.stocks_mfi_enabled,
             'main_splitter_sizes': self._stocks_current_splitter_sizes('stocks_main_splitter', 3, 'main_splitter_sizes'),
             'left_splitter_sizes': self._stocks_current_splitter_sizes('stocks_left_splitter', 3, 'left_splitter_sizes'),
-            'middle_splitter_sizes': self._stocks_current_splitter_sizes('stocks_middle_splitter', 2, 'middle_splitter_sizes'),
+            'middle_splitter_sizes': self._stocks_current_splitter_sizes('stocks_middle_splitter', 3, 'middle_splitter_sizes'),
         })
 
     def _stocks_current_splitter_sizes(self, splitter_name: str, expected_count: int, state_key: str) -> list[int]:
@@ -640,8 +673,31 @@ class StocksPageMixin:
             'quarterly_balance_sheet': quarterly_balance_sheet,
             'earnings_dates': earnings_dates,
             'news': self._stocks_fetch_news_items(ticker_obj, symbol),
+            'institutional_rows': self._stocks_fetch_institutional_rows(ticker_obj),
             'insider_rows': self._stocks_fetch_insider_rows(ticker_obj),
         }
+
+    def _stocks_fetch_institutional_rows(self, ticker_obj: Any) -> list[dict[str, Any]]:
+        raw_rows = None
+        getter = getattr(ticker_obj, 'get_institutional_holders', None)
+        if callable(getter):
+            try:
+                raw_rows = getter()
+            except Exception:
+                raw_rows = None
+        if raw_rows is None:
+            try:
+                raw_rows = getattr(ticker_obj, 'institutional_holders', None)
+            except Exception:
+                raw_rows = None
+        if raw_rows is None:
+            return []
+        if not isinstance(raw_rows, pd.DataFrame):
+            try:
+                raw_rows = pd.DataFrame(raw_rows)
+            except Exception:
+                return []
+        return self._stocks_normalize_institutional_rows(raw_rows)
 
     def _stocks_fetch_insider_rows(self, ticker_obj: Any) -> list[dict[str, Any]]:
         raw_rows = None
@@ -708,8 +764,10 @@ class StocksPageMixin:
         self._stocks_show_row_details(len(self._stocks_chart_rows) - 1)
         self._stocks_render_fundamentals(payload)
         self._stocks_loaded_news = [dict(article) for article in list(payload.get('news', []) or []) if isinstance(article, dict)]
+        self._stocks_loaded_institutional_rows = [dict(row) for row in list(payload.get('institutional_rows', []) or []) if isinstance(row, dict)]
         self._stocks_loaded_insider_rows = [dict(row) for row in list(payload.get('insider_rows', []) or []) if isinstance(row, dict)]
         self._stocks_render_news_rows(self._stocks_loaded_news)
+        self._stocks_render_institutional_rows(self._stocks_loaded_institutional_rows)
         self._stocks_render_insider_rows(self._stocks_loaded_insider_rows)
         self.stocks_load_btn.setEnabled(True)
         self._stocks_pending_x_range = None
@@ -986,8 +1044,26 @@ class StocksPageMixin:
         self.stocks_news_empty.setVisible(False)
         self.stocks_news_table.setVisible(True)
 
+    def _stocks_render_institutional_rows(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            self.stocks_institutional_table.setRowCount(0)
+            self.stocks_institutional_table.setVisible(False)
+            self.stocks_institutional_empty.setVisible(True)
+            self.stocks_institutional_empty.setText('No institutional holder rows were available for this ticker.')
+            return
+        self.stocks_institutional_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for col_index, key in enumerate(('holder', 'pct_held', 'shares', 'value', 'pct_change', 'reported')):
+                item = QTableWidgetItem(str(row.get(key, '—') or '—'))
+                if col_index in (1, 2, 3, 4):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.stocks_institutional_table.setItem(row_index, col_index, item)
+        self.stocks_institutional_empty.setVisible(False)
+        self.stocks_institutional_table.setVisible(True)
+
     def _stocks_render_insider_rows(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
+            self.stocks_insider_table.setRowCount(0)
             self.stocks_insider_table.setVisible(False)
             self.stocks_insider_empty.setVisible(True)
             self.stocks_insider_empty.setText('No insider transaction rows were available for this ticker.')
@@ -1160,6 +1236,30 @@ class StocksPageMixin:
                 )
         lines.extend([
             '',
+            '## Top Institutional Holders',
+            '',
+        ])
+        institutional_rows = list(getattr(self, '_stocks_loaded_institutional_rows', []) or [])
+        if not institutional_rows:
+            lines.append('(no institutional holders loaded)')
+        else:
+            lines.extend([
+                '| Holder | % Held | Shares | Value | Change | Reported |',
+                '| --- | ---: | ---: | ---: | ---: | --- |',
+            ])
+            for row in institutional_rows:
+                lines.append(
+                    '| {holder} | {pct_held} | {shares} | {value} | {pct_change} | {reported} |'.format(
+                        holder=self._stocks_export_escape(row.get('holder', '')),
+                        pct_held=self._stocks_export_escape(row.get('pct_held', '')),
+                        shares=self._stocks_export_escape(row.get('shares', '')),
+                        value=self._stocks_export_escape(row.get('value', '')),
+                        pct_change=self._stocks_export_escape(row.get('pct_change', '')),
+                        reported=self._stocks_export_escape(row.get('reported', '')),
+                    )
+                )
+        lines.extend([
+            '',
             '## Insider Transactions',
             '',
         ])
@@ -1222,6 +1322,53 @@ class StocksPageMixin:
             QMessageBox.critical(self, 'Export Failed', f'Unable to copy Stocks data to the clipboard.\n\n{exc}')
             return
         self._stocks_set_status(f'Stocks export copied to clipboard for {symbol}', 'positive')
+
+    def _stocks_normalize_institutional_rows(self, raw_rows: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_rows, pd.DataFrame) or raw_rows.empty:
+            return []
+        frame = raw_rows.copy()
+        frame.columns = [str(column or '').strip() for column in frame.columns]
+        lower_map = {str(column).casefold(): column for column in frame.columns}
+
+        def find_column(*aliases: str) -> Any:
+            for alias in aliases:
+                alias_key = str(alias).casefold()
+                for lowered, original in lower_map.items():
+                    if alias_key in lowered:
+                        return original
+            return None
+
+        holder_column = find_column('holder', 'institution', 'name')
+        pct_held_column = find_column('pctheld', 'pct held', '% held', 'held')
+        shares_column = find_column('shares')
+        value_column = find_column('value')
+        pct_change_column = find_column('pctchange', 'pct change', '% change', 'change')
+        reported_column = find_column('date reported', 'reported', 'date')
+        if holder_column is None:
+            return []
+
+        sort_columns = [column for column in (pct_held_column, value_column, shares_column) if column is not None]
+        if sort_columns:
+            frame['_sort_score'] = pd.to_numeric(frame[sort_columns[0]], errors='coerce')
+            frame = frame.sort_values(by='_sort_score', ascending=False, na_position='last')
+
+        rows = []
+        for _, row in frame.head(25).iterrows():
+            holder_value = row.get(holder_column)
+            if holder_value is None or pd.isna(holder_value):
+                continue
+            holder_text = str(holder_value or '').strip()
+            if not holder_text:
+                continue
+            rows.append({
+                'holder': holder_text,
+                'pct_held': self._stocks_format_holder_percentage(row.get(pct_held_column)) if pct_held_column else 'N/A',
+                'shares': self._stocks_format_shares(row.get(shares_column)) if shares_column else 'N/A',
+                'value': self._stocks_format_currency(row.get(value_column)) if value_column else 'N/A',
+                'pct_change': self._stocks_format_holder_percentage(row.get(pct_change_column), signed=True) if pct_change_column else 'N/A',
+                'reported': self._stocks_format_date(row.get(reported_column)) if reported_column else 'N/A',
+            })
+        return rows
 
     def _stocks_normalize_insider_rows(self, raw_rows: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_rows, pd.DataFrame) or raw_rows.empty:
@@ -1434,6 +1581,17 @@ class StocksPageMixin:
             return 'N/A'
         return f'{numeric:.2f}%'
 
+    def _stocks_format_holder_percentage(self, value: Any, *, signed: bool=False) -> str:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 'N/A'
+        if not math.isfinite(numeric):
+            return 'N/A'
+        percentage = numeric if abs(numeric) > 1.0 else numeric * 100.0
+        sign = '+' if signed and percentage > 0 else ''
+        return f'{sign}{percentage:.2f}%'
+
     def _stocks_format_compact_value(self, value: Any) -> str:
         try:
             return fmt_num(float(value))
@@ -1511,6 +1669,7 @@ class StocksPageMixin:
         self._stocks_update_mfi_button_style()
         self.set_status_text(self.stocks_status_label, self.stocks_status_label.text(), status=self.stocks_status_label.property('bt_status') or 'muted')
         self.stocks_news_empty.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
+        self.stocks_institutional_empty.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         self.stocks_insider_empty.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         self.stocks_description_output.setStyleSheet(
             f'background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_primary")}; '
@@ -1527,6 +1686,12 @@ class StocksPageMixin:
         for label in self._stocks_target_value_labels:
             label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px;')
         self.stocks_insider_table.setStyleSheet(
+            f'QTableWidget {{ background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_primary")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; }} '
+            f'QHeaderView::section {{ background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_secondary")}; '
+            f'border: 1px solid {self.theme_color("panel_border")}; padding: 4px; }}'
+        )
+        self.stocks_institutional_table.setStyleSheet(
             f'QTableWidget {{ background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_primary")}; '
             f'border: 1px solid {self.theme_color("panel_border")}; }} '
             f'QHeaderView::section {{ background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_secondary")}; '

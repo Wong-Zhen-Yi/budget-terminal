@@ -79,6 +79,7 @@ class WindowBootstrapMixin:
         'first_ui': 'First UI',
         'dashboard_data': 'Dashboard Data',
         'session_restore': 'Session Restore',
+        'startup_data': 'Startup Data',
         'page_warmup': 'Page Warmup',
         'cache_warmup': 'Cache Warmup',
     }
@@ -489,7 +490,10 @@ class WindowBootstrapMixin:
         if not key:
             return
         tabs = self._session_cache_tabs()
-        tabs[key] = deepcopy(payload) if isinstance(payload, dict) else None
+        snapshot = deepcopy(payload) if isinstance(payload, dict) else None
+        if isinstance(snapshot, dict):
+            snapshot['_session_saved_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        tabs[key] = snapshot
         self._persist_tab_session_cache(immediate=immediate)
 
     def _clear_tab_session_cache(self, *, immediate: bool=False) -> None:
@@ -816,14 +820,22 @@ class WindowBootstrapMixin:
             self._dashboard_refresh_timer.timeout.connect(self._execute_refresh_data)
             self._startup_show_completed = False
             self._startup_refresh_pending = False
+            self._startup_dashboard_refresh_deferred = False
             self._startup_dashboard_timeout_pending = False
             self._startup_dashboard_data_actual_done = False
             self._startup_dashboard_data_timed_out = False
             self._startup_page_prefetch_pending = False
+            self._startup_warmup_mode = 'full_blocking_with_skip'
+            self._startup_released_to_user = False
+            self._startup_release_reason = ''
+            self._startup_data_start_pending = False
+            self._startup_data_start_done = False
+            self._startup_recent_data_request_keys = set()
             self._startup_cache_warmup_pending = False
             self._startup_cache_warmup_queue = []
             self._startup_session_restore_pending = False
             self._startup_session_restore_queue = []
+            self._startup_session_restored_tabs = set()
             self._startup_dashboard_data_done = False
             self._lazy_warmup_started = False
             self._lazy_warmup_finished = False
@@ -872,7 +884,7 @@ class WindowBootstrapMixin:
         height = min(800, max(480, available.height() - 100))
         minimum_hint = self.minimumSizeHint()
         width = max(width, minimum_hint.width())
-        height = max(height, minimum_hint.height())
+        height = min(height, max(360, available.height() - 40))
         self.resize(width, height)
 
     def _start_clock_timer(self) -> None:

@@ -17,15 +17,49 @@ class _GlobalInputExitFilter(QObject):
 
 
 class _CurrentPageStackedWidget(QStackedWidget):
-    """Stacked widget whose hidden lazy pages do not inflate the window size hint."""
+    """Stacked widget whose pages cannot force the main window taller."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.setMinimumHeight(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+
+    def _height_neutral_hint(self, hint: Any) -> Any:
+        try:
+            hint.setHeight(0)
+        except AttributeError:
+            pass
+        return hint
 
     def sizeHint(self) -> Any:
         widget = self.currentWidget()
-        return widget.sizeHint() if widget is not None else super().sizeHint()
+        hint = widget.sizeHint() if widget is not None else super().sizeHint()
+        return self._height_neutral_hint(hint)
 
     def minimumSizeHint(self) -> Any:
         widget = self.currentWidget()
-        return widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+        hint = widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+        return self._height_neutral_hint(hint)
+
+
+class _MainPageWidget(QWidget):
+    """Top-level page widget that preserves width hints but not height pressure."""
+
+    def sizeHint(self) -> Any:
+        hint = super().sizeHint()
+        try:
+            hint.setHeight(0)
+        except AttributeError:
+            pass
+        return hint
+
+    def minimumSizeHint(self) -> Any:
+        hint = super().minimumSizeHint()
+        try:
+            hint.setHeight(0)
+        except AttributeError:
+            pass
+        return hint
 
 
 class WindowSetupMixin:
@@ -46,10 +80,14 @@ class WindowSetupMixin:
         11: 'Options',
         12: 'ETF',
         13: 'Pre-Market',
-        14: 'Politics',
-        15: 'YouTube',
-        16: 'Settings',
-        17: 'Roll',
+        14: 'Crypto',
+        15: 'Politics',
+        16: 'YouTube',
+        17: 'Settings',
+        18: 'Roll',
+        19: 'Trading Volumes',
+        20: 'IPO',
+        21: 'DATAROMA',
     }
 
     def init_ui(self) -> None:
@@ -63,6 +101,21 @@ class WindowSetupMixin:
         self._initialize_startup_pages()
         self._register_navigation_pages()
         self._start_clock_timer()
+
+    def _prepare_main_page_widget(self, page: Any) -> Any:
+        """Keep a top-level page from contributing vertical minimum height."""
+        if page is None:
+            return page
+        try:
+            page.setMinimumHeight(0)
+            page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        except AttributeError:
+            pass
+        return page
+
+    def _new_main_page_widget(self) -> Any:
+        """Create a main stack page with height-neutral sizing behavior."""
+        return self._prepare_main_page_widget(_MainPageWidget())
 
     def _setup_window_shell(self, root_layout: Any) -> None:
         """Handle setup window shell."""
@@ -86,16 +139,22 @@ class WindowSetupMixin:
         self.btn_page13.setCheckable(True)
         self.btn_page14 = QPushButton('Pre-Market')
         self.btn_page14.setCheckable(True)
+        self.btn_page19 = QPushButton('Crypto')
+        self.btn_page19.setCheckable(True)
         self.btn_page6 = QPushButton('Personal Finance')
         self.btn_page6.setCheckable(True)
         self.btn_page7 = QPushButton('Calendar')
         self.btn_page7.setCheckable(True)
+        self.btn_page20 = QPushButton('Trading Volumes')
+        self.btn_page20.setCheckable(True)
         self.btn_page8 = QPushButton('Sectors')
         self.btn_page8.setCheckable(True)
         self.btn_page17 = QPushButton('Heatmap')
         self.btn_page17.setCheckable(True)
         self.btn_page15 = QPushButton('Politics')
         self.btn_page15.setCheckable(True)
+        self.btn_page22 = QPushButton('DATAROMA')
+        self.btn_page22.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
         self.btn_page16.setCheckable(True)
         self.btn_page9 = QPushButton('Settings')
@@ -108,11 +167,14 @@ class WindowSetupMixin:
         self.btn_page12.setCheckable(True)
         self.btn_page18 = QPushButton('Roll')
         self.btn_page18.setCheckable(True)
+        self.btn_page21 = QPushButton('IPO')
+        self.btn_page21.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
             self.btn_page4,
             self.btn_page6,
             self.btn_page7,
+            self.btn_page20,
             self.btn_page3,
             self.btn_page8,
             self.btn_page17,
@@ -122,9 +184,12 @@ class WindowSetupMixin:
             self.btn_page5,
             self.btn_page13,
             self.btn_page14,
+            self.btn_page19,
             self.btn_page15,
+            self.btn_page22,
             self.btn_page16,
             self.btn_page18,
+            self.btn_page21,
             self.btn_page9,
         ]
         self.top_refresh_btn = QPushButton('Reload (F5)')
@@ -214,9 +279,14 @@ class WindowSetupMixin:
         self.top_bar.addWidget(self.top_refresh_btn)
         root_layout.addLayout(self.top_bar)
         self.stacked_widget = _CurrentPageStackedWidget()
-        root_layout.addWidget(self.stacked_widget)
+        self.stacked_widget.setMinimumHeight(0)
+        self.stacked_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        root_layout.addWidget(self.stacked_widget, 1)
         footer_row = QHBoxLayout()
         self.status_bar = QLabel('Ready')
+        self.status_bar.setMinimumWidth(0)
+        self.status_bar.setWordWrap(False)
+        self.status_bar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.set_theme_role(self.status_bar, 'status_muted')
         self.data_collection_label = QLabel('Data collected: awaiting first refresh')
         self.set_theme_role(self.data_collection_label, 'status_muted')
@@ -412,7 +482,7 @@ class WindowSetupMixin:
         started_at = time.perf_counter()
         logger.info('Page load started: Dashboard (index 0, startup).')
         self._startup_progress_begin_page(0, 'Dashboard')
-        self.page1 = QWidget()
+        self.page1 = self._new_main_page_widget()
         self.stacked_widget.addWidget(self.page1)
         main_layout = QHBoxLayout(self.page1)
         self.dashboard_main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -763,10 +833,14 @@ class WindowSetupMixin:
             {'index': 11, 'page_attr': 'page5', 'init_method': 'init_page5', 'theme_hook': '_apply_options_chain_theme'},
             {'index': 12, 'page_attr': 'page13', 'init_method': 'init_page13', 'theme_hook': '_apply_etf_theme'},
             {'index': 13, 'page_attr': 'page14', 'init_method': 'init_page14'},
-            {'index': 14, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
-            {'index': 15, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
-            {'index': 16, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
-            {'index': 17, 'page_attr': 'page18', 'init_method': 'init_page18', 'theme_hook': '_apply_random_recommender_theme'},
+            {'index': 14, 'page_attr': 'page19', 'init_method': 'init_page19', 'theme_hook': '_apply_crypto_theme'},
+            {'index': 15, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
+            {'index': 16, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
+            {'index': 17, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+            {'index': 18, 'page_attr': 'page18', 'init_method': 'init_page18', 'theme_hook': '_apply_random_recommender_theme'},
+            {'index': 19, 'page_attr': 'page20', 'init_method': 'init_page20'},
+            {'index': 20, 'page_attr': 'page21', 'init_method': 'init_page21', 'theme_hook': '_apply_ipo_theme'},
+            {'index': 21, 'page_attr': 'page22', 'init_method': 'init_page22', 'theme_hook': '_apply_dataroma_theme'},
         )
 
     def _register_lazy_pages(self) -> None:
@@ -774,7 +848,7 @@ class WindowSetupMixin:
         self._startup_progress_begin('lazy_registry', 'Page registry')
         self._lazy_page_registry = {}
         for spec in self._lazy_page_specs():
-            placeholder = QWidget()
+            placeholder = self._new_main_page_widget()
             setattr(self, spec['page_attr'], placeholder)
             self.stacked_widget.addWidget(placeholder)
             if spec.get('placeholder_only'):
@@ -854,7 +928,7 @@ class WindowSetupMixin:
         page_label = self._page_label(page_index)
         logger.info('Page load started: %s (index %s, reason=%s).', page_label, page_index, reason)
         self._startup_progress_begin_page(page_index, page_label)
-        page = QWidget()
+        page = self._new_main_page_widget()
         setattr(self, page_attr, page)
         self.stacked_widget.insertWidget(page_index, page)
         init_method = getattr(self, str(entry.get('init_method', '') or ''), None)
@@ -878,6 +952,9 @@ class WindowSetupMixin:
         hydrate_hook = getattr(self, str(entry.get('hydrate_hook', '') or ''), None)
         if callable(hydrate_hook):
             hydrate_hook()
+        session_restore_hook = getattr(self, '_restore_lazy_session_for_page', None)
+        if callable(session_restore_hook):
+            session_restore_hook(page_index)
         if hasattr(self, '_lazy_warmup_queue') and int(entry['index']) in getattr(self, '_lazy_warmup_queue', []):
             self._lazy_warmup_queue = [value for value in self._lazy_warmup_queue if int(value) != int(entry['index'])]
         self._bind_page_interaction_logging(page, page_index)

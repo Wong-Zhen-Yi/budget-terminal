@@ -12,6 +12,7 @@ if project_root not in sys.path:
 from budget_terminal_app import __version__
 
 app_name = f'BudgetTerminal-v{__version__}'
+manifest_path = os.path.join(project_root, 'packaging', 'budget_terminal_dpi_manifest.xml')
 
 datas = collect_data_files('budget_terminal_app', includes=['assets/app_icon.png'])
 datas += collect_data_files('tzdata')
@@ -68,6 +69,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon='budget_terminal_app/assets/app_icon.ico',
+    manifest=manifest_path,
 )
 
 coll = COLLECT(

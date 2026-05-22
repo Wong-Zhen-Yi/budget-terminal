@@ -48,8 +48,8 @@ class YouTubeMixin:
         self._p16_thumbnail_timeout.timeout.connect(self._p16_on_thumbnail_timeout)
 
         layout = QVBoxLayout(self.page16)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
 
         title_row = QHBoxLayout()
         title_lbl = QLabel('<b>YouTube</b>')
@@ -73,15 +73,15 @@ class YouTubeMixin:
 
         detail_box = QGroupBox('Selected Video')
         self.set_theme_role(detail_box, 'panel')
-        detail_box.setMinimumWidth(340)
+        detail_box.setMinimumWidth(300)
         detail_layout = QVBoxLayout(detail_box)
-        detail_layout.setContentsMargins(10, 10, 10, 10)
-        detail_layout.setSpacing(8)
+        detail_layout.setContentsMargins(8, 6, 8, 6)
+        detail_layout.setSpacing(5)
 
         self.p16_thumbnail_lbl = _ClickableThumbnailLabel()
         self.p16_thumbnail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.p16_thumbnail_lbl.setMinimumSize(320, 180)
-        self.p16_thumbnail_lbl.setMaximumSize(320, 180)
+        self.p16_thumbnail_lbl.setMinimumSize(280, 158)
+        self.p16_thumbnail_lbl.setMaximumSize(280, 158)
         self.p16_thumbnail_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.p16_thumbnail_lbl.setScaledContents(False)
         self.p16_thumbnail_lbl.clicked.connect(self._p16_open_selected_thumbnail)
@@ -136,8 +136,8 @@ class YouTubeMixin:
         results_box = QGroupBox('Portfolio YouTube Feed')
         self.set_theme_role(results_box, 'panel')
         results_layout = QVBoxLayout(results_box)
-        results_layout.setContentsMargins(6, 8, 6, 6)
-        results_layout.setSpacing(6)
+        results_layout.setContentsMargins(6, 6, 6, 6)
+        results_layout.setSpacing(4)
 
         self.p16_table = QTableWidget(0, 7)
         self.p16_table.setHorizontalHeaderLabels(['Ticker', 'Title', 'Channel', 'Views', 'Published', 'Days Ago', 'Duration'])

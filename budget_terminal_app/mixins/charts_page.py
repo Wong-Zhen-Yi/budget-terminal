@@ -12,11 +12,21 @@ from budget_terminal_app.data_service.results import (
 from budget_terminal_app.services.chart_data import ChartDataService
 
 
-P10_TIMEFRAME_OPTIONS = [
+P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS = [
     ('1 Minute', '7d', '1m'),
     ('5 Minutes', '60d', '5m'),
     ('15 Minutes', '60d', '15m'),
     ('1 Hour', '730d', '1h'),
+    ('1 Day', '5y', '1d'),
+    ('1 Week', '5y', '1wk'),
+    ('1 Month', '5y', '1mo'),
+]
+P10_MAIN_TIMEFRAME_OPTIONS = [
+    ('1 Minute', '7d', '1m'),
+    ('5 Minutes', '60d', '5m'),
+    ('15 Minutes', '60d', '15m'),
+    ('1 Hour', '730d', '1h'),
+    ('4 Hours', '730d', '4h'),
     ('1 Day', '5y', '1d'),
     ('1 Week', '5y', '1wk'),
     ('1 Month', '5y', '1mo'),
@@ -180,7 +190,10 @@ class ChartsPageMixin:
         self._p10_timeframe_group.setExclusive(True)
         self._p10_compare_timeframe_group = QButtonGroup(self)
         self._p10_compare_timeframe_group.setExclusive(True)
-        self._p10_timeframe_map = {label: (period, interval) for label, period, interval in P10_TIMEFRAME_OPTIONS}
+        self._p10_timeframe_map = {label: (period, interval) for label, period, interval in P10_MAIN_TIMEFRAME_OPTIONS}
+        self._p10_multi_interval_timeframe_map = {
+            label: (period, interval) for label, period, interval in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS
+        }
         self._p10_compare_interval_map = {label: interval for label, interval in P10_COMPARE_INTERVAL_OPTIONS}
         self._p10_compare_range_map = {label: period for label, period in P10_COMPARE_RANGE_OPTIONS}
         if self.p10_timeframe_label not in self._p10_timeframe_map:
@@ -240,7 +253,7 @@ class ChartsPageMixin:
         toolbar.addWidget(self.p10_symbol_input)
         toolbar.addWidget(self.p10_load_btn)
         toolbar.addSpacing(16)
-        for label, _, _ in P10_TIMEFRAME_OPTIONS:
+        for label, _, _ in P10_MAIN_TIMEFRAME_OPTIONS:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setMinimumHeight(26)
@@ -375,7 +388,7 @@ class ChartsPageMixin:
         interval_label = QLabel('Timeframes')
         self.set_theme_role(interval_label, 'muted')
         toolbar.addWidget(interval_label)
-        for label, _, _ in P10_TIMEFRAME_OPTIONS:
+        for label, _, _ in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setMinimumHeight(26)
@@ -1165,7 +1178,7 @@ class ChartsPageMixin:
     def _p10_normalize_multi_interval_labels(self, values: Any) -> list[str]:
         """Normalize saved extra-timeframe selections into a stable ordered list."""
         normalized = []
-        valid_labels = {label for label, _, _ in P10_TIMEFRAME_OPTIONS}
+        valid_labels = {label for label, _, _ in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS}
         for value in list(values or []):
             label = str(value or '').strip()
             if label in valid_labels and label not in normalized:
@@ -1177,12 +1190,12 @@ class ChartsPageMixin:
         normalized = self._p10_normalize_multi_interval_labels(values)
         if normalized:
             return normalized
-        return [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+        return [label for label, _, _ in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS]
 
     def _p10_update_multi_interval_button_styles(self) -> None:
         """Refresh checked-state styling for the multi-interval selector buttons."""
         self.p10_multi_interval_labels = self._p10_normalize_multi_interval_labels(self.p10_multi_interval_labels)
-        all_labels = [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+        all_labels = [label for label, _, _ in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS]
         for label, btn in getattr(self, '_p10_multi_interval_buttons', {}).items():
             is_active = label in self.p10_multi_interval_labels
             btn.blockSignals(True)
@@ -1216,7 +1229,7 @@ class ChartsPageMixin:
 
     def _p10_select_all_multi_intervals(self) -> None:
         """Select every available timeframe for the multi-interval panel view."""
-        all_labels = [label for label, _, _ in P10_TIMEFRAME_OPTIONS]
+        all_labels = [label for label, _, _ in P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS]
         if all_labels == self.p10_multi_interval_labels:
             self._p10_update_multi_interval_button_styles()
             self._p10_refresh_multi_interval_views()
@@ -1240,7 +1253,7 @@ class ChartsPageMixin:
     def _p10_toggle_multi_interval(self, label: Any, checked: Any=False) -> None:
         """Toggle one timeframe in the multi-interval panel view."""
         text = str(label or '').strip()
-        if text not in self._p10_timeframe_map:
+        if text not in self._p10_multi_interval_timeframe_map:
             self._p10_update_multi_interval_button_styles()
             return
         current = list(self.p10_multi_interval_labels)
@@ -1380,7 +1393,7 @@ class ChartsPageMixin:
         header_row = QHBoxLayout()
         title_label = QLabel(label)
         self.set_theme_role(title_label, 'card_title')
-        period, interval = self._p10_timeframe_map.get(label, ('', ''))
+        period, interval = self._p10_multi_interval_timeframe_map.get(label, ('', ''))
         detail_label = QLabel(f'{str(symbol or "").upper().strip() or "SPY"} • {period} / {interval}')
         self.set_theme_role(detail_label, 'muted')
         header_row.addWidget(title_label)
@@ -1697,7 +1710,10 @@ class ChartsPageMixin:
 
     def _p10_fetch_multi_interval_payload(self, symbol: Any, label: Any, *, force_refresh: bool=False) -> Any:
         """Fetch one timeframe dataset for the multi-interval indicator view."""
-        period, interval = self._p10_timeframe_map.get(label, self._p10_timeframe_map['1 Day'])
+        period, interval = self._p10_multi_interval_timeframe_map.get(
+            label,
+            self._p10_multi_interval_timeframe_map['1 Day'],
+        )
         payload = self._chart_fetch_payload(
             symbol,
             period=period,

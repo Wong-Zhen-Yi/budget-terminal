@@ -40,8 +40,8 @@ class SpyHeatmapMixin:
         self._p17_interval_buttons: dict[str, QPushButton] = {}
 
         layout = QVBoxLayout(self.page17)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(5)
 
         title_row = QHBoxLayout()
         self.p17_title_lbl = QLabel("<b>Heatmap</b>")
@@ -52,7 +52,7 @@ class SpyHeatmapMixin:
         for symbol, label, _fetch_symbol in self._P17_ETFS:
             button = QPushButton(label)
             button.setCheckable(True)
-            button.setMinimumHeight(28)
+            button.setMinimumHeight(24)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _checked=False, etf_symbol=symbol: self._p17_select_etf(etf_symbol))
             title_row.addWidget(button)
@@ -65,7 +65,7 @@ class SpyHeatmapMixin:
         for key, label in self._P17_INTERVALS:
             button = QPushButton(label)
             button.setCheckable(True)
-            button.setMinimumHeight(28)
+            button.setMinimumHeight(24)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _checked=False, interval_key=key: self._p17_select_interval(interval_key))
             title_row.addWidget(button)
@@ -80,7 +80,7 @@ class SpyHeatmapMixin:
 
         self.p17_summary_frame = QFrame()
         summary_layout = QHBoxLayout(self.p17_summary_frame)
-        summary_layout.setContentsMargins(12, 6, 12, 6)
+        summary_layout.setContentsMargins(10, 4, 10, 4)
         summary_layout.setSpacing(0)
         self.p17_summary_labels: dict[str, QLabel] = {}
         for index, (key, label, default) in enumerate((
@@ -96,7 +96,7 @@ class SpyHeatmapMixin:
                 sep.setFixedWidth(1)
                 summary_layout.addWidget(sep)
             cell = QVBoxLayout()
-            cell.setContentsMargins(12, 2, 12, 2)
+            cell.setContentsMargins(8, 1, 8, 1)
             cell.setSpacing(1)
             header = QLabel(label)
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -122,8 +122,8 @@ class SpyHeatmapMixin:
 
         self.p17_detail_frame = QFrame()
         detail_layout = QHBoxLayout(self.p17_detail_frame)
-        detail_layout.setContentsMargins(12, 8, 12, 8)
-        detail_layout.setSpacing(18)
+        detail_layout.setContentsMargins(10, 6, 10, 6)
+        detail_layout.setSpacing(12)
         self.p17_detail_symbol_lbl = QLabel("Select a holding")
         self.p17_detail_name_lbl = QLabel("--")
         self.p17_detail_sector_lbl = QLabel("Sector: --")
@@ -138,7 +138,7 @@ class SpyHeatmapMixin:
             self.p17_detail_price_lbl,
             self.p17_detail_change_lbl,
         ):
-            label.setMinimumHeight(22)
+            label.setMinimumHeight(18)
             detail_layout.addWidget(label)
         detail_layout.addStretch()
         layout.addWidget(self.p17_detail_frame)

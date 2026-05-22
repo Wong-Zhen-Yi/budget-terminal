@@ -124,21 +124,21 @@ class OptionsFetchMixin:
             self.options_data[row]['delta'] = data['delta']
         self._save_active_options_data()
         normal_color = self.theme_qcolor('text_primary')
-        if t.item(row, 4):
-            t.item(row, 4).setText(f"{data['strike']:.2f}")
-            t.item(row, 4).setForeground(normal_color)
+        if t.item(row, 3):
+            t.item(row, 3).setText(f"{data['strike']:.2f}")
+            t.item(row, 3).setForeground(normal_color)
+        if t.item(row, 6):
+            t.item(row, 6).setText(f"{data['price']:.2f}")
+            t.item(row, 6).setForeground(normal_color)
         if t.item(row, 7):
-            t.item(row, 7).setText(f"{data['price']:.2f}")
+            t.item(row, 7).setText(self._format_option_count(data.get('volume', 0.0)))
             t.item(row, 7).setForeground(normal_color)
         if t.item(row, 8):
-            t.item(row, 8).setText(self._format_option_count(data.get('volume', 0.0)))
+            t.item(row, 8).setText(self._format_option_count(data.get('open_interest', 0.0)))
             t.item(row, 8).setForeground(normal_color)
         if t.item(row, 9):
-            t.item(row, 9).setText(self._format_option_count(data.get('open_interest', 0.0)))
+            t.item(row, 9).setText(f"{data['iv'] * 100:.1f}%")
             t.item(row, 9).setForeground(normal_color)
-        if t.item(row, 10):
-            t.item(row, 10).setText(f"{data['iv'] * 100:.1f}%")
-            t.item(row, 10).setForeground(normal_color)
 
     def _clean_option_number(self, value: Any, default: float=0.0) -> float:
         """Return a finite float from Yahoo option-chain values."""
@@ -261,18 +261,18 @@ class OptionsFetchMixin:
         error = data.get('error')
         if error:
             err_color = self.theme_qcolor('accent_negative')
+            if t.item(row, 6):
+                t.item(row, 6).setText(error)
+                t.item(row, 6).setForeground(err_color)
             if t.item(row, 7):
-                t.item(row, 7).setText(error)
-                t.item(row, 7).setForeground(err_color)
+                t.item(row, 7).setText('N/A')
+                t.item(row, 7).setForeground(self.theme_qcolor('text_muted'))
             if t.item(row, 8):
                 t.item(row, 8).setText('N/A')
                 t.item(row, 8).setForeground(self.theme_qcolor('text_muted'))
             if t.item(row, 9):
                 t.item(row, 9).setText('N/A')
                 t.item(row, 9).setForeground(self.theme_qcolor('text_muted'))
-            if t.item(row, 10):
-                t.item(row, 10).setText('N/A')
-                t.item(row, 10).setForeground(self.theme_qcolor('text_muted'))
         else:
             self._apply_option_market_data(row, data)
         t.blockSignals(False)
@@ -354,7 +354,14 @@ class OptionsFetchMixin:
             except ValueError:
                 combo.addItem(exp, exp)
         combo.setMinimumHeight(22)
-        combo.setMinimumWidth(130)
+        combo.setMinimumWidth(0)
+        combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        try:
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        except AttributeError:
+            pass
+        if hasattr(self, '_p4_center_option_combo'):
+            self._p4_center_option_combo(combo)
         if saved in expiries:
             combo.setCurrentIndex(expiries.index(saved))
             if row < len(self.options_data) and self.options_data[row].get('expiry') != saved:

@@ -23,6 +23,86 @@ class CalendarPageMixin:
         show_market_holidays = self.p7_export_market_holidays_cb.isChecked() if hasattr(self, 'p7_export_market_holidays_cb') else True
         return show_econ, show_company, show_options, show_market_holidays
 
+    def _p7_normalize_event_date(self, value: Any) -> Any:
+        """Return a date object for cached Calendar event values when possible."""
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        if isinstance(value, datetime.date):
+            return value
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    def _p7_normalize_event_payload(self, payload: Any) -> dict[str, dict[str, Any]]:
+        """Normalize Calendar worker/session payloads into the runtime event shape."""
+        normalized: dict[str, dict[str, Any]] = {}
+        raw_events = payload if isinstance(payload, dict) else {}
+        for raw_ticker, raw_info in raw_events.items():
+            ticker = str(raw_ticker or '').upper().strip()
+            if not ticker or not isinstance(raw_info, dict):
+                continue
+            info: dict[str, Any] = {}
+            earnings_date = self._p7_normalize_event_date(raw_info.get('earnings'))
+            exdiv_date = self._p7_normalize_event_date(raw_info.get('exdiv'))
+            analyst = str(raw_info.get('analyst', '') or '').strip()
+            if earnings_date is not None:
+                info['earnings'] = earnings_date
+            if exdiv_date is not None:
+                info['exdiv'] = exdiv_date
+            if analyst:
+                info['analyst'] = analyst
+            normalized[ticker] = info
+        return normalized
+
+    def _p7_session_snapshot(self) -> dict[str, Any] | None:
+        events = self._p7_normalize_event_payload(getattr(self, '_p7_events', {}))
+        if not events:
+            return None
+        tz_index = self.p7_tz_combo.currentIndex() if hasattr(self, 'p7_tz_combo') else 0
+        return {
+            'events': serialize_session_value(events),
+            'year': int(getattr(self, '_p7_year', 0) or 0),
+            'month': int(getattr(self, '_p7_month', 0) or 0),
+            'timezone_index': int(tz_index),
+        }
+
+    def _p7_save_session_snapshot(self, *, immediate: bool = False) -> None:
+        if hasattr(self, '_set_tab_session_snapshot'):
+            self._set_tab_session_snapshot('calendar', self._p7_session_snapshot(), immediate=immediate)
+
+    def _p7_restore_session_snapshot(self, snapshot: Any) -> bool:
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        events = self._p7_normalize_event_payload(deserialize_session_value(payload.get('events')))
+        if not events:
+            return False
+        self._p7_events = events
+        try:
+            year = int(payload.get('year') or 0)
+            month = int(payload.get('month') or 0)
+        except (TypeError, ValueError):
+            year = month = 0
+        if year > 0 and 1 <= month <= 12:
+            self._p7_year = year
+            self._p7_month = month
+        if hasattr(self, 'p7_tz_combo'):
+            try:
+                tz_index = int(payload.get('timezone_index', self.p7_tz_combo.currentIndex()) or 0)
+            except (TypeError, ValueError):
+                tz_index = self.p7_tz_combo.currentIndex()
+            if 0 <= tz_index < self.p7_tz_combo.count():
+                self.p7_tz_combo.blockSignals(True)
+                self.p7_tz_combo.setCurrentIndex(tz_index)
+                self.p7_tz_combo.blockSignals(False)
+        self._p7_render_month()
+        return True
+
+    def _p7_restore_startup_session(self, snapshot: Any) -> None:
+        self._p7_restore_session_snapshot(snapshot)
+
     def _p7_on_calendar_filter_changed(self, *_: Any) -> None:
         """Re-render the calendar immediately when a category toggle changes."""
         self._p7_render_month()
@@ -65,7 +145,7 @@ class CalendarPageMixin:
             self._p7_render_month()
         self._p7_start_market_holiday_warmup()
 
-    def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 6) -> None:
+    def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 4) -> None:
         """Set all detail tables to the same height based on the tallest one."""
         valid = [t for t in tables if t is not None]
         if not valid:
@@ -252,8 +332,8 @@ class CalendarPageMixin:
     def init_page7(self) -> None:
         """Build the Calendar page UI."""
         layout = QVBoxLayout(self.page7)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
         header = QHBoxLayout()
         title_lbl = QLabel('<b>Calendar</b>')
         title_lbl.setStyleSheet('font-size: 18px; color: white;')
@@ -289,7 +369,7 @@ class CalendarPageMixin:
         for col, day_name in enumerate(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']):
             lbl = QLabel(day_name)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet('font-weight: bold; color: #888; font-size: 20px; padding: 4px;')
+            lbl.setStyleSheet('font-weight: bold; color: #888; font-size: 16px; padding: 2px;')
             self.p7_grid.addWidget(lbl, 0, col)
         self.p7_day_cells = []
         for row in range(6):
@@ -298,7 +378,7 @@ class CalendarPageMixin:
                 cell = QLabel()
                 cell.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
                 cell.setWordWrap(True)
-                cell.setStyleSheet('QLabel { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 4px; padding: 3px; font-size: 12px; min-height: 70px; }')
+                cell.setStyleSheet('QLabel { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 4px; padding: 2px; font-size: 11px; min-height: 48px; }')
                 self.p7_grid.addWidget(cell, row + 1, col)
                 row_cells.append(cell)
             self.p7_day_cells.append(row_cells)
@@ -312,10 +392,10 @@ class CalendarPageMixin:
         company_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         company_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
         company_layout = QVBoxLayout(company_widget)
-        company_layout.setContentsMargins(6, 6, 6, 6)
+        company_layout.setContentsMargins(4, 4, 4, 4)
         company_layout.setSpacing(2)
         company_lbl = QLabel('<b>Upcoming Earnings & Corporate Events</b>')
-        company_lbl.setStyleSheet('font-size: 15px; color: #8888aa;')
+        company_lbl.setStyleSheet('font-size: 13px; color: #8888aa;')
         company_layout.addWidget(company_lbl)
         self.p7_company_events_table = QTableWidget(0, 4)
         self.p7_company_events_table.setHorizontalHeaderLabels(['Date', 'Ticker', 'Event', 'Details'])
@@ -335,10 +415,10 @@ class CalendarPageMixin:
         econ_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         econ_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
         econ_layout = QVBoxLayout(econ_widget)
-        econ_layout.setContentsMargins(6, 6, 6, 6)
+        econ_layout.setContentsMargins(4, 4, 4, 4)
         econ_layout.setSpacing(2)
         econ_lbl = QLabel('<b>Upcoming Economic Events</b>')
-        econ_lbl.setStyleSheet('font-size: 15px; color: #8888aa;')
+        econ_lbl.setStyleSheet('font-size: 13px; color: #8888aa;')
         econ_layout.addWidget(econ_lbl)
         self.p7_economic_events_table = QTableWidget(0, 4)
         self.p7_economic_events_table.setHorizontalHeaderLabels(['Date', 'Ticker', 'Event', 'Details'])
@@ -358,10 +438,10 @@ class CalendarPageMixin:
         market_holidays_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         market_holidays_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
         market_holidays_layout = QVBoxLayout(market_holidays_widget)
-        market_holidays_layout.setContentsMargins(6, 6, 6, 6)
+        market_holidays_layout.setContentsMargins(4, 4, 4, 4)
         market_holidays_layout.setSpacing(2)
         self.p7_market_holidays_label = QLabel('<b>US Market Holidays & Early Closes</b>')
-        self.p7_market_holidays_label.setStyleSheet('font-size: 15px; color: #8888aa;')
+        self.p7_market_holidays_label.setStyleSheet('font-size: 13px; color: #8888aa;')
         market_holidays_layout.addWidget(self.p7_market_holidays_label)
         self.p7_market_holidays_table = QTableWidget(0, 4)
         self.p7_market_holidays_table.setHorizontalHeaderLabels(['Date', 'Market', 'Event', 'Details'])
@@ -381,10 +461,10 @@ class CalendarPageMixin:
         options_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         options_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
         options_tab_layout = QVBoxLayout(options_widget)
-        options_tab_layout.setContentsMargins(6, 6, 6, 6)
+        options_tab_layout.setContentsMargins(4, 4, 4, 4)
         options_tab_layout.setSpacing(2)
         self.p7_options_exp_label = QLabel('<b>Options Expiration</b>')
-        self.p7_options_exp_label.setStyleSheet('font-size: 15px; color: #8888aa;')
+        self.p7_options_exp_label.setStyleSheet('font-size: 13px; color: #8888aa;')
         options_tab_layout.addWidget(self.p7_options_exp_label)
         self.p7_options_exp_table = QTableWidget(0, 7)
         self.p7_options_exp_table.setHorizontalHeaderLabels(['Expiry', 'Ticker', 'Strategy', 'Strike', 'Qty', 'Status', 'Details'])
@@ -404,10 +484,10 @@ class CalendarPageMixin:
         export_opts_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         export_opts_widget.setStyleSheet('background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px;')
         export_opts_layout = QVBoxLayout(export_opts_widget)
-        export_opts_layout.setContentsMargins(6, 6, 6, 6)
+        export_opts_layout.setContentsMargins(4, 4, 4, 4)
         export_opts_layout.setSpacing(4)
         export_opts_lbl = QLabel('<b>Show on Calendar</b>')
-        export_opts_lbl.setStyleSheet('font-size: 15px; color: #8888aa;')
+        export_opts_lbl.setStyleSheet('font-size: 13px; color: #8888aa;')
         export_opts_layout.addWidget(export_opts_lbl)
         cb_style = 'QCheckBox { color: #ccc; font-size: 12px; border: none; }'
         self.p7_export_economic_cb = QCheckBox('Economic Events')
@@ -472,8 +552,9 @@ class CalendarPageMixin:
     def _p7_on_events_ready(self, results: Any) -> None:
         """Handle p7 on events ready."""
         self._p7_fetching = False
-        self._p7_events = results
+        self._p7_events = self._p7_normalize_event_payload(results)
         self._p7_render_month()
+        self._p7_save_session_snapshot()
 
     def _p7_render_month(self) -> None:
         """Handle p7 render month."""

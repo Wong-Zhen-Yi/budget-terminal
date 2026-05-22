@@ -123,6 +123,40 @@ class ChartDataService:
         frame = frame[~frame.index.duplicated(keep="last")].sort_index()
         return frame.dropna(subset=["Open", "High", "Low", "Close"]).copy()
 
+    def aggregate_hourly_to_four_hour_frame(self, df: Any) -> Any:
+        """Build synthetic 4-hour OHLCV candles from consecutive same-session hourly rows."""
+        if df is None or getattr(df, "empty", True):
+            return pd.DataFrame()
+        frame = df.copy()
+        frame.index = self.normalize_datetime_index(frame.index)
+        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        if not required.issubset(frame.columns):
+            return pd.DataFrame()
+        records: list[dict[str, Any]] = []
+        timestamps = []
+        for _, day_frame in frame.groupby(frame.index.date, sort=True):
+            day_frame = day_frame.sort_index()
+            for start in range(0, len(day_frame), 4):
+                chunk = day_frame.iloc[start:start + 4]
+                if chunk.empty:
+                    continue
+                timestamps.append(chunk.index[-1])
+                records.append(
+                    {
+                        "Open": float(chunk["Open"].iloc[0]),
+                        "High": float(chunk["High"].max()),
+                        "Low": float(chunk["Low"].min()),
+                        "Close": float(chunk["Close"].iloc[-1]),
+                        "Volume": float(chunk["Volume"].fillna(0.0).sum()),
+                    }
+                )
+        if not records:
+            return pd.DataFrame()
+        aggregated = pd.DataFrame(records, index=pd.DatetimeIndex(timestamps))
+        aggregated.index = self.normalize_datetime_index(aggregated.index)
+        return aggregated.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+
     def load_cached_frame(self, symbol: Any, *, period: Any, interval: Any, allow_stale: bool = False) -> tuple[Any, dict[str, Any]]:
         cached = self.cache_manager.get_data(
             str(symbol or "").upper().strip(),
@@ -163,8 +197,11 @@ class ChartDataService:
         stale_frame, stale_meta = self.load_cached_frame(symbol_text, period=period, interval=interval, allow_stale=True)
 
         def download_frame() -> Any:
-            raw_df = yf.download(symbol_text, period=period, interval=interval, progress=False, auto_adjust=False)
+            fetch_interval = "1h" if str(interval or "").strip().lower() == "4h" else interval
+            raw_df = yf.download(symbol_text, period=period, interval=fetch_interval, progress=False, auto_adjust=False)
             frame = self.normalize_frame(symbol_text, raw_df)
+            if str(interval or "").strip().lower() == "4h":
+                frame = self.aggregate_hourly_to_four_hour_frame(frame)
             if frame is None or frame.empty:
                 raise ValueError(f"No chart data returned for {symbol_text}.")
             if interval in ("1d", "1wk", "1mo"):

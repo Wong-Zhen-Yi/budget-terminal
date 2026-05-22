@@ -23,6 +23,7 @@ DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
 USER_DATA_BACKUP_VERSION = USER_DATA_SCHEMA_VERSION
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
+LEGACY_DASHBOARD_LEFT_SPLITTER_FILE = user_data_path('p1_left_splitter.json')
 ROLLBACK_BACKUPS_DIR = user_data_path('backups', 'rollbacks')
 CORRUPT_USER_DATA_BACKUPS_DIR = user_data_path('backups', 'corrupt')
 LEGACY_NOTES_IMAGES_DIR = user_data_path('notes_images')
@@ -43,14 +44,22 @@ DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
     'selected_configuration': 'default',
     'custom_selections_by_ticker': {},
 }
-DEFAULT_DASHBOARD_CHART_SETTINGS = {'symbol': 'SPY', 'timeframe_label': '1 Day', 'indicators': ['Volume', '200 MA'], 'auto': True, 'splitter_sizes': [5, 2], 'main_splitter_sizes': [3, 5]}
+DEFAULT_DASHBOARD_CHART_SETTINGS = {
+    'symbol': 'SPY',
+    'timeframe_label': '1 Day',
+    'indicators': ['Volume', '200 MA'],
+    'auto': True,
+    'splitter_sizes': [5, 2],
+    'main_splitter_sizes': [3, 5],
+    'left_splitter_sizes': [3, 2, 2],
+}
 DEFAULT_STOCKS_PAGE_SETTINGS = {
     'symbol': 'SPY',
     'auto': True,
     'mfi_enabled': False,
     'main_splitter_sizes': [3, 3, 5],
     'left_splitter_sizes': [4, 2, 3],
-    'middle_splitter_sizes': [2, 3],
+    'middle_splitter_sizes': [2, 2, 3],
 }
 DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key': '1y'}
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
@@ -683,10 +692,19 @@ def _default_user_data_document() -> Any:
 def _normalize_user_data_document(payload: Any) -> Any:
     """Normalize persisted single-file user data into the canonical shape."""
     default = _default_user_data_document()
+    original_saved = payload if isinstance(payload, dict) else {}
     migration = migrate_user_data_payload(payload, default)
     saved = migration.payload if isinstance(migration.payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
     chart_page_payload = saved.get('chart_page', default['chart_page'])
+    saved_dashboard_chart_payload = saved.get('dashboard_chart')
+    dashboard_chart_payload = saved_dashboard_chart_payload if isinstance(saved_dashboard_chart_payload, dict) else default['dashboard_chart']
+    original_dashboard_chart_payload = original_saved.get('dashboard_chart')
+    if not isinstance(original_dashboard_chart_payload, dict) or 'left_splitter_sizes' not in original_dashboard_chart_payload:
+        legacy_left_splitter_sizes = _load_legacy_dashboard_left_splitter_sizes()
+        if legacy_left_splitter_sizes is not None:
+            dashboard_chart_payload = dict(dashboard_chart_payload)
+            dashboard_chart_payload['left_splitter_sizes'] = legacy_left_splitter_sizes
     exported_compare_presets = saved.get('compare_presets')
     if isinstance(exported_compare_presets, list):
         chart_page_payload = dict(chart_page_payload) if isinstance(chart_page_payload, dict) else {}
@@ -699,7 +717,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'portfolios': portfolio_state['portfolios'],
         'fundamentals_page': _normalize_fundamentals_page_settings(saved.get('fundamentals_page', default['fundamentals_page'])),
         'chart_page': _normalize_chart_page_settings(chart_page_payload),
-        'dashboard_chart': _normalize_dashboard_chart_settings(saved.get('dashboard_chart', default['dashboard_chart'])),
+        'dashboard_chart': _normalize_dashboard_chart_settings(dashboard_chart_payload),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
         'portfolio_metrics': _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics', default['portfolio_metrics'])),
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
@@ -1290,14 +1308,19 @@ def _normalize_stocks_page_settings(settings: Any) -> Any:
     raw_middle_splitter = saved.get('middle_splitter_sizes', DEFAULT_STOCKS_PAGE_SETTINGS['middle_splitter_sizes'])
     middle_splitter_sizes = []
     if isinstance(raw_middle_splitter, list):
-        for value in raw_middle_splitter[:2]:
+        for value in raw_middle_splitter[:3]:
             try:
                 size = max(int(value), 1)
             except (TypeError, ValueError):
                 size = 0
             if size > 0:
                 middle_splitter_sizes.append(size)
-    if len(middle_splitter_sizes) != 2:
+    if len(middle_splitter_sizes) == 2:
+        news_size, detail_size = middle_splitter_sizes
+        holder_size = max(int(detail_size * 0.4), 1)
+        insider_size = max(detail_size - holder_size, 1)
+        middle_splitter_sizes = [news_size, holder_size, insider_size]
+    if len(middle_splitter_sizes) != 3:
         middle_splitter_sizes = list(DEFAULT_STOCKS_PAGE_SETTINGS['middle_splitter_sizes'])
 
     return {
@@ -1355,6 +1378,34 @@ def _normalize_youtube_settings(settings: Any) -> Any:
     }
 
 
+def _normalize_splitter_sizes(raw_sizes: Any, default_sizes: Any, expected_count: int) -> Any:
+    """Normalize persisted QSplitter sizes into a fixed positive integer list."""
+    sizes = []
+    if isinstance(raw_sizes, list):
+        for value in raw_sizes[:expected_count]:
+            try:
+                size = max(int(value), 1)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                sizes.append(size)
+    if len(sizes) != expected_count:
+        return list(default_sizes)
+    return sizes
+
+
+def _load_legacy_dashboard_left_splitter_sizes() -> Any:
+    """Read the old dashboard left-column splitter file for one-time migration."""
+    if not Path(LEGACY_DASHBOARD_LEFT_SPLITTER_FILE).exists():
+        return None
+    sizes = _normalize_splitter_sizes(
+        _read_json(LEGACY_DASHBOARD_LEFT_SPLITTER_FILE, None),
+        DEFAULT_DASHBOARD_CHART_SETTINGS['left_splitter_sizes'],
+        3,
+    )
+    return sizes
+
+
 def _normalize_dashboard_chart_settings(settings: Any) -> Any:
     """Normalize persisted state for the dashboard chart workstation."""
     saved = settings if isinstance(settings, dict) else {}
@@ -1367,30 +1418,21 @@ def _normalize_dashboard_chart_settings(settings: Any) -> Any:
     )
     auto_value = saved.get('auto', DEFAULT_DASHBOARD_CHART_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_DASHBOARD_CHART_SETTINGS['auto']
-    raw_splitter_sizes = saved.get('splitter_sizes', DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
-    splitter_sizes = []
-    if isinstance(raw_splitter_sizes, list):
-        for value in raw_splitter_sizes[:2]:
-            try:
-                size = max(int(value), 1)
-            except (TypeError, ValueError):
-                size = 0
-            if size > 0:
-                splitter_sizes.append(size)
-    if len(splitter_sizes) != 2:
-        splitter_sizes = list(DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'])
-    raw_main_splitter = saved.get('main_splitter_sizes', DEFAULT_DASHBOARD_CHART_SETTINGS['main_splitter_sizes'])
-    main_splitter_sizes = []
-    if isinstance(raw_main_splitter, list):
-        for value in raw_main_splitter[:2]:
-            try:
-                size = max(int(value), 1)
-            except (TypeError, ValueError):
-                size = 0
-            if size > 0:
-                main_splitter_sizes.append(size)
-    if len(main_splitter_sizes) != 2:
-        main_splitter_sizes = list(DEFAULT_DASHBOARD_CHART_SETTINGS['main_splitter_sizes'])
+    splitter_sizes = _normalize_splitter_sizes(
+        saved.get('splitter_sizes'),
+        DEFAULT_DASHBOARD_CHART_SETTINGS['splitter_sizes'],
+        2,
+    )
+    main_splitter_sizes = _normalize_splitter_sizes(
+        saved.get('main_splitter_sizes'),
+        DEFAULT_DASHBOARD_CHART_SETTINGS['main_splitter_sizes'],
+        2,
+    )
+    left_splitter_sizes = _normalize_splitter_sizes(
+        saved.get('left_splitter_sizes'),
+        DEFAULT_DASHBOARD_CHART_SETTINGS['left_splitter_sizes'],
+        3,
+    )
     return {
         'symbol': symbol or DEFAULT_DASHBOARD_CHART_SETTINGS['symbol'],
         'timeframe_label': timeframe_label or DEFAULT_DASHBOARD_CHART_SETTINGS['timeframe_label'],
@@ -1398,6 +1440,7 @@ def _normalize_dashboard_chart_settings(settings: Any) -> Any:
         'auto': auto_enabled,
         'splitter_sizes': splitter_sizes,
         'main_splitter_sizes': main_splitter_sizes,
+        'left_splitter_sizes': left_splitter_sizes,
     }
 
 

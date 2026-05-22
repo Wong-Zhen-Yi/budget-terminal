@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from typing import Any
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -14,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QProgressBar,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -37,10 +39,14 @@ DEFAULT_PAGE_LABELS: tuple[tuple[int, str], ...] = (
     (11, 'Options'),
     (12, 'ETF'),
     (13, 'Pre-Market'),
-    (14, 'Politics'),
-    (15, 'YouTube'),
-    (16, 'Settings'),
-    (17, 'Roll'),
+    (14, 'Crypto'),
+    (15, 'Politics'),
+    (21, 'DATAROMA'),
+    (16, 'YouTube'),
+    (17, 'Settings'),
+    (18, 'Roll'),
+    (19, 'Trading Volumes'),
+    (20, 'IPO'),
 )
 
 STARTUP_TASK_LABELS: tuple[tuple[str, str], ...] = (
@@ -56,6 +62,8 @@ STARTUP_TASK_LABELS: tuple[tuple[str, str], ...] = (
     ('lazy_registry', 'Page registry'),
     ('navigation', 'Navigation'),
     ('theme_apply', 'Theme styling'),
+    ('session_restore', 'Session Restore'),
+    ('startup_data', 'Startup Data'),
     ('first_show', 'First usable view'),
     ('lazy_warmup', 'Page warmup'),
 )
@@ -70,6 +78,7 @@ class StartupLoadingScreen(QDialog):
     """Single startup loader used for launch and page warmup progress."""
 
     startup_ready = pyqtSignal()
+    skip_requested = pyqtSignal()
     log_message = pyqtSignal(str)
 
     def __init__(self, page_labels: tuple[tuple[int, str], ...] = DEFAULT_PAGE_LABELS) -> None:
@@ -81,12 +90,13 @@ class StartupLoadingScreen(QDialog):
         self._compact_parent: Any = None
         self._compact = False
         self._ready_emitted = False
+        self._skip_emitted = False
+        self._elapsed_started_at = time.monotonic()
 
         self.setWindowTitle('Budget Terminal Loading')
         self.setWindowFlags(
             Qt.WindowType.SplashScreen
             | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setModal(False)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -97,6 +107,11 @@ class StartupLoadingScreen(QDialog):
         self.register_pages(page_labels)
         self.register_task('dashboard_data', 'Dashboard Data', section='pages')
         self._update_overall()
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._update_elapsed_label)
+        self._update_elapsed_label()
+        self._elapsed_timer.start()
         self._apply_startup_size()
         self._center_on_screen()
 
@@ -117,6 +132,15 @@ class StartupLoadingScreen(QDialog):
             }
             QLabel[bt_role="section"] {
                 color: #c8d4e6;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel[bt_role="elapsed"] {
+                color: #a9b9d4;
+                background: #11182b;
+                border: 1px solid #29344d;
+                border-radius: 5px;
+                padding: 6px 10px;
                 font-size: 12px;
                 font-weight: 700;
             }
@@ -151,6 +175,21 @@ class StartupLoadingScreen(QDialog):
             QProgressBar::chunk {
                 background: #4f8cff;
                 border-radius: 3px;
+            }
+            QPushButton[bt_role="skip"] {
+                background: #1d2a44;
+                color: #e5edf8;
+                border: 1px solid #3d4f70;
+                border-radius: 5px;
+                padding: 8px 18px;
+                font-weight: 700;
+            }
+            QPushButton[bt_role="skip"]:hover {
+                background: #283a5d;
+                border-color: #5d78a6;
+            }
+            QPushButton[bt_role="skip"]:pressed {
+                background: #172136;
             }
             """
         )
@@ -192,6 +231,11 @@ class StartupLoadingScreen(QDialog):
         title_layout.addWidget(self.status_label)
 
         header_layout.addWidget(title_group, 1)
+        self.elapsed_label = QLabel('Loading: 0:00')
+        self.elapsed_label.setProperty('bt_role', 'elapsed')
+        self.elapsed_label.setMinimumWidth(112)
+        self.elapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self.elapsed_label)
         root.addWidget(header)
 
         self.overall_bar = QProgressBar()
@@ -226,6 +270,17 @@ class StartupLoadingScreen(QDialog):
         self.log_output.document().setMaximumBlockCount(500)
         self.log_output.setMinimumHeight(150)
         root.addWidget(self.log_output, 2)
+
+        actions_row = QWidget()
+        actions_layout = QHBoxLayout(actions_row)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.addStretch(1)
+        self.skip_button = QPushButton('Skip')
+        self.skip_button.setProperty('bt_role', 'skip')
+        self.skip_button.setToolTip('Open the app now and continue startup work in the background.')
+        self.skip_button.clicked.connect(self.request_skip)
+        actions_layout.addWidget(self.skip_button)
+        root.addWidget(actions_row)
 
     def _load_logo_pixmap(self) -> QPixmap:
         logo_path = resource_path('budget_terminal_app', 'assets', 'app_icon.png')
@@ -318,7 +373,6 @@ class StartupLoadingScreen(QDialog):
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
         )
         self.title_label.setText('Finishing Startup')
         self.status_label.setText('Warming page widgets...')
@@ -329,6 +383,16 @@ class StartupLoadingScreen(QDialog):
         self.raise_()
         self._pump_events()
 
+    def request_skip(self) -> None:
+        if self._skip_emitted:
+            return
+        self._skip_emitted = True
+        if hasattr(self, 'skip_button'):
+            self.skip_button.setEnabled(False)
+        self.status_label.setText('Opening now; remaining startup work will continue in the background...')
+        self._pump_events()
+        self.skip_requested.emit()
+
     def append_log_message(self, message: str) -> None:
         text = str(message or '').rstrip()
         if not text or not hasattr(self, 'log_output'):
@@ -336,6 +400,12 @@ class StartupLoadingScreen(QDialog):
         self.log_output.appendPlainText(text)
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def closeEvent(self, event: Any) -> None:
+        timer = getattr(self, '_elapsed_timer', None)
+        if timer is not None:
+            timer.stop()
+        super().closeEvent(event)
 
     def finish_if_complete(self) -> bool:
         if self.required_startup_complete():
@@ -356,6 +426,8 @@ class StartupLoadingScreen(QDialog):
             bar = self._task_bars.get(key)
             if bar is None or bar.value() < 100:
                 return False
+        if not self.all_pages_complete():
+            return False
         return True
 
     def _ensure_task(self, key: str, label: str | None = None) -> None:
@@ -379,6 +451,18 @@ class StartupLoadingScreen(QDialog):
             return
         progress = sum(bar.value() for bar in bars) / (len(bars) * 100)
         self.overall_bar.setValue(max(0, min(100, int(round(progress * 100)))))
+
+    def _update_elapsed_label(self) -> None:
+        if not hasattr(self, 'elapsed_label'):
+            return
+        elapsed_seconds = max(0, int(time.monotonic() - self._elapsed_started_at))
+        minutes, seconds = divmod(elapsed_seconds, 60)
+        if minutes >= 60:
+            hours, minutes = divmod(minutes, 60)
+            elapsed_text = f'{hours}:{minutes:02d}:{seconds:02d}'
+        else:
+            elapsed_text = f'{minutes}:{seconds:02d}'
+        self.elapsed_label.setText(f'Loading: {elapsed_text}')
 
     def _apply_startup_size(self) -> None:
         screen = QApplication.primaryScreen()
@@ -494,6 +578,10 @@ class StartupProgressReporter:
     def on_ready(self, callback: Any) -> None:
         if self.screen is not None and callable(callback):
             self.screen.startup_ready.connect(callback)
+
+    def on_skip(self, callback: Any) -> None:
+        if self.screen is not None and callable(callback):
+            self.screen.skip_requested.connect(callback)
 
     def finish_if_complete(self) -> bool:
         if self.screen is None:

@@ -51,6 +51,10 @@ if __name__ == "__main__":
     if reexec_return_code is not None:
         raise SystemExit(reexec_return_code)
 
+from budget_terminal_app.dpi import configure_process_dpi_awareness
+
+configure_process_dpi_awareness()
+
 try:
     from budget_terminal_app.main import main
 except ModuleNotFoundError as exc:

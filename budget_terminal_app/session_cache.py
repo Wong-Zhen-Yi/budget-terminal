@@ -12,8 +12,18 @@ from .persistence_schema import TAB_SESSION_CACHE_SCHEMA_VERSION, migrate_tab_se
 
 SESSION_CACHE_VERSION = TAB_SESSION_CACHE_SCHEMA_VERSION
 SESSION_CACHE_FILE = user_data_path('tab_session_cache.json')
-_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube', 'roll')
+_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube', 'roll', 'calendar', 'overview')
 _DATAFRAME_MARKER = '__bt_dataframe__'
+_SESSION_SAVED_AT_KEY = '_session_saved_at'
+_SESSION_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_SESSION_CACHE_DEFAULT_MAX_CHARS = 350_000
+_SESSION_CACHE_TAB_MAX_CHARS = {
+    'roll': 250_000,
+    'options': 250_000,
+    'fundamentals': 250_000,
+    'stocks': 250_000,
+    'overview': 120_000,
+}
 
 
 def _looks_like_datetime_label(value: Any) -> bool:
@@ -78,6 +88,37 @@ def _default_session_cache() -> dict[str, Any]:
     }
 
 
+def _snapshot_age_seconds(snapshot: dict[str, Any]) -> float | None:
+    """Return one snapshot's persisted age when metadata is available."""
+    saved_at = str(snapshot.get(_SESSION_SAVED_AT_KEY, '') or '').strip()
+    if not saved_at:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(saved_at.replace('Z', '+00:00'))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (datetime.datetime.now(datetime.timezone.utc) - parsed.astimezone(datetime.timezone.utc)).total_seconds())
+
+
+def _snapshot_json_chars(snapshot: dict[str, Any]) -> int:
+    """Estimate normalized JSON size for one cached snapshot."""
+    try:
+        return len(json.dumps(snapshot, separators=(',', ':'), default=str))
+    except Exception:
+        return _SESSION_CACHE_DEFAULT_MAX_CHARS + 1
+
+
+def _snapshot_is_usable(tab_key: str, snapshot: dict[str, Any]) -> bool:
+    """Return whether a cached snapshot is fresh and small enough for startup restore."""
+    age_seconds = _snapshot_age_seconds(snapshot)
+    if age_seconds is not None and age_seconds > _SESSION_CACHE_MAX_AGE_SECONDS:
+        return False
+    max_chars = _SESSION_CACHE_TAB_MAX_CHARS.get(tab_key, _SESSION_CACHE_DEFAULT_MAX_CHARS)
+    return _snapshot_json_chars(snapshot) <= max_chars
+
+
 def _normalize_session_cache(payload: Any) -> dict[str, Any]:
     """Normalize persisted session cache data into the supported shape."""
     normalized = _default_session_cache()
@@ -88,7 +129,10 @@ def _normalize_session_cache(payload: Any) -> dict[str, Any]:
         return normalized
     for tab_key in _SESSION_TAB_KEYS:
         value = raw_tabs.get(tab_key)
-        normalized['tabs'][tab_key] = value if isinstance(value, dict) else None
+        if isinstance(value, dict) and _snapshot_is_usable(tab_key, value):
+            normalized['tabs'][tab_key] = value
+        else:
+            normalized['tabs'][tab_key] = None
     return normalized
 
 

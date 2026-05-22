@@ -36,7 +36,7 @@ class EtfHeatmapWidget(QWidget):
             "accent": "#42a5f5",
         }
         self.setMouseTracking(True)
-        self.setMinimumHeight(420)
+        self.setMinimumHeight(300)
         self.setMinimumWidth(640)
 
     def set_empty_message(self, message: Any) -> None:

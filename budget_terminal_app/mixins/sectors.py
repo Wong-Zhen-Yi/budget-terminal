@@ -13,12 +13,12 @@ class SectorTickerSnapshot:
 
 
 class SectorsMixin:
-    _P8_HEAT_CARD_MIN_WIDTH = 200
+    _P8_HEAT_CARD_MIN_WIDTH = 180
     _P8_HEAT_CARD_MAX_WIDTH = 320
     _P8_HEAT_CARD_SPACING = 8
     _P8_MAX_GRID_COLUMNS = 5
     _P8_MIN_GRID_COLUMNS = 2
-    _P8_DETAIL_TABLE_ROW_HEIGHT = 32
+    _P8_DETAIL_TABLE_ROW_HEIGHT = 24
     _P8_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
     _P8_SECTOR_AFTER = {'Crypto': 'Utilities', 'Metals': 'Crypto'}
 
@@ -37,8 +37,8 @@ class SectorsMixin:
         self.p8_sector_order = self._p8_build_sector_order()
 
         layout = QVBoxLayout(self.page8)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
 
         # -- Summary bar --
         summary_frame = QFrame()
@@ -47,7 +47,7 @@ class SectorsMixin:
             f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}'
         )
         summary_layout = QHBoxLayout(summary_frame)
-        summary_layout.setContentsMargins(12, 6, 12, 6)
+        summary_layout.setContentsMargins(10, 4, 10, 4)
         summary_layout.setSpacing(0)
 
         self.p8_summary_labels = {}
@@ -67,7 +67,7 @@ class SectorsMixin:
                 summary_layout.addWidget(sep)
 
             cell = QVBoxLayout()
-            cell.setContentsMargins(12, 2, 12, 2)
+            cell.setContentsMargins(8, 1, 8, 1)
             cell.setSpacing(1)
             header = QLabel(label)
             header.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; border: none;')
@@ -118,8 +118,8 @@ class SectorsMixin:
             f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; }}'
         )
         detail_layout = QVBoxLayout(self.p8_detail_panel)
-        detail_layout.setContentsMargins(10, 8, 10, 8)
-        detail_layout.setSpacing(6)
+        detail_layout.setContentsMargins(8, 6, 8, 6)
+        detail_layout.setSpacing(4)
 
         self.p8_detail_title = QLabel('Select a sector')
         self.p8_detail_title.setStyleSheet(
@@ -146,7 +146,7 @@ class SectorsMixin:
         detail_layout.addWidget(self.p8_detail_table)
 
         # Fixed height: title(~30) + 10 rows × 32px + header(~30) + margins(~22) + spacing
-        self.p8_detail_panel.setFixedHeight(10 * self._P8_DETAIL_TABLE_ROW_HEIGHT + 90)
+        self.p8_detail_panel.setFixedHeight(8 * self._P8_DETAIL_TABLE_ROW_HEIGHT + 76)
 
         layout.addWidget(self.p8_detail_panel)
 
@@ -183,11 +183,11 @@ class SectorsMixin:
         card.setCursor(Qt.CursorShape.PointingHandCursor)
         card.setMinimumWidth(self._P8_HEAT_CARD_MIN_WIDTH)
         card.setMaximumWidth(self._P8_HEAT_CARD_MAX_WIDTH)
-        card.setFixedHeight(110)
+        card.setFixedHeight(90)
 
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(10, 8, 10, 8)
-        card_layout.setSpacing(3)
+        card_layout.setContentsMargins(8, 6, 8, 6)
+        card_layout.setSpacing(2)
 
         # Row 1: Sector name + change %
         top_row = QHBoxLayout()

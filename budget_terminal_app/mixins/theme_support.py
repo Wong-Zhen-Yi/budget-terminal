@@ -33,13 +33,16 @@ class ThemeSupportMixin:
             ("_apply_sectors_theme", "page8"),
             ("_apply_spy_heatmap_theme", "page17"),
             ("_apply_random_recommender_theme", "page18"),
+            ("_apply_ipo_theme", "page21"),
             ("_apply_settings_theme", "page9"),
             ("_apply_charts_page_theme", "page10"),
             ("_apply_stocks_theme", "page12"),
             ("_apply_etf_theme", "page13"),
             ("_apply_fundamentals_theme", "page2"),
             ("_apply_options_chain_theme", "page5"),
+            ("_apply_crypto_theme", "page19"),
             ("_apply_politics_theme", "page15"),
+            ("_apply_dataroma_theme", "page22"),
             ("_apply_youtube_theme", "page16"),
         ):
             if page_attr and not self._page_initialized(page_attr=page_attr):
@@ -83,7 +86,10 @@ class ThemeSupportMixin:
 
     def set_status_text(self, widget: Any, text: Any, *, status: str = "muted") -> None:
         """Update a status label using semantic status colors."""
-        widget.setText(str(text))
+        display_text = str(text)
+        widget.setText(display_text)
+        if hasattr(widget, 'setToolTip'):
+            widget.setToolTip(display_text)
         color = self.status_color(status)
         widget.setStyleSheet(f"color: {color}; font-size: 11px;")
         widget.setProperty("bt_status", status)

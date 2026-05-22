@@ -7,6 +7,7 @@ from typing import Any
 
 from .dependencies import QApplication, QIcon, QTimer, logger, pg, sys
 from .data_service import EmbeddedDataServiceRuntime
+from .dpi import configure_qt_high_dpi_policy
 from .paths import resource_path
 from .startup_loading import StartupLoadingLogHandler, StartupLoadingScreen, StartupProgressReporter
 from .startup_profile import StartupProfiler
@@ -58,6 +59,7 @@ def main() -> int:
     profiler = StartupProfiler(logger)
     data_service = EmbeddedDataServiceRuntime()
     with profiler.step('qt_app_init'):
+        configure_qt_high_dpi_policy()
         app = QApplication(sys.argv)
         app.setStyle('Fusion')
     loading_screen = StartupLoadingScreen()
@@ -101,12 +103,19 @@ def main() -> int:
 
     startup_finished = {'done': False}
 
-    def _show_window_when_ready() -> None:
+    def _show_window_when_ready(reason: str = 'complete') -> None:
         if startup_finished['done']:
             return
         startup_finished['done'] = True
         try:
+            clean_reason = str(reason or 'complete').strip().lower()
+            setattr(window, '_startup_release_reason', clean_reason)
+            setattr(window, '_startup_released_to_user', True)
             setattr(window, '_startup_ready_before_show', True)
+            if clean_reason == 'skip':
+                logger.info('Startup loading skipped by user; remaining startup work will continue in the background.')
+            elif clean_reason == 'timeout':
+                logger.warning('Startup loading reached 30s max wait; opening app while remaining work continues.')
             profiler.stamp('show_requested')
             window.show()
             startup_progress.complete('first_show', 'First usable view')
@@ -127,9 +136,11 @@ def main() -> int:
                 _show_window_when_ready()
         except Exception:
             logger.exception('Hidden startup preparation failed; showing the main window.')
-            _show_window_when_ready()
+            _show_window_when_ready('startup_error')
 
-    startup_progress.on_ready(_show_window_when_ready)
+    startup_progress.on_ready(lambda: _show_window_when_ready('complete'))
+    startup_progress.on_skip(lambda: _show_window_when_ready('skip'))
+    QTimer.singleShot(30000, lambda: _show_window_when_ready('timeout'))
     QTimer.singleShot(0, _start_hidden_startup)
     try:
         return app.exec()

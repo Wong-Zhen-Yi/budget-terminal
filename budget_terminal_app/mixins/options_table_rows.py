@@ -5,10 +5,37 @@ from ..compat import *
 
 DEFAULT_OPT_STRATEGIES = ('Calls', 'Puts', 'Covered Call', 'Cash Secured Put')
 DEFAULT_OPT_STATUSES = ('Open', 'Closed', 'Expired', 'Assigned', 'Exercised')
+OPT_STRATEGY_DISPLAY = {
+    'Covered Call': 'CC',
+    'Cash Secured Put': 'CSP',
+}
+OPT_STRATEGY_CANONICAL = {
+    'CC': 'Covered Call',
+    'CSP': 'Cash Secured Put',
+}
 
 class OptionsTableRowsMixin:
     _OPT_STRATEGIES = DEFAULT_OPT_STRATEGIES
     _OPT_STATUSES = DEFAULT_OPT_STATUSES
+
+    def _option_strategy_display(self, strategy: Any) -> str:
+        """Return the compact label shown in the Portfolio options table."""
+        strategy_text = str(strategy or '').strip()
+        return OPT_STRATEGY_DISPLAY.get(strategy_text, strategy_text or 'Calls')
+
+    def _option_strategy_value(self, strategy: Any) -> str:
+        """Return the canonical strategy value saved and used for calculations."""
+        strategy_text = str(strategy or '').strip()
+        return OPT_STRATEGY_CANONICAL.get(strategy_text, strategy_text or 'Calls')
+
+    def _p4_center_option_combo(self, combo: Any) -> None:
+        """Center a combo box value when it is embedded in the options table."""
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setReadOnly(True)
+            line_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def _ensure_option_row_id(self, pos: Any) -> Any:
         """Ensure a stable row identity exists for each options position."""
@@ -65,9 +92,13 @@ class OptionsTableRowsMixin:
         ticker_item.setData(Qt.ItemDataRole.UserRole, row_id)
         t.setItem(row, 0, ticker_item)
         strategy_combo = QComboBox()
-        strategy_combo.addItems(list(getattr(self, '_OPT_STRATEGIES', DEFAULT_OPT_STRATEGIES)))
-        strategy_combo.setCurrentText(pos.get('strategy', 'Calls'))
-        strategy_combo.currentTextChanged.connect(partial(self._on_strategy_changed_item, ticker_item))
+        for strategy in list(getattr(self, '_OPT_STRATEGIES', DEFAULT_OPT_STRATEGIES)):
+            strategy_combo.addItem(self._option_strategy_display(strategy), strategy)
+        self._p4_center_option_combo(strategy_combo)
+        selected_strategy = self._option_strategy_value(pos.get('strategy', 'Calls'))
+        selected_index = strategy_combo.findData(selected_strategy)
+        strategy_combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        strategy_combo.currentIndexChanged.connect(lambda *_args, item=ticker_item, combo=strategy_combo: self._on_strategy_changed_item(item, combo.currentData()))
         t.setCellWidget(row, 1, strategy_combo)
         exp_saved = pos.get('expiry', '')
         ticker_val = pos.get('ticker', '').strip()
@@ -77,25 +108,26 @@ class OptionsTableRowsMixin:
         expiry_placeholder.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         expiry_placeholder.setForeground(self.theme_qcolor('text_muted'))
         t.setItem(row, 2, expiry_placeholder)
-        t.setItem(row, 3, _item('—', editable=False))
-        t.setItem(row, 4, _item(f"{pos.get('strike', 0.0):.2f}"))
-        t.setItem(row, 5, _item(f"{pos.get('contracts', 1):g}"))
-        t.setItem(row, 6, _item(f"{pos.get('premium', 0.0):.2f}"))
-        t.setItem(row, 7, _item(f"{pos.get('current_price', 0.0):.2f}", editable=False))
-        t.setItem(row, 8, _item(self._format_option_count(pos.get('volume', pos.get('vol', 0.0))), editable=False))
-        t.setItem(row, 9, _item(self._format_option_count(pos.get('open_interest', pos.get('openInterest', 0.0))), editable=False))
-        t.setItem(row, 10, _item(f"{pos.get('iv', 0.0) * 100:.1f}%", editable=False))
-        t.setItem(row, 11, _item('$0.00', editable=False))
+        t.setItem(row, 3, _item(f"{pos.get('strike', 0.0):.2f}"))
+        t.setItem(row, 4, _item(f"{pos.get('contracts', 1):g}"))
+        t.setItem(row, 5, _item(f"{pos.get('premium', 0.0):.2f}"))
+        t.setItem(row, 6, _item(f"{pos.get('current_price', 0.0):.2f}", editable=False))
+        t.setItem(row, 7, _item(self._format_option_count(pos.get('volume', pos.get('vol', 0.0))), editable=False))
+        t.setItem(row, 8, _item(self._format_option_count(pos.get('open_interest', pos.get('openInterest', 0.0))), editable=False))
+        t.setItem(row, 9, _item(f"{pos.get('iv', 0.0) * 100:.1f}%", editable=False))
+        t.setItem(row, 10, _item('$0.00', editable=False))
+        t.setItem(row, 11, _item('0.0%', editable=False))
         t.setItem(row, 12, _item('0.0%', editable=False))
-        t.setItem(row, 13, _item('0.0%', editable=False))
         t.blockSignals(False)
         self._recalc_options_row(row)
         if hasattr(self, '_p4_apply_table_width_preferences'):
             self._p4_apply_table_width_preferences('options')
         if hasattr(self, '_p4_update_remove_options_button_state'):
             self._p4_update_remove_options_button_state()
-        if ticker_val:
+        if ticker_val and not getattr(self, '_startup_priority_page_warmup', False):
             self._fetch_option_expiries(row_id, ticker_val)
+        elif ticker_val:
+            self._p4_options_fetch_deferred = True
 
     def _update_total_pl_label(self) -> None:
         """Handle update total pl label."""
@@ -124,10 +156,10 @@ class OptionsTableRowsMixin:
             s_combo = t.cellWidget(r, 1)
             if isinstance(s_combo, QComboBox) and ticker_item:
                 try:
-                    s_combo.currentTextChanged.disconnect()
+                    s_combo.currentIndexChanged.disconnect()
                 except (TypeError, RuntimeError):
                     pass
-                s_combo.currentTextChanged.connect(partial(self._on_strategy_changed_item, ticker_item))
+                s_combo.currentIndexChanged.connect(lambda *_args, item=ticker_item, combo=s_combo: self._on_strategy_changed_item(item, combo.currentData()))
             e_combo = t.cellWidget(r, 2)
             if isinstance(e_combo, QComboBox) and ticker_item:
                 try:

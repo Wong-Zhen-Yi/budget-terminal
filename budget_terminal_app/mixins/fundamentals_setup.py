@@ -452,8 +452,8 @@ class FundamentalsSetupMixin:
         columns = 2 if available_width >= 980 else 1
         for index, widget_info in enumerate(self.p2_custom_panel_widgets):
             frame = widget_info['frame']
-            chart_height = 228 if columns == 2 else 246
-            plot_height = 150 if columns == 2 else 164
+            chart_height = 188 if columns == 2 else 204
+            plot_height = 112 if columns == 2 else 124
             frame.setFixedHeight(chart_height)
             frame.layout().setContentsMargins(8, 6, 8, 6)
             widget_info['plot'].setMinimumHeight(plot_height)
@@ -472,16 +472,17 @@ class FundamentalsSetupMixin:
                 content_height = self.p2_content_widget.contentsRect().height() if hasattr(self, 'p2_content_widget') else 0
                 spacing = self.p2_content_layout.spacing() if hasattr(self, 'p2_content_layout') else 0
                 controls_height = self.p2_top_frame.height() + self.p2_period_widget.height() + spacing * 2
-                available_height = max(240, content_height - controls_height)
+                available_height = max(180, content_height - controls_height)
                 columns = 3 if available_width >= 1200 else 2
                 rows = max(1, math.ceil(len(frames) / columns))
-                spacing = 12 if available_width >= 1200 and available_height >= 700 else 8
-                chrome_height = 40
-                min_chart_height = 160 if columns == 3 else 140
+                spacing = 10 if available_width >= 1200 and available_height >= 700 else 6
+                chrome_height = 34
+                min_chart_height = 124 if columns == 3 else 112
                 grid_height = max(min_chart_height * rows + max(0, rows - 1) * spacing, available_height - chrome_height)
                 chart_height = max(min_chart_height, int((grid_height - max(0, rows - 1) * spacing) / rows))
-                plot_height = max(96, chart_height - 52)
+                plot_height = max(72, chart_height - 46)
                 box_height = chrome_height + rows * chart_height + max(0, rows - 1) * spacing
+                box_height = min(box_height, max(180, available_height))
                 self.p2_charts_grid.setHorizontalSpacing(spacing)
                 self.p2_charts_grid.setVerticalSpacing(spacing)
                 self.p2_charts_box.setMinimumHeight(box_height)

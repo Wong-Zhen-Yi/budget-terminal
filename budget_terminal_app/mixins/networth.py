@@ -864,7 +864,7 @@ class NetWorthMixin:
         series = []
         cash_total = sum(max(float(item.get('amount', 0.0) or 0.0), 0.0) for item in self.networth_data.get('cash', []))
         if cash_total > 0:
-            series.append({'label': 'Cash', 'value': self._p6_convert_amount(cash_total, 'SGD'), 'color': self.CASH_LINE_COLOR})
+            series.append({'label': 'Cash', 'kind': 'asset', 'value': self._p6_convert_amount(cash_total, 'SGD'), 'color': self.CASH_LINE_COLOR})
         for index, item in enumerate(self._p6_portfolio_breakdown()):
             total_value = (
                 float(item.get('stocks', 0.0) or 0.0)
@@ -875,12 +875,13 @@ class NetWorthMixin:
                 continue
             series.append({
                 'label': str(item.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}'),
+                'kind': 'asset',
                 'value': self._p6_convert_amount(total_value, 'USD'),
                 'color': self.PORTFOLIO_LINE_COLORS[index % len(self.PORTFOLIO_LINE_COLORS)],
             })
         debt_total = sum(max(float(item.get('amount', 0.0) or 0.0), 0.0) for item in self.networth_data.get('debt', []))
         if debt_total > 0:
-            series.append({'label': 'Debt', 'value': self._p6_convert_amount(debt_total, 'SGD'), 'color': self.DEBT_LINE_COLOR})
+            series.append({'label': 'Debt', 'kind': 'debt', 'value': self._p6_convert_amount(debt_total, 'SGD'), 'color': self.DEBT_LINE_COLOR})
         return series
 
     def _p6_goal_net_worth(self, currency: Any=None) -> tuple[float, bool]:
@@ -1024,7 +1025,7 @@ class NetWorthMixin:
             label = base_label if label_counts[base_label] == 1 else f'{base_label} {label_counts[base_label]}'
             weights[label] = value
             slice_colors.append(str(entry.get('color', self.theme_color('accent')) or self.theme_color('accent')))
-            full_total += value
+            full_total += -value if entry.get('kind') == 'debt' else value
         self.p6_progress_plot.set_theme(slice_colors or PieChartWidget.COLORS, self.theme_color('text_primary'))
         self.p6_progress_plot.set_data(weights)
         self.p6_progress_plot.set_animation_progress(current_progress if weights else 1.0)
