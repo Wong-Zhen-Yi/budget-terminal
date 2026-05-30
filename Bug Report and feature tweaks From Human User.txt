@@ -1,6 +1,0 @@
-personal finance page 
-monthly recurring bills 
-last updated count
-
-news page 
-change third panel to include more than one news API add an option for the user to pick what source they see in this third panel
