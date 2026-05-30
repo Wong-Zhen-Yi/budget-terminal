@@ -16,9 +16,9 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 from zoneinfo import ZoneInfo
-from PyQt6.QtCore import QObject, QEvent, QPoint, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QEvent, QPoint, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPalette, QPicture, QPolygonF, QScreen, QShortcut
-from PyQt6.QtWidgets import QApplication, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget
 
 
 class _LazyModuleProxy:

@@ -1,6 +1,15 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.widgets.table_render import render_table_rows
+from budget_terminal_app.mixins.options_chain_presenters import (
+    build_chain_rows,
+    build_option_summary_rows,
+    format_chain_value,
+    format_top_volume_expiration,
+    prepare_strike_records,
+    prepare_top_volume_records,
+)
 from budget_terminal_app.services.options_data import OPTIONS_MARKET_TIMEZONE
 
 
@@ -465,7 +474,7 @@ class OptionsChainMixin:
             section = sections.get(bucket_key, {})
             table = section.get('table')
             if table is not None:
-                table.setRowCount(0)
+                render_table_rows(table, ())
                 table.setToolTip('')
             self._p5_set_strike_bucket_title(bucket_key, bucket_key)
 
@@ -498,14 +507,7 @@ class OptionsChainMixin:
 
     def _p5_format_top_volume_expiration(self, expiry: str) -> str:
         """Render one expiration in compact uppercase month format."""
-        expiry_text = str(expiry or '').strip()
-        if not expiry_text:
-            return ''
-        try:
-            expiry_date = datetime.date.fromisoformat(expiry_text)
-        except ValueError:
-            return expiry_text
-        return f"{expiry_date.strftime('%b').upper()} {expiry_date.day} '{expiry_date.strftime('%y')}"
+        return format_top_volume_expiration(expiry)
 
     def _p5_normalize_top_volume_type_filter(self, value: Any) -> str:
         """Return a supported top-volume option-type filter key."""
@@ -849,7 +851,7 @@ class OptionsChainMixin:
             section = sections.get(bucket_key, {})
             table = section.get('table')
             if table is not None:
-                table.setRowCount(0)
+                render_table_rows(table, ())
                 table.setToolTip('')
             self._p5_set_top_volume_bucket_title(view_key, bucket_key)
 
@@ -970,30 +972,13 @@ class OptionsChainMixin:
 
     def _p5_prepare_top_volume_records(self, chain_df: Any, ticker: str, expiry: str) -> list[dict[str, Any]]:
         """Normalize one chain and return the top-volume rows for display."""
-        if chain_df is None or chain_df.empty:
-            return []
-        prepared = chain_df.copy()
-        if 'ticker' not in prepared.columns:
-            prepared['ticker'] = ticker
-        if 'type' not in prepared.columns:
-            prepared['type'] = ''
-        if 'expiration' not in prepared.columns:
-            prepared['expiration'] = expiry
-        option_type = self._p5_top_volume_option_type()
-        if option_type:
-            target = option_type.lower()
-            type_series = prepared['type'].astype(str).str.strip().str.lower()
-            prepared = prepared[type_series.isin((target, f'{target}s'))].copy()
-            if prepared.empty:
-                return []
-        for col in ('strike', 'lastPrice', 'volume', 'openInterest'):
-            if col not in prepared.columns:
-                prepared[col] = 0.0
-            prepared[col] = pd.to_numeric(prepared[col], errors='coerce')
-        prepared['volume'] = prepared['volume'].fillna(0.0)
-        prepared['openInterest'] = prepared['openInterest'].fillna(0.0)
-        top_options = prepared.sort_values(by=['volume', 'openInterest'], ascending=False, na_position='last').head(10)
-        return top_options.to_dict('records')
+        return prepare_top_volume_records(
+            chain_df,
+            ticker=ticker,
+            expiry=expiry,
+            option_type=self._p5_top_volume_option_type(),
+            pd_module=pd,
+        )
 
     def _p5_prepare_top_volume_records_for_expiries(self, ticker: str, expiries: list[str], chain_cache: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Merge multiple expirations and return the top-volume rows across the whole range."""
@@ -1193,29 +1178,14 @@ class OptionsChainMixin:
 
     def _p5_prepare_strike_records(self, chain_df: Any, ticker: str, expiry: str, selected_strike: float) -> list[dict[str, Any]]:
         """Normalize one chain and return rows matching the selected strike."""
-        if chain_df is None or chain_df.empty:
-            return []
-        prepared = chain_df.copy()
-        if 'ticker' not in prepared.columns:
-            prepared['ticker'] = ticker
-        if 'type' not in prepared.columns:
-            prepared['type'] = ''
-        if 'expiration' not in prepared.columns:
-            prepared['expiration'] = expiry
-        for col in ('strike', 'lastPrice', 'volume', 'openInterest'):
-            if col not in prepared.columns:
-                prepared[col] = 0.0
-            prepared[col] = pd.to_numeric(prepared[col], errors='coerce')
-        strike_series = prepared['strike']
-        matches = prepared[(strike_series - float(selected_strike)).abs() <= self._P5_STRIKE_MATCH_TOLERANCE].copy()
-        if matches.empty:
-            return []
-        matches['volume'] = matches['volume'].fillna(0.0)
-        matches['openInterest'] = matches['openInterest'].fillna(0.0)
-        type_order = {'Call': 0, 'Put': 1}
-        matches['_type_order'] = matches['type'].map(type_order).fillna(2)
-        matches = matches.sort_values(by=['_type_order', 'volume', 'openInterest'], ascending=[True, False, False], na_position='last')
-        return matches.drop(columns=['_type_order'], errors='ignore').to_dict('records')
+        return prepare_strike_records(
+            chain_df,
+            ticker=ticker,
+            expiry=expiry,
+            selected_strike=selected_strike,
+            tolerance=self._P5_STRIKE_MATCH_TOLERANCE,
+            pd_module=pd,
+        )
 
     def _p5_update_strike_view(self, request_id: int, ticker: str, selected_strike: float, bucket_config: tuple[tuple[str, str, int], ...], bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
         """Store and render the latest Options by Strike payload."""
@@ -1280,45 +1250,19 @@ class OptionsChainMixin:
             self._p5_set_strike_bucket_title(bucket_key, expiry)
             if table is None:
                 continue
-            table.setRowCount(0)
             strike_text = f'{selected_strike:g}' if selected_strike is not None else 'unselected'
             table.setToolTip(f'Using expiration {expiry_display} and strike {strike_text}' if expiry_display else f'No expiration available for strike {strike_text}')
-            for opt in list(bucket_records.get(bucket_key, [])):
-                row = table.rowCount()
-                table.insertRow(row)
-                ticker_item = QTableWidgetItem(str(opt.get('ticker', ticker) or ticker))
-                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 0, ticker_item)
-                type_value = str(opt.get('type', '') or '')
-                type_item = QTableWidgetItem(type_value)
-                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if type_value == 'Call':
-                    type_item.setForeground(self.theme_qcolor('accent_positive'))
-                elif type_value == 'Put':
-                    type_item.setForeground(self.theme_qcolor('accent_negative'))
-                table.setItem(row, 1, type_item)
-                strike = opt.get('strike')
-                strike_item = QTableWidgetItem(f'{float(strike):.1f}' if strike is not None and not pd.isna(strike) else '')
-                strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 2, strike_item)
-                exp_value = str(opt.get('expiration', '') or expiry)
-                exp_item = QTableWidgetItem(self._p5_format_top_volume_expiration(exp_value))
-                exp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 3, exp_item)
-                last_price = opt.get('lastPrice')
-                price_item = QTableWidgetItem(f'{float(last_price):.2f}' if last_price is not None and not pd.isna(last_price) else '')
-                price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 4, price_item)
-                volume = opt.get('volume', 0)
-                vol_text = '0'
-                if volume is not None and not pd.isna(volume):
-                    try:
-                        vol_text = f'{int(float(volume)):,}'
-                    except (TypeError, ValueError, OverflowError):
-                        vol_text = str(volume)
-                vol_item = QTableWidgetItem(vol_text)
-                vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 5, vol_item)
+            render_table_rows(
+                table,
+                build_option_summary_rows(
+                    bucket_records.get(bucket_key, []),
+                    ticker=ticker,
+                    expiry=expiry,
+                    positive_color=self.theme_color('accent_positive'),
+                    negative_color=self.theme_color('accent_negative'),
+                    pd_module=pd,
+                ),
+            )
 
     def _p5_update_top_volume_view(self, view_key: str, request_id: int, ticker: str, bucket_config: tuple[tuple[str, str, int], ...], bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
         """Store and render the latest all-expiry top-volume payload."""
@@ -1387,44 +1331,18 @@ class OptionsChainMixin:
             self._p5_set_top_volume_bucket_title(view_key, bucket_key, expiry)
             if table is None:
                 continue
-            table.setRowCount(0)
             table.setToolTip(f'Using expiration {expiry_display}' if expiry_display else 'No expiration available')
-            for opt in list(bucket_records.get(bucket_key, [])):
-                row = table.rowCount()
-                table.insertRow(row)
-                ticker_item = QTableWidgetItem(str(opt.get('ticker', ticker) or ticker))
-                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 0, ticker_item)
-                type_value = str(opt.get('type', '') or '')
-                type_item = QTableWidgetItem(type_value)
-                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if type_value == 'Call':
-                    type_item.setForeground(self.theme_qcolor('accent_positive'))
-                elif type_value == 'Put':
-                    type_item.setForeground(self.theme_qcolor('accent_negative'))
-                table.setItem(row, 1, type_item)
-                strike = opt.get('strike')
-                strike_item = QTableWidgetItem(f'{float(strike):.1f}' if strike is not None and not pd.isna(strike) else '')
-                strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 2, strike_item)
-                exp_value = str(opt.get('expiration', '') or expiry)
-                exp_item = QTableWidgetItem(self._p5_format_top_volume_expiration(exp_value))
-                exp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 3, exp_item)
-                last_price = opt.get('lastPrice')
-                price_item = QTableWidgetItem(f'{float(last_price):.2f}' if last_price is not None and not pd.isna(last_price) else '')
-                price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 4, price_item)
-                volume = opt.get('volume', 0)
-                vol_text = '0'
-                if volume is not None and not pd.isna(volume):
-                    try:
-                        vol_text = f'{int(float(volume)):,}'
-                    except (TypeError, ValueError, OverflowError):
-                        vol_text = str(volume)
-                vol_item = QTableWidgetItem(vol_text)
-                vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 5, vol_item)
+            render_table_rows(
+                table,
+                build_option_summary_rows(
+                    bucket_records.get(bucket_key, []),
+                    ticker=ticker,
+                    expiry=expiry,
+                    positive_color=self.theme_color('accent_positive'),
+                    negative_color=self.theme_color('accent_negative'),
+                    pd_module=pd,
+                ),
+            )
 
     def _p5_load_expiries(self) -> None:
         """Fetch available expiry dates for the entered ticker."""
@@ -1465,7 +1383,7 @@ class OptionsChainMixin:
             except Exception as e:
                 logger.error(f'P5 expiry fetch failed for {ticker}: {e}')
                 self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_expiry_error(rid, message))
-        threading.Thread(target=_run, daemon=True).start()
+        self._submit_options_fetch(_run)
 
     def _p5_handle_loaded_expiries(
         self,
@@ -1574,7 +1492,7 @@ class OptionsChainMixin:
             except Exception as e:
                 logger.error(f'P5 chain load failed for {ticker} {expiry}: {e}')
                 self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_chain_error(rid, message))
-        threading.Thread(target=_run, daemon=True).start()
+        self._submit_options_fetch(_run)
 
     def _p5_handle_loaded_chain(
         self,
@@ -2082,8 +2000,8 @@ class OptionsChainMixin:
         """Render calls and puts tables, including strategy highlights."""
         self._p5_chain_df = df.copy() if df is not None else pd.DataFrame()
         self._p5_chain_expiry = expiry
-        self.p5_calls_table.setRowCount(0)
-        self.p5_puts_table.setRowCount(0)
+        render_table_rows(self.p5_calls_table, ())
+        render_table_rows(self.p5_puts_table, ())
         if df is None or df.empty:
             self.set_status_text(self.p5_status_lbl, 'No chain data available.', status='muted')
             return
@@ -2107,39 +2025,21 @@ class OptionsChainMixin:
 
     def _p5_fill_chain_table(self, table: Any, data: Any, ranks: dict[int, int], details: dict[int, dict[str, Any]]) -> None:
         """Populate a single chain table with optional recommendation styling."""
-        table.setRowCount(len(data))
-        for i, (_, row) in enumerate(data.iterrows()):
-            rank = ranks.get(i)
-            detail = details.get(i, {})
-            tooltip = self._p5_strategy_tooltip(rank, detail)
-            for col_idx, (label, key, fmt) in enumerate(self._P5_CHAIN_COLUMNS):
-                color = None
-                bg_color = self._p5_strategy_bg(rank)
-                value = row.get(key)
-                if label == 'Chg':
-                    try:
-                        color = self.theme_color('accent_positive' if float(row.get('change', 0) or 0) >= 0 else 'accent_negative')
-                    except Exception:
-                        color = None
-                elif label == 'IV':
-                    color = self.theme_color('text_muted')
-                if label == 'Strike' and rank:
-                    try:
-                        strike_txt = fmt.format(float(row.get('strike', 0.0) or 0.0))
-                    except Exception:
-                        strike_txt = str(row.get('strike', ''))
-                    display = f'{strike_txt}  #{rank}'
-                else:
-                    display = self._p5_format_chain_value(value, fmt)
-                item = QTableWidgetItem(display)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if tooltip:
-                    item.setToolTip(tooltip)
-                if color:
-                    item.setForeground(QColor(color))
-                if bg_color:
-                    item.setBackground(QColor(bg_color))
-                table.setItem(i, col_idx, item)
+        render_table_rows(
+            table,
+            build_chain_rows(
+                data,
+                self._P5_CHAIN_COLUMNS,
+                ranks,
+                details,
+                strategy_tooltip=self._p5_strategy_tooltip,
+                strategy_bg=self._p5_strategy_bg,
+                positive_color=self.theme_color('accent_positive'),
+                negative_color=self.theme_color('accent_negative'),
+                muted_color=self.theme_color('text_muted'),
+                pd_module=pd,
+            ),
+        )
 
     def _p5_strategy_bg(self, rank: int | None) -> str | None:
         """Resolve recommendation highlight backgrounds from theme tokens."""
@@ -2198,16 +2098,7 @@ class OptionsChainMixin:
 
     def _p5_format_chain_value(self, value: Any, fmt: str) -> str:
         """Format a chain cell value for display."""
-        if value is None:
-            return ''
-        try:
-            fval = float(value)
-            if pd.isna(fval):
-                return ''
-            return fmt.format(fval)
-        except Exception:
-            txt = str(value)
-            return '' if txt.lower() == 'nan' else txt
+        return format_chain_value(value, fmt, pd_module=pd)
 
     def _p5_rank_strategy_rows(self, data: Any, strategy: str) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
         """Score and rank the top strategy candidates for one table."""

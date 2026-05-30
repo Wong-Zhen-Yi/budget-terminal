@@ -55,6 +55,15 @@ _P4_HEATMAP_INTERVALS = (
 
 class PortfolioSetupMixin:
 
+    def _p4_submit_background_task(self, fn: Any) -> None:
+        """Run one Portfolio background task through the bounded page executor."""
+        executor = getattr(self, '_portfolio_task_executor', None)
+        if executor is None:
+            max_workers = int(getattr(self, '_PORTFOLIO_TASK_MAX_WORKERS', 4) or 4)
+            executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+            self._portfolio_task_executor = executor
+        executor.submit(fn)
+
     def _p4_get_portfolio_slots(self) -> Any:
         """Return a normalized ordered list of existing portfolio slot dicts."""
         slots = []
@@ -664,7 +673,7 @@ class PortfolioSetupMixin:
                 ).fetch()
             self._invoke_main.emit(lambda payload=results, requested_key=key, requested_cache_key=cache_key: self._p4_on_heatmap_returns_ready(requested_key, requested_cache_key, payload))
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._p4_submit_background_task(_run)
         return True
 
     def _p4_on_heatmap_returns_ready(self, interval_key: Any, cache_key: Any, results: Any) -> None:
@@ -1572,7 +1581,7 @@ class PortfolioSetupMixin:
             status = 'positive' if fail_count == 0 else 'warning'
             self._invoke_main.emit(lambda: self.set_status_text(self.status_bar, msg, status=status))
 
-        threading.Thread(target=_run_sync, daemon=True).start()
+        self._p4_submit_background_task(_run_sync)
 
     def _apply_portfolio_theme(self) -> None:
         """Refresh portfolio-page plot colors after a theme change."""

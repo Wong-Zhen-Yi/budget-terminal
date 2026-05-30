@@ -41,20 +41,110 @@ class WindowLifecycleMixin:
         self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
         self._register_page(6, self.btn_page17, on_show=self._p17_on_show)
         self._register_page(7, self.btn_page12, on_show=self._stocks_on_show)
+        self._register_page(22, self.btn_page23, on_show=self._valuation_on_show if hasattr(self, '_valuation_on_show') else None)
         self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
         self._register_page(9, self.btn_page10, on_show=self._p10_on_show)
+        self._register_page(24, self.btn_page25, on_show=self._p25_on_show if hasattr(self, '_p25_on_show') else None)
         self._register_page(11, self.btn_page5)
         self._register_page(12, self.btn_page13)
         self._register_page(13, self.btn_page14, on_show=self._p14_on_show)
         self._register_page(14, self.btn_page19)
         self._register_page(15, self.btn_page15, on_show=self._p15_on_show)
         self._register_page(21, self.btn_page22, on_show=self._p22_on_show)
+        self._register_page(23, self.btn_page24, on_show=self._p24_on_show)
         self._register_page(16, self.btn_page16, on_show=self._p16_on_show)
         self._register_page(18, self.btn_page18)
         self._register_page(20, self.btn_page21)
         self._register_page(17, self.btn_page9)
-        self._refresh_main_tab_picker_items()
+        self._apply_navigation_settings_to_shell()
         self._startup_progress_complete('navigation', 'Navigation')
+
+    def _navigation_settings(self) -> dict[str, Any]:
+        """Return normalized persisted navigation settings."""
+        state = normalize_navigation_settings(getattr(self, 'navigation_state', DEFAULT_NAVIGATION_SETTINGS))
+        self.navigation_state = state
+        return state
+
+    def _navigation_page_order(self) -> list[int]:
+        """Return all registered pages in persisted display order."""
+        state = self._navigation_settings()
+        registered = set(getattr(self, '_pages', {}).keys())
+        order = [page_index for page_index in state.get('page_order', []) if page_index in registered]
+        for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
+            if page_index in registered and page_index not in order:
+                order.append(page_index)
+        for page_index in registered:
+            if page_index not in order:
+                order.append(page_index)
+        return order
+
+    def _hidden_navigation_pages(self) -> set[int]:
+        """Return the hidden page indexes, never including Settings."""
+        state = self._navigation_settings()
+        return {page_index for page_index in state.get('hidden_pages', []) if page_index != SETTINGS_PAGE_INDEX}
+
+    def _ordered_nav_buttons(self, *, visible_only: bool) -> list[Any]:
+        """Return navigation buttons in persisted order."""
+        hidden = self._hidden_navigation_pages()
+        buttons = []
+        for page_index in self._navigation_page_order():
+            if visible_only and page_index in hidden:
+                continue
+            page = getattr(self, '_pages', {}).get(page_index, {})
+            button = page.get('btn') if isinstance(page, dict) else None
+            if button is not None:
+                buttons.append(button)
+        return buttons
+
+    def _first_visible_navigation_index(self) -> int:
+        """Return the first visible page index, falling back to Settings."""
+        hidden = self._hidden_navigation_pages()
+        for page_index in self._navigation_page_order():
+            if page_index not in hidden:
+                return int(page_index)
+        return SETTINGS_PAGE_INDEX
+
+    def _apply_navigation_settings_to_shell(self, *, switch_hidden_current: bool=True) -> None:
+        """Apply persisted navigation order and visibility to the top shell."""
+        if not hasattr(self, '_nav_container_layout') or not getattr(self, '_pages', None):
+            return
+        layout = self._nav_container_layout
+        while layout.count():
+            layout.takeAt(0)
+        hidden = self._hidden_navigation_pages()
+        visible_buttons = set()
+        for page_index in self._navigation_page_order():
+            page = self._pages.get(page_index, {})
+            button = page.get('btn') if isinstance(page, dict) else None
+            if button is None:
+                continue
+            button.setVisible(page_index not in hidden)
+            if page_index not in hidden:
+                visible_buttons.add(button)
+                layout.addWidget(button)
+        for page in self._pages.values():
+            button = page.get('btn') if isinstance(page, dict) else None
+            if button is not None and button not in visible_buttons:
+                button.setVisible(False)
+        if hasattr(self, '_nav_container'):
+            spacing = max(0, int(layout.spacing()))
+            visible_count = len(visible_buttons)
+            content_width = 0
+            for button in visible_buttons:
+                content_width += max(button.minimumWidth(), button.sizeHint().width())
+            if visible_count > 1:
+                content_width += spacing * (visible_count - 1)
+            content_width = max(content_width, 1)
+            self._nav_container.setMinimumWidth(content_width)
+            self._nav_container.resize(content_width, self._nav_scroll_area.height())
+            self._nav_container.updateGeometry()
+            self._nav_scroll_area.widget().updateGeometry()
+        self._refresh_main_tab_picker_items()
+        if not switch_hidden_current or not hasattr(self, 'stacked_widget'):
+            return
+        current_index = int(self.stacked_widget.currentIndex())
+        if current_index in hidden:
+            self.switch_page(self._first_visible_navigation_index())
 
     def _is_current_page(self, page: Any) -> bool:
         """Return whether the provided stacked page is currently visible."""
@@ -463,6 +553,7 @@ class WindowLifecycleMixin:
         restored_tabs = getattr(self, '_startup_session_restored_tabs', None)
         specs = [
             {'tab_key': 'stocks', 'page_index': 7, 'restore_method': '_stocks_restore_startup_session'},
+            {'tab_key': 'valuation', 'page_index': 22, 'restore_method': '_valuation_restore_startup_session'},
             {'tab_key': 'roll', 'page_index': 18, 'restore_method': '_p18_restore_startup_session'},
             {'tab_key': 'fundamentals', 'page_index': 8, 'restore_method': '_p2_restore_startup_session'},
             {'tab_key': 'options', 'page_index': 11, 'restore_method': '_p5_restore_startup_session'},
@@ -622,6 +713,8 @@ class WindowLifecycleMixin:
             _dispatch('Heatmap', getattr(self, '_p17_request_refresh', None), force=False)
         if self._page_initialized(index=7):
             _dispatch('Stocks', getattr(self, '_stocks_load_from_input', None), include_global_status=False, update_collection_info=True)
+        if self._page_initialized(index=22):
+            _dispatch('Valuation', getattr(self, 'load_valuation_data', None), update_collection_info=True)
         if self._page_initialized(index=8):
             _dispatch('Fundamentals', getattr(self, 'analyze_stock_p2', None), update_collection_info=True)
         if self._page_initialized(index=9):
@@ -719,8 +812,10 @@ class WindowLifecycleMixin:
             5: 40,
             6: 45,
             7: 50,
+            22: 58,
             8: 60,
             9: 65,
+            24: 68,
             11: 70,
             12: 80,
             13: 90,
@@ -877,7 +972,7 @@ class WindowLifecycleMixin:
             return
         items = []
         item_map = {}
-        for button in getattr(self, '_nav_buttons', []):
+        for button in self._ordered_nav_buttons(visible_only=True):
             page_index = self._page_index_for_button(button)
             if page_index is None:
                 continue
@@ -1063,7 +1158,7 @@ class WindowLifecycleMixin:
 
     def _step_main_tab(self, direction: int) -> bool:
         """Move between registered main tabs with wraparound."""
-        buttons = list(getattr(self, '_nav_buttons', []))
+        buttons = self._ordered_nav_buttons(visible_only=True)
         if not buttons:
             return False
         current_index = self.stacked_widget.currentIndex()
@@ -1154,6 +1249,14 @@ class WindowLifecycleMixin:
         if current_index == 7:
             if hasattr(self, '_stocks_load_from_input'):
                 self._stocks_load_from_input(include_global_status=True, update_collection_info=True)
+            return
+        if current_index == 22:
+            if hasattr(self, 'load_valuation_data'):
+                self.load_valuation_data(update_collection_info=True)
+            return
+        if current_index == 23:
+            if hasattr(self, '_p24_refresh_current'):
+                self._p24_refresh_current(force=True)
             return
         if current_index == 8:
             if hasattr(self, 'analyze_stock_p2'):
@@ -1385,6 +1488,11 @@ class WindowLifecycleMixin:
             self._persist_dashboard_state(immediate=True)
         if self._page_initialized(page_attr='page12') and hasattr(self, '_stocks_save_session_snapshot'):
             self._stocks_save_session_snapshot(immediate=True)
+        if self._page_initialized(page_attr='page23'):
+            if hasattr(self, '_valuation_persist_settings'):
+                self._valuation_persist_settings()
+            if hasattr(self, '_valuation_save_session_snapshot'):
+                self._valuation_save_session_snapshot(immediate=True)
         if self._page_initialized(page_attr='page18') and hasattr(self, '_p18_save_session_snapshot'):
             self._p18_save_session_snapshot(immediate=True)
         if self._page_initialized(page_attr='page2') and hasattr(self, '_p2_save_session_snapshot'):
@@ -1404,9 +1512,18 @@ class WindowLifecycleMixin:
         if self._page_initialized(page_attr='page6') and hasattr(self, '_p6_on_goal_controls_changed'):
             self._p6_on_goal_controls_changed()
         save_networth_data(self.networth_data)
+        dashboard_executor = getattr(self, '_dashboard_fetch_executor', None)
+        if dashboard_executor is not None:
+            dashboard_executor.shutdown(wait=False, cancel_futures=True)
         executor = getattr(self, '_options_fetch_executor', None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        portfolio_executor = getattr(self, '_portfolio_task_executor', None)
+        if portfolio_executor is not None:
+            portfolio_executor.shutdown(wait=False, cancel_futures=True)
+        heatmap_executor = getattr(self, '_p17_fetch_executor', None)
+        if heatmap_executor is not None:
+            heatmap_executor.shutdown(wait=False, cancel_futures=True)
         mc_executor = getattr(self, '_mc_executor', None)
         if mc_executor is not None:
             mc_executor.shutdown(wait=False, cancel_futures=True)
@@ -1416,6 +1533,9 @@ class WindowLifecycleMixin:
         multi_interval_executor = getattr(self, '_p10_multi_interval_executor', None)
         if multi_interval_executor is not None:
             multi_interval_executor.shutdown(wait=False, cancel_futures=True)
+        backtest_executor = getattr(self, '_p25_executor', None)
+        if backtest_executor is not None:
+            backtest_executor.shutdown(wait=False, cancel_futures=True)
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

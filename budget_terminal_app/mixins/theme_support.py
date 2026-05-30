@@ -36,13 +36,16 @@ class ThemeSupportMixin:
             ("_apply_ipo_theme", "page21"),
             ("_apply_settings_theme", "page9"),
             ("_apply_charts_page_theme", "page10"),
+            ("_apply_backtest_theme", "page25"),
             ("_apply_stocks_theme", "page12"),
+            ("_apply_valuation_theme", "page23"),
             ("_apply_etf_theme", "page13"),
             ("_apply_fundamentals_theme", "page2"),
             ("_apply_options_chain_theme", "page5"),
             ("_apply_crypto_theme", "page19"),
             ("_apply_politics_theme", "page15"),
             ("_apply_dataroma_theme", "page22"),
+            ("_apply_institutions_theme", "page24"),
             ("_apply_youtube_theme", "page16"),
         ):
             if page_attr and not self._page_initialized(page_attr=page_attr):

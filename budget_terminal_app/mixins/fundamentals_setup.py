@@ -588,11 +588,14 @@ class FundamentalsSetupMixin:
             self._p2_render_active_configuration()
         self._p2_relayout_charts()
 
-    def analyze_stock_p2(self, *_: Any, update_collection_info: bool=True) -> None:
+    def analyze_stock_p2(self, *_: Any, update_collection_info: bool=True) -> bool | None:
         """Load Fundamentals for the requested ticker."""
         ticker = self.p2_ticker_input.text().upper().strip()
         if not ticker:
             return
+        thread = getattr(self, 'p2_fund_thread', None)
+        if thread is not None and thread.isRunning():
+            return False
         self.p2_last_ticker = ticker
         self._p2_persist_settings()
         self._p2_request_seq += 1

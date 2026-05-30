@@ -19,11 +19,11 @@ _P20_HEADERS = (
 _P20_NUMERIC_SORT_ROLE = Qt.ItemDataRole.UserRole
 _P20_MISSING_SORT_VALUE = float('-inf')
 _P20_DOT_METRICS = {
-    '1d': ('1D', '1D ADV ($m)', 'one_day_dollar_volume'),
-    '5d': ('5D', '5D ADV ($m)', 'five_day_avg_dollar_volume'),
-    '30d': ('30D', '30D ADV ($m)', 'thirty_day_avg_dollar_volume'),
-    'ytd': ('YTD', 'YTD ADV ($m)', 'ytd_avg_dollar_volume'),
-    '1y': ('1Y', '1Y ADV ($m)', 'one_year_avg_dollar_volume'),
+    '1d': ('1D', '1D ADV ($)', 'one_day_dollar_volume'),
+    '5d': ('5D', '5D ADV ($)', 'five_day_avg_dollar_volume'),
+    '30d': ('30D', '30D ADV ($)', 'thirty_day_avg_dollar_volume'),
+    'ytd': ('YTD', 'YTD ADV ($)', 'ytd_avg_dollar_volume'),
+    '1y': ('1Y', '1Y ADV ($)', 'one_year_avg_dollar_volume'),
 }
 _P20_FILTER_DEFAULT = 'default'
 _P20_FILTER_EXCLUDE = 'exclude'
@@ -44,7 +44,11 @@ class _P20NumericTableWidgetItem(QTableWidgetItem):
 
 
 class _P20CompactCurrencyAxisItem(pg.AxisItem):
-    """Pyqtgraph axis that renders raw dollar values as compact currency."""
+    """Pyqtgraph axis that renders dollar values as compact currency."""
+
+    def __init__(self, *args: Any, log_values: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._log_values = log_values
 
     def tickStrings(self, values: Any, scale: Any, spacing: Any) -> list[str]:
         strings = []
@@ -57,6 +61,12 @@ class _P20CompactCurrencyAxisItem(pg.AxisItem):
             if not math.isfinite(numeric):
                 strings.append('')
                 continue
+            if self._log_values:
+                try:
+                    numeric = 10 ** numeric
+                except OverflowError:
+                    strings.append('')
+                    continue
             sign = '-' if numeric < 0 else ''
             numeric = abs(numeric)
             for divisor, suffix in ((1_000_000_000_000, 'T'), (1_000_000_000, 'B'), (1_000_000, 'M')):
@@ -86,6 +96,7 @@ class OverviewMixin:
         self._p20_row_range_end = 100
         self._p20_dot_metric = '1d'
         self._p20_dot_plot_points: list[tuple[float, float, str]] = []
+        self._p20_dot_plot_log_points: list[tuple[float, float, str]] = []
         self._p20_dot_label_items: list[Any] = []
 
         layout = QVBoxLayout(self.page20)
@@ -219,7 +230,10 @@ class OverviewMixin:
         self.p20_dot_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dot_plot_layout.addWidget(self.p20_dot_empty_lbl)
 
-        self.p20_dot_plot = pg.PlotWidget(axisItems={'bottom': _P20CompactCurrencyAxisItem(orientation='bottom')})
+        self.p20_dot_plot = pg.PlotWidget(axisItems={
+            'bottom': _P20CompactCurrencyAxisItem(orientation='bottom', log_values=True),
+            'left': _P20CompactCurrencyAxisItem(orientation='left', log_values=True),
+        })
         self.p20_dot_plot.setMinimumWidth(360)
         self.p20_dot_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if hasattr(self, 'style_plot_widget'):
@@ -236,8 +250,8 @@ class OverviewMixin:
             left_axis.setWidth(52)
         except Exception:
             pass
-        self.p20_dot_plot.setLabel('left', _P20_DOT_METRICS[self._p20_dot_metric][1])
-        self.p20_dot_plot.setLabel('bottom', 'Market Cap')
+        self.p20_dot_plot.setLabel('left', 'Market Cap')
+        self.p20_dot_plot.setLabel('bottom', _P20_DOT_METRICS[self._p20_dot_metric][1])
         dot_plot_layout.addWidget(self.p20_dot_plot, 1)
         self.p20_body_splitter.addWidget(dot_plot_pane)
         self.p20_body_splitter.setStretchFactor(0, 1)
@@ -693,9 +707,10 @@ class OverviewMixin:
         _button_label, axis_label, row_key = _P20_DOT_METRICS[metric_key]
         plot.clear()
         self._p20_dot_label_items = []
-        plot.setLabel('left', axis_label)
-        plot.setLabel('bottom', 'Market Cap')
+        plot.setLabel('left', 'Market Cap')
+        plot.setLabel('bottom', axis_label)
         points: list[tuple[float, float, str]] = []
+        log_points: list[tuple[float, float, str]] = []
         for row_index, row in enumerate((rows or [])[:100]):
             if not isinstance(row, dict):
                 continue
@@ -703,10 +718,12 @@ class OverviewMixin:
             ticker = str(row.get('ticker') or '').upper().strip() or str(rank)
             market_cap = self._p20_numeric_value(row.get('market_cap'))
             volume_value = self._p20_numeric_value(row.get(row_key))
-            if market_cap == _P20_MISSING_SORT_VALUE or volume_value == _P20_MISSING_SORT_VALUE:
+            if not self._p20_is_loggable_value(market_cap) or not self._p20_is_loggable_value(volume_value):
                 continue
-            points.append((market_cap, volume_value / 1_000_000, ticker))
+            points.append((volume_value, market_cap, ticker))
+            log_points.append((math.log10(volume_value), math.log10(market_cap), ticker))
         self._p20_dot_plot_points = list(points)
+        self._p20_dot_plot_log_points = list(log_points)
         if not points:
             empty_text = f'No rows with numeric Market Cap and {axis_label} values to plot.'
             if not rows:
@@ -717,8 +734,8 @@ class OverviewMixin:
             plot.setYRange(0, 1, padding=0)
             return
         self.p20_dot_empty_lbl.setVisible(False)
-        xs = [point[0] for point in points]
-        ys = [point[1] for point in points]
+        xs = [point[0] for point in log_points]
+        ys = [point[1] for point in log_points]
         scatter = pg.ScatterPlotItem(
             x=xs,
             y=ys,
@@ -729,15 +746,24 @@ class OverviewMixin:
         )
         plot.addItem(scatter)
         label_color = self.theme_color('text_primary') if hasattr(self, 'theme_color') else '#e5e7eb'
-        for x_value, y_value, ticker in points:
+        for x_value, y_value, ticker in log_points:
             label = pg.TextItem(text=ticker, color=label_color, anchor=(0.5, 1.15))
             label.setPos(x_value, y_value)
             plot.addItem(label)
             self._p20_dot_label_items.append(label)
-        max_x = max(xs) if xs else 1
-        max_y = max(ys) if ys else 1
-        plot.setXRange(0, max_x * 1.08 if max_x > 0 else 1, padding=0)
-        plot.setYRange(0, max_y * 1.18 if max_y > 0 else 1, padding=0)
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        x_padding = max((max_x - min_x) * 0.08, 0.08)
+        y_padding = max((max_y - min_y) * 0.12, 0.08)
+        plot.setXRange(min_x - x_padding, max_x + x_padding, padding=0)
+        plot.setYRange(min_y - y_padding, max_y + y_padding, padding=0)
+
+    def _p20_is_loggable_value(self, value: Any) -> bool:
+        try:
+            numeric = float(value)
+        except Exception:
+            return False
+        return math.isfinite(numeric) and numeric > 0
 
     def _p20_numeric_value(self, value: Any) -> float:
         try:

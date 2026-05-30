@@ -2,8 +2,16 @@ from __future__ import annotations
 import math
 import time
 from typing import Any
+from PyQt6.QtCore import QPointF
+from PyQt6.QtGui import QFont
 from ..compat import *
 from budget_terminal_app.data_service.results import data_sources_from_meta, describe_market_data_status
+from budget_terminal_app.mixins.dashboard_presenters import (
+    build_dashboard_option_rows,
+    build_dashboard_portfolio_rows,
+    build_dashboard_target_rows,
+)
+from budget_terminal_app.widgets.table_render import render_table_rows
 from budget_terminal_app.workers.data import DataWorker
 
 _P1_LEFT_SPLITTER_CONFIG = user_data_path('p1_left_splitter.json')
@@ -39,6 +47,15 @@ Format the response with these exact sections:
 
 class DashboardMixin:
     _DASHBOARD_DATA_SERVICE_WAIT_SECONDS = 0.75
+
+    def _ensure_dashboard_fetch_executor(self) -> Any:
+        """Create the bounded Dashboard fetch executor on demand."""
+        executor = getattr(self, '_dashboard_fetch_executor', None)
+        if executor is None:
+            max_workers = int(getattr(self, '_DASHBOARD_FETCH_MAX_WORKERS', 2) or 2)
+            executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+            self._dashboard_fetch_executor = executor
+        return executor
 
     def _dashboard_portfolio_panel_is_read_only(self) -> bool:
         """Keep the dashboard portfolio panel in view-only mode."""
@@ -213,6 +230,15 @@ class DashboardMixin:
         snapshot['news'] = news_items
         return snapshot
 
+    def _dashboard_render_target_rows(self, targets: list[dict[str, Any]]) -> None:
+        """Render Dashboard analyst target rows through the shared table renderer."""
+        rows = build_dashboard_target_rows(
+            targets,
+            positive_color=self.theme_color('accent_positive'),
+            negative_color=self.theme_color('accent_negative'),
+        )
+        render_table_rows(self.target_table, rows)
+
     def _dashboard_apply_local_portfolio_membership(self, data: Any = None) -> dict[str, Any]:
         """Refresh dashboard-side portfolio tables without touching the chart workspace."""
         self._dashboard_sync_portfolio_runtime_view()
@@ -221,37 +247,7 @@ class DashboardMixin:
         )
         self.repopulate_portfolio()
         main_targets = list(snapshot.get('targets', []))
-        self.target_table.setUpdatesEnabled(False)
-        try:
-            self.target_table.setRowCount(len(main_targets))
-            for i, item in enumerate(main_targets):
-                ticker_item = QTableWidgetItem(item['ticker'])
-                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 0, ticker_item)
-                current = item['current']
-                current_item = QTableWidgetItem(
-                    f'${current:.2f}' if isinstance(current, (int, float)) else str(current)
-                )
-                current_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 1, current_item)
-                target = item['target']
-                target_item = QTableWidgetItem(
-                    f'${target:.2f}' if isinstance(target, (int, float)) else str(target)
-                )
-                target_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 2, target_item)
-                try:
-                    upside = (float(target) - float(current)) / float(current) * 100
-                    upside_item = QTableWidgetItem(f'{upside:+.1f}%')
-                    upside_item.setForeground(
-                        self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative')
-                    )
-                except (TypeError, ValueError, ZeroDivisionError):
-                    upside_item = QTableWidgetItem('N/A')
-                upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 3, upside_item)
-        finally:
-            self.target_table.setUpdatesEnabled(True)
+        self._dashboard_render_target_rows(main_targets)
         portfolio_news = self._sort_articles_by_newest(
             [
                 article
@@ -476,15 +472,6 @@ class DashboardMixin:
         if ticker:
             self.remove_ticker(ticker)
 
-    def _dashboard_ensure_portfolio_item(self, row: int, col: int) -> Any:
-        """Return an existing dashboard portfolio cell item or create it once."""
-        item = self.port_table.item(row, col)
-        if item is None:
-            item = QTableWidgetItem('')
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.port_table.setItem(row, col, item)
-        return item
-
     def _dashboard_ensure_portfolio_delete_button(self, row: int) -> Any:
         """Return an existing per-row delete button or create it once."""
         widget = self.port_table.cellWidget(row, 5)
@@ -638,25 +625,90 @@ class DashboardMixin:
         self.dashboard_change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {change_color};')
 
     def _dashboard_set_overlay_text(self, key: Any, plot: Any, text: Any, color: Any) -> None:
-        """Render a top-right overlay label inside a plot."""
+        """Render a crisp top-right overlay label inside a plot."""
         if not text:
-            item = self.dashboard_overlay_items.pop(key, None)
-            if item is not None:
-                try:
-                    plot.removeItem(item)
-                except Exception:
-                    pass
+            self._dashboard_remove_overlay_item(key, plot)
             return
+        label_font = QFont()
+        label_font.setPointSize(8)
+        label_font.setBold(True)
         item = self.dashboard_overlay_items.get(key)
-        if item is None:
-            item = pg.TextItem(color=color, anchor=(1, 0))
+        if item is None or not hasattr(item, 'move'):
+            if item is not None:
+                self._dashboard_remove_overlay_item(key, plot)
+            item = QLabel(plot)
+            item.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.dashboard_overlay_items[key] = item
+        else:
             try:
-                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                if item.parent() is not plot:
+                    item.setParent(plot)
             except Exception:
                 pass
-            plot.addItem(item, ignoreBounds=True)
-            self.dashboard_overlay_items[key] = item
-        item.setText(str(text), color=color)
+        try:
+            item.setFont(label_font)
+        except Exception:
+            pass
+        item.setText(str(text))
+        item.setToolTip(str(text))
+        item.setStyleSheet(
+            'QLabel {'
+            f'color: {self.theme_color("text_primary")};'
+            f'background: {self.theme_color("chart_bg")};'
+            'border: none;'
+            'padding: 2px 5px;'
+            'font-size: 11px;'
+            'font-weight: 700;'
+            '}'
+        )
+        item.adjustSize()
+        try:
+            item.raise_()
+        except Exception:
+            pass
+        try:
+            item.show()
+        except Exception:
+            pass
+
+    def _dashboard_remove_overlay_item(self, key: Any, plot: Any=None) -> None:
+        """Remove one dashboard overlay label, including legacy graphics-scene items."""
+        item = self.dashboard_overlay_items.pop(key, None)
+        if item is None:
+            return
+        if hasattr(item, 'deleteLater'):
+            try:
+                item.hide()
+                item.deleteLater()
+            except Exception:
+                pass
+            return
+        if plot is not None:
+            try:
+                plot.removeItem(item)
+            except Exception:
+                pass
+
+    def _dashboard_clear_overlay_items(self) -> None:
+        """Remove all dashboard overlay labels before a full chart clear."""
+        plots = (
+            getattr(self, 'dashboard_main_plot', None),
+            getattr(self, 'dashboard_volume_plot', None),
+            getattr(self, 'dashboard_rsi_plot', None),
+        )
+        for key, item in tuple(getattr(self, 'dashboard_overlay_items', {}).items()):
+            if hasattr(item, 'deleteLater'):
+                self._dashboard_remove_overlay_item(key)
+                continue
+            self.dashboard_overlay_items.pop(key, None)
+            for plot in plots:
+                if plot is None:
+                    continue
+                try:
+                    plot.removeItem(item)
+                    break
+                except Exception:
+                    pass
 
     def _dashboard_refresh_overlay_positions(self, *_: Any) -> None:
         """Keep dashboard indicator overlay labels pinned near the top-right of each plot."""
@@ -666,22 +718,38 @@ class DashboardMixin:
             ('rsi', self.dashboard_rsi_plot),
             ('rsi_ma', self.dashboard_rsi_plot),
         )
-        visible_index_by_plot = {}
+        position_state_by_plot = {}
         for key, plot in config:
             item = self.dashboard_overlay_items.get(key)
             if item is None:
                 continue
             try:
-                x_range, y_range = plot.getPlotItem().vb.viewRange()
+                view_box = plot.getPlotItem().vb
+                scene_rect = view_box.sceneBoundingRect()
             except Exception:
                 continue
-            x_left, x_right = x_range
-            y_bottom, y_top = y_range
-            x_pos = float(x_right) - (float(x_right) - float(x_left)) * 0.02
-            offset_index = visible_index_by_plot.get(plot, 0)
-            visible_index_by_plot[plot] = offset_index + 1
-            y_pos = float(y_top) - (float(y_top) - float(y_bottom)) * (0.04 + (offset_index * 0.08))
-            item.setPos(x_pos, y_pos)
+            if scene_rect.isNull() or not scene_rect.isValid():
+                continue
+            state = position_state_by_plot.setdefault(plot, {'x': 12.0, 'y': 12.0, 'row_height': 0.0})
+            if plot is self.dashboard_rsi_plot and key in ('rsi', 'rsi_ma'):
+                x_offset = float(state['x'])
+                y_offset = float(state['y'])
+                state['x'] = x_offset + float(item.width()) + 8.0
+                state['row_height'] = max(float(state['row_height']), float(item.height()))
+            else:
+                x_offset = 12.0
+                y_offset = float(state['y'])
+                state['y'] = y_offset + float(item.height()) + 6.0
+            scene_pos = QPointF(scene_rect.left() + x_offset, scene_rect.top() + y_offset)
+            try:
+                widget_pos = plot.mapFromScene(scene_pos)
+                x_pos = max(4, min(int(widget_pos.x()), plot.width() - item.width() - 4))
+                y_pos = max(4, min(int(widget_pos.y()), plot.height() - item.height() - 4))
+                item.move(x_pos, y_pos)
+                item.raise_()
+                item.show()
+            except Exception:
+                continue
 
     def _dashboard_update_indicator_panel_labels(self) -> None:
         """Show latest indicator outputs inside their respective chart panels."""
@@ -844,7 +912,7 @@ class DashboardMixin:
         self.dashboard_rsi_ma_series = None
         self.dashboard_chart_ma200 = None
         self.dashboard_chart_interval = self.dashboard_timeframe_map.get(self.dashboard_timeframe_label, ('5y', '1d'))[1]
-        self.dashboard_overlay_items = {}
+        self._dashboard_clear_overlay_items()
         self.dashboard_chart_axis.set_dates([], self.dashboard_chart_interval)
         self.dashboard_volume_axis.set_dates([], self.dashboard_chart_interval)
         self.dashboard_rsi_axis.set_dates([], self.dashboard_chart_interval)
@@ -859,7 +927,7 @@ class DashboardMixin:
         self.dashboard_volume_plot.clear()
         self.dashboard_rsi_plot.clear()
         self._dashboard_reset_chart_item_refs()
-        self.dashboard_overlay_items = {}
+        self._dashboard_clear_overlay_items()
 
     def _dashboard_render_main_chart(self, stats: Any, interval: Any, rsi_series: Any=None, rsi_ma_series: Any=None, ma200_series: Any=None) -> None:
         """Render the main dashboard candlestick chart and lower indicator panels."""
@@ -1058,12 +1126,13 @@ class DashboardMixin:
         if refresh_reason == 'startup_visible_refresh' and not getattr(self, '_startup_dashboard_data_actual_done', False):
             self._startup_dashboard_timeout_pending = True
             QTimer.singleShot(self._STARTUP_DASHBOARD_DATA_TIMEOUT_MS, self._on_startup_dashboard_timeout)
-        self.worker_thread = threading.Thread(
-            target=self.run_worker,
-            args=(request_id, chart_configs_snapshot, refresh_reason, allow_non_chart_reuse),
-            daemon=True,
+        self._dashboard_latest_future = self._ensure_dashboard_fetch_executor().submit(
+            self.run_worker,
+            request_id,
+            chart_configs_snapshot,
+            refresh_reason,
+            allow_non_chart_reuse,
         )
-        self.worker_thread.start()
 
     def _complete_startup_dashboard_data(
         self,
@@ -1180,70 +1249,23 @@ class DashboardMixin:
             header_name = 'My Portfolio'
         self.port_header_lbl.setText(f'{header_name} ({len(portfolio)})')
         tracker = getattr(self, 'tracker_data', {})
-
-        def market_value(ticker: Any, info: Any) -> Any:
-            shares = tracker.get(ticker, {}).get('shares', 0)
-            price = info.get('price', 0) if isinstance(info, dict) else 0
-            return shares * price if shares else 0
-
-        total_value = sum((market_value(ticker, info) for ticker, info in portfolio.items()))
-        def dollar_gain_key(ticker: Any, info: Any) -> Any:
-            t = tracker.get(ticker, {})
-            shares = t.get('shares', 0)
-            avg_price = t.get('avg_price', 0)
-            price = info.get('price', 0) if isinstance(info, dict) else 0
-            return (price - avg_price) * shares if shares else 0
-
-        sorted_items = sorted(portfolio.items(), key=lambda item: dollar_gain_key(item[0], item[1]), reverse=True)
-        default_text_color = self.theme_qcolor('text_primary')
-        self.port_table.setUpdatesEnabled(False)
-        try:
-            self.port_table.setRowCount(len(sorted_items))
-            for i, (ticker, info) in enumerate(sorted_items):
-                has_quote = isinstance(info, dict) and ('price' in info or 'change' in info)
-                price = float(info.get('price', 0) or 0) if has_quote else 0.0
-                change_pct = float(info.get('change', 0) or 0) if has_quote else 0.0
-                shares = tracker.get(ticker, {}).get('shares', 0)
-                avg_price = tracker.get(ticker, {}).get('avg_price', 0)
-                market_val = shares * price if shares else 0
-                weight_pct = market_val / total_value * 100 if total_value > 0 and shares and has_quote else 0
-                dollar_gain = (price - avg_price) * shares if shares and has_quote else 0
-                is_up = change_pct >= 0
-                sign = '+' if is_up else ''
-                text_color = self.theme_qcolor('accent_positive' if is_up else 'accent_negative')
-                row_bg = self.theme_qcolor('accent_positive_bg' if is_up else 'accent_negative_bg')
-                price_str = f'${price:.2f}'
-                change_str = f'{sign}{change_pct:.2f}%'
-                if not has_quote:
-                    text_color = default_text_color
-                    row_bg = self.theme_qcolor('panel_background')
-                    price_str = '--'
-                    change_str = '--'
-                gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
-                gain_sign = '+' if dollar_gain >= 0 else ''
-                weight_str = f'{weight_pct:.1f}%' if shares and has_quote else '--'
-                gain_str = f'{gain_sign}${dollar_gain:,.0f}' if shares and has_quote else '--'
-                cols = [ticker, price_str, change_str, weight_str, gain_str]
-                for col, val in enumerate(cols):
-                    item = self._dashboard_ensure_portfolio_item(i, col)
-                    item.setText(val)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    item.setBackground(row_bg)
-                    if col == 2:
-                        item.setForeground(text_color)
-                    elif col == 4:
-                        item.setForeground(gain_color if shares else default_text_color)
-                    else:
-                        item.setForeground(default_text_color)
-                del_btn = self._dashboard_ensure_portfolio_delete_button(i)
-                self.set_theme_variant(del_btn, 'danger')
-                del_btn.setProperty('portfolio_ticker', ticker)
-                if showing_all or self._dashboard_portfolio_panel_is_read_only():
-                    del_btn.setVisible(False)
-                else:
-                    del_btn.setVisible(True)
-        finally:
-            self.port_table.setUpdatesEnabled(True)
+        render_rows = build_dashboard_portfolio_rows(
+            list(portfolio.keys()),
+            portfolio,
+            tracker,
+            default_color=self.theme_color('text_primary'),
+            positive_color=self.theme_color('accent_positive'),
+            negative_color=self.theme_color('accent_negative'),
+            positive_bg=self.theme_color('accent_positive_bg'),
+            negative_bg=self.theme_color('accent_negative_bg'),
+            no_quote_bg=self.theme_color('panel_background'),
+        )
+        render_table_rows(self.port_table, [row for _ticker, row in render_rows])
+        for i, (ticker, _row) in enumerate(render_rows):
+            del_btn = self._dashboard_ensure_portfolio_delete_button(i)
+            self.set_theme_variant(del_btn, 'danger')
+            del_btn.setProperty('portfolio_ticker', ticker)
+            del_btn.setVisible((not showing_all) and (not self._dashboard_portfolio_panel_is_read_only()))
         self._dashboard_fit_portfolio_table_height()
 
     def _dashboard_populate_option_tables(self, symbol: Any, data: Any) -> None:
@@ -1257,39 +1279,16 @@ class DashboardMixin:
         if isinstance(expirations, dict) and '1_week' in expirations and '0_week' not in expirations:
             expirations = {'0_week': expirations.get('1_week', ''), '2_weeks': expirations.get('2_weeks', ''), '4_weeks': expirations.get('4_weeks', '')}
         for bucket_key, table in self.dashboard_option_tables.items():
-            table.setRowCount(0)
             records = raw_options.get(bucket_key, []) if isinstance(raw_options, dict) else []
             expiry_hint = str(expirations.get(bucket_key, '') or '')
             table.setToolTip(f'Using expiration {expiry_hint}' if expiry_hint else '')
-            for opt in records:
-                row = table.rowCount()
-                table.insertRow(row)
-                ticker_item = QTableWidgetItem(str(opt.get('ticker', symbol)))
-                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 0, ticker_item)
-                type_item = QTableWidgetItem(str(opt.get('type', '')))
-                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if opt.get('type') == 'Call':
-                    type_item.setForeground(self.theme_qcolor('accent_positive'))
-                elif opt.get('type') == 'Put':
-                    type_item.setForeground(self.theme_qcolor('accent_negative'))
-                table.setItem(row, 1, type_item)
-                strike = opt.get('strike')
-                strike_item = QTableWidgetItem(f'{float(strike):.1f}' if strike is not None and not pd.isna(strike) else '')
-                strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 2, strike_item)
-                exp_item = QTableWidgetItem(str(opt.get('expiration', '')))
-                exp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 3, exp_item)
-                last_price = opt.get('lastPrice')
-                price_item = QTableWidgetItem(f'{float(last_price):.2f}' if last_price is not None and not pd.isna(last_price) else '')
-                price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 4, price_item)
-                volume = opt.get('volume', 0)
-                vol_str = f'{int(volume):,}' if volume is not None and not pd.isna(volume) and float(volume) > 0 else '0'
-                vol_item = QTableWidgetItem(vol_str)
-                vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row, 5, vol_item)
+            rows = build_dashboard_option_rows(
+                records,
+                symbol=symbol,
+                positive_color=self.theme_color('accent_positive'),
+                negative_color=self.theme_color('accent_negative'),
+            )
+            render_table_rows(table, rows)
 
     def _dashboard_normalize_option_buckets(self, symbol: Any, data: Any) -> tuple[dict[str, list[Any]], dict[str, str]]:
         """Return dashboard option bucket data in a consistent three-bucket shape."""
@@ -1419,31 +1418,7 @@ class DashboardMixin:
                 color = self.theme_color('accent_positive' if change >= 0 else 'accent_negative')
                 self.index_labels[idx].setStyleSheet(f'color: {color}; font-weight: bold; background: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px; padding: 4px 8px;')
         main_targets = [item for item in data.get('targets', []) if item.get('ticker') in self.tickers]
-        self.target_table.setUpdatesEnabled(False)
-        try:
-            self.target_table.setRowCount(len(main_targets))
-            for i, item in enumerate(main_targets):
-                ticker_item = QTableWidgetItem(item['ticker'])
-                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 0, ticker_item)
-                current = item['current']
-                current_item = QTableWidgetItem(f'${current:.2f}' if isinstance(current, (int, float)) else str(current))
-                current_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 1, current_item)
-                target = item['target']
-                target_item = QTableWidgetItem(f'${target:.2f}' if isinstance(target, (int, float)) else str(target))
-                target_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 2, target_item)
-                try:
-                    upside = (float(target) - float(current)) / float(current) * 100
-                    upside_item = QTableWidgetItem(f'{upside:+.1f}%')
-                    upside_item.setForeground(self.theme_qcolor('accent_positive' if upside >= 0 else 'accent_negative'))
-                except (TypeError, ValueError, ZeroDivisionError):
-                    upside_item = QTableWidgetItem('N/A')
-                upside_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.target_table.setItem(i, 3, upside_item)
-        finally:
-            self.target_table.setUpdatesEnabled(True)
+        self._dashboard_render_target_rows(main_targets)
         portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') == 'portfolio' and article.get('ticker') in self.tickers])
         self._populate_news_table(self.news_table, portfolio_news)
         self._call_if_page_initialized('update_page3', data, page_attr='page3')

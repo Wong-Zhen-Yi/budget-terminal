@@ -1,17 +1,17 @@
 # Packaging Guide
 
-This project ships as a Windows `PyInstaller` executable built from the top-level launcher `budget_terminal.py`.
+This project ships with `PyInstaller` builds from the top-level launcher `budget_terminal.py`.
 
 ## Output
 
-The packaging flow produces:
+The Windows packaging flow produces:
 
 - `dist\BudgetTerminal-v<version>.exe`
 - `release\BudgetTerminal-v<version>-windows.zip`
 
 The version comes from `budget_terminal_app.__version__`.
 
-## Prerequisites
+## Windows Prerequisites
 
 Create the virtual environment:
 
@@ -25,7 +25,7 @@ Install dependencies plus `pyinstaller`:
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
 ```
 
-## Build Command
+## Windows Build Command
 
 Run the standard packaging script from the repository root:
 
@@ -73,7 +73,7 @@ After building:
 python -m compileall budget_terminal.py budget_terminal_app
 ```
 
-Then manually check:
+Then manually check Windows builds:
 
 1. The app launches from `dist\BudgetTerminal-v<version>.exe`
 2. Settings import/export works

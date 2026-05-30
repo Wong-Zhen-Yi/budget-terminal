@@ -88,6 +88,9 @@ class WindowSetupMixin:
         19: 'Trading Volumes',
         20: 'IPO',
         21: 'DATAROMA',
+        22: 'Valuation',
+        23: 'Institutions',
+        24: 'Backtest',
     }
 
     def init_ui(self) -> None:
@@ -155,16 +158,22 @@ class WindowSetupMixin:
         self.btn_page15.setCheckable(True)
         self.btn_page22 = QPushButton('DATAROMA')
         self.btn_page22.setCheckable(True)
+        self.btn_page24 = QPushButton('Institutions')
+        self.btn_page24.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
         self.btn_page16.setCheckable(True)
         self.btn_page9 = QPushButton('Settings')
         self.btn_page9.setCheckable(True)
         self.btn_page10 = QPushButton('Charts')
         self.btn_page10.setCheckable(True)
+        self.btn_page25 = QPushButton('Backtest')
+        self.btn_page25.setCheckable(True)
         self.btn_page11 = QPushButton('Multi Charts')
         self.btn_page11.setCheckable(True)
         self.btn_page12 = QPushButton('Stocks')
         self.btn_page12.setCheckable(True)
+        self.btn_page23 = QPushButton('Valuation')
+        self.btn_page23.setCheckable(True)
         self.btn_page18 = QPushButton('Roll')
         self.btn_page18.setCheckable(True)
         self.btn_page21 = QPushButton('IPO')
@@ -179,14 +188,17 @@ class WindowSetupMixin:
             self.btn_page8,
             self.btn_page17,
             self.btn_page12,
+            self.btn_page23,
             self.btn_page2,
             self.btn_page10,
+            self.btn_page25,
             self.btn_page5,
             self.btn_page13,
             self.btn_page14,
             self.btn_page19,
             self.btn_page15,
             self.btn_page22,
+            self.btn_page24,
             self.btn_page16,
             self.btn_page18,
             self.btn_page21,
@@ -207,6 +219,8 @@ class WindowSetupMixin:
         nav_container_layout = QHBoxLayout(nav_container)
         nav_container_layout.setContentsMargins(0, 0, 0, 0)
         nav_container_layout.setSpacing(4)
+        self._nav_container = nav_container
+        self._nav_container_layout = nav_container_layout
         for button in self._nav_buttons:
             button.setMinimumHeight(38)
             button.setMinimumWidth(110)
@@ -841,6 +855,9 @@ class WindowSetupMixin:
             {'index': 19, 'page_attr': 'page20', 'init_method': 'init_page20'},
             {'index': 20, 'page_attr': 'page21', 'init_method': 'init_page21', 'theme_hook': '_apply_ipo_theme'},
             {'index': 21, 'page_attr': 'page22', 'init_method': 'init_page22', 'theme_hook': '_apply_dataroma_theme'},
+            {'index': 22, 'page_attr': 'page23', 'init_method': 'init_page23', 'theme_hook': '_apply_valuation_theme'},
+            {'index': 23, 'page_attr': 'page24', 'init_method': 'init_page24', 'theme_hook': '_apply_institutions_theme'},
+            {'index': 24, 'page_attr': 'page25', 'init_method': 'init_page25', 'theme_hook': '_apply_backtest_theme'},
         )
 
     def _register_lazy_pages(self) -> None:

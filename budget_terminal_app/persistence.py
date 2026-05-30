@@ -36,8 +36,21 @@ DEFAULT_CHART_PAGE_SETTINGS = {
     'compare_symbols': [],
     'compare_presets': [],
     'multi_interval_labels': [],
-    'indicators': ['Volume', '200 MA'],
+    'indicators': ['Volume', '200 MA', 'Avg Price'],
     'auto': True,
+    'playback_speed_label': '5x',
+    'fib_settings': {
+        'mode': 'auto',
+        'lookback': 120,
+        'manual_by_context': {},
+    },
+}
+DEFAULT_BACKTEST_PAGE_SETTINGS = {
+    'rows': [{'symbol': 'SPY', 'weight': 100.0}],
+    'compare_symbol': 'SPY',
+    'interval_label': '1D',
+    'range_label': 'Max',
+    'splitter_sizes': [2, 5],
 }
 DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
     'last_ticker': '',
@@ -61,11 +74,29 @@ DEFAULT_STOCKS_PAGE_SETTINGS = {
     'left_splitter_sizes': [4, 2, 3],
     'middle_splitter_sizes': [2, 2, 3],
 }
+DEFAULT_VALUATION_PAGE_SETTINGS = {
+    'last_ticker': 'NVDA',
+    'assumptions': {
+        'basis_type': 'FCF',
+        'basis_value': 0.0,
+        'growth_1_5': 20.0,
+        'growth_6_10': 8.0,
+        'discount_rate': 9.0,
+        'terminal_growth': 3.0,
+        'exit_multiple': 20.0,
+        'projection_years': 10,
+        'margin_of_safety': 15.0,
+    },
+    'notes_by_ticker': {},
+}
 DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key': '1y'}
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 1, 2, 3, 19, 4, 5, 6, 7, 22, 8, 9, 24, 11, 12, 13, 14, 15, 21, 23, 16, 18, 20, 17]
+SETTINGS_PAGE_INDEX = 17
+DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 MAX_PORTFOLIOS = 5
 MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
@@ -628,6 +659,38 @@ def _normalize_options_chain_payload(settings: Any) -> Any:
     return {'default_risk_free_rate': min(max(rate_value, 0.0), 1.0)}
 
 
+def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
+    """Normalize main-window navigation order and hidden page settings."""
+    saved = settings if isinstance(settings, dict) else {}
+    valid_indexes = set(DEFAULT_NAVIGATION_PAGE_ORDER)
+    order = []
+    raw_order = saved.get('page_order', DEFAULT_NAVIGATION_PAGE_ORDER)
+    if isinstance(raw_order, list):
+        for value in raw_order:
+            try:
+                page_index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page_index in valid_indexes and page_index not in order:
+                order.append(page_index)
+    for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
+        if page_index not in order:
+            order.append(page_index)
+    hidden_pages = []
+    raw_hidden = saved.get('hidden_pages', [])
+    if isinstance(raw_hidden, list):
+        for value in raw_hidden:
+            try:
+                page_index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page_index == SETTINGS_PAGE_INDEX:
+                continue
+            if page_index in valid_indexes and page_index not in hidden_pages:
+                hidden_pages.append(page_index)
+    return {'page_order': order, 'hidden_pages': hidden_pages}
+
+
 def _clear_legacy_notes_storage() -> None:
     """Remove leftover note storage from versions that still shipped the Notes page."""
     legacy_path = Path(LEGACY_NOTES_IMAGES_DIR)
@@ -677,14 +740,17 @@ def _default_user_data_document() -> Any:
         'portfolios': portfolio_state['portfolios'],
         'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
+        'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'valuation_page': _normalize_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS),
         'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
         'time_12h': False,
     }
 
@@ -717,14 +783,17 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'portfolios': portfolio_state['portfolios'],
         'fundamentals_page': _normalize_fundamentals_page_settings(saved.get('fundamentals_page', default['fundamentals_page'])),
         'chart_page': _normalize_chart_page_settings(chart_page_payload),
+        'backtest_page': _normalize_backtest_page_settings(saved.get('backtest_page', default['backtest_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(dashboard_chart_payload),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
+        'valuation_page': _normalize_valuation_page_settings(saved.get('valuation_page', default['valuation_page'])),
         'portfolio_metrics': _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics', default['portfolio_metrics'])),
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
         'youtube': _normalize_youtube_settings(saved.get('youtube', default['youtube'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
+        'navigation': normalize_navigation_settings(saved.get('navigation', default['navigation'])),
         'time_12h': bool(saved.get('time_12h', False)),
     }
 
@@ -959,6 +1028,10 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         '',
+        '## Backtest Page Settings',
+        '',
+        _json_block(payload.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)),
+        '',
         '## Compare Presets',
         '',
         _json_block(payload.get('compare_presets', payload.get('chart_page', {}).get('compare_presets', []))),
@@ -970,6 +1043,10 @@ def build_ai_user_data_export() -> str:
         '## Stocks Page Settings',
         '',
         _json_block(payload.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
+        '',
+        '## Valuation Page Settings',
+        '',
+        _json_block(payload.get('valuation_page', DEFAULT_VALUATION_PAGE_SETTINGS)),
         '',
         '## Portfolio Metrics Settings',
         '',
@@ -986,6 +1063,10 @@ def build_ai_user_data_export() -> str:
         '## Options Chain Settings',
         '',
         _json_block(payload.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        '',
+        '## Navigation Settings',
+        '',
+        _json_block(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
         '',
         '## Full Normalized Payload',
         '',
@@ -1043,14 +1124,17 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         },
         'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
+        'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
+        'valuation_page': _normalize_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS),
         'portfolio_metrics': DEFAULT_PORTFOLIO_METRICS_SETTINGS.copy(),
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
         'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
         'time_12h': False,
     }
     return apply_user_data_backup(normalized)
@@ -1069,12 +1153,15 @@ def load_app_config() -> Any:
         'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
         'fundamentals_page': dict(document.get('fundamentals_page', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS)),
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
+        'backtest_page': dict(document.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
+        'valuation_page': dict(document.get('valuation_page', DEFAULT_VALUATION_PAGE_SETTINGS)),
         'portfolio_metrics': dict(document.get('portfolio_metrics', DEFAULT_PORTFOLIO_METRICS_SETTINGS)),
         'multi_charts': dict(document.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
         'youtube': dict(document.get('youtube', DEFAULT_YOUTUBE_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        'navigation': normalize_navigation_settings(document.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
         'time_12h': bool(document.get('time_12h', False)),
     }
 
@@ -1111,10 +1198,14 @@ def save_app_config(data: Any) -> None:
         current['fundamentals_page'] = _normalize_fundamentals_page_settings(saved.get('fundamentals_page'))
     if 'chart_page' in saved:
         current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
+    if 'backtest_page' in saved:
+        current['backtest_page'] = _normalize_backtest_page_settings(saved.get('backtest_page'))
     if 'dashboard_chart' in saved:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
     if 'stocks_page' in saved:
         current['stocks_page'] = _normalize_stocks_page_settings(saved.get('stocks_page'))
+    if 'valuation_page' in saved:
+        current['valuation_page'] = _normalize_valuation_page_settings(saved.get('valuation_page'))
     if 'portfolio_metrics' in saved:
         current['portfolio_metrics'] = _normalize_portfolio_metrics_settings(saved.get('portfolio_metrics'))
     if 'multi_charts' in saved:
@@ -1123,14 +1214,25 @@ def save_app_config(data: Any) -> None:
         current['youtube'] = _normalize_youtube_settings(saved.get('youtube'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
+    if 'navigation' in saved:
+        current['navigation'] = normalize_navigation_settings(saved.get('navigation'))
     if 'time_12h' in saved:
         current['time_12h'] = bool(saved['time_12h'])
     _save_user_data_document(current)
 
 
-def _normalize_indicator_list(raw_indicators: Any, default_indicators: Any, *, ensure_ma200: bool=False) -> Any:
+def _normalize_indicator_list(
+    raw_indicators: Any,
+    default_indicators: Any,
+    *,
+    ensure_ma200: bool=False,
+    allow_empty: bool=False,
+) -> Any:
     """Normalize indicator selections into the supported canonical labels."""
-    indicators_source = raw_indicators if isinstance(raw_indicators, list) else list(default_indicators)
+    has_explicit_list = isinstance(raw_indicators, list)
+    if allow_empty and has_explicit_list and not raw_indicators and not ensure_ma200:
+        return []
+    indicators_source = raw_indicators if has_explicit_list else list(default_indicators)
     indicators = []
     for name in indicators_source:
         text = str(name or '').strip()
@@ -1141,6 +1243,12 @@ def _normalize_indicator_list(raw_indicators: Any, default_indicators: Any, *, e
             text = 'RSI'
         elif normalized in ('200MA', 'MA200'):
             text = '200 MA'
+        elif normalized in ('AVGPRICE', 'AVERAGEPRICE', 'USERAVGPRICE', 'USERAVERAGEPRICE', 'AVGCOST', 'AVERAGECOST'):
+            text = 'Avg Price'
+        elif normalized in ('SUPPORT/RESISTANCE', 'SUPPORTRESISTANCE', 'S/R', 'SR', 'SRLEVELS'):
+            text = 'Support/Resistance'
+        elif normalized in ('FIB', 'FIBONACCI', 'FIBONACCIRETRACEMENT', 'AUTOFIBONACCI', 'FIBRETRACEMENT'):
+            text = 'Fib Retracement'
         else:
             text = ''
         if text and text not in indicators:
@@ -1148,10 +1256,78 @@ def _normalize_indicator_list(raw_indicators: Any, default_indicators: Any, *, e
     if ensure_ma200 and '200 MA' not in indicators:
         indicators.append('200 MA')
     ordered = []
-    for indicator in ('Volume', 'RSI', '200 MA'):
+    for indicator in ('Volume', 'RSI', '200 MA', 'Avg Price', 'Support/Resistance', 'Fib Retracement'):
         if indicator in indicators and indicator not in ordered:
             ordered.append(indicator)
     return ordered or list(default_indicators)
+
+
+def _normalize_fib_manual_anchor(anchor: Any) -> dict[str, Any] | None:
+    """Normalize one saved manual Fibonacci anchor pair."""
+    saved = anchor if isinstance(anchor, dict) else {}
+    try:
+        start_index = int(saved.get('start_index'))
+        end_index = int(saved.get('end_index'))
+        start_price = float(saved.get('start_price'))
+        end_price = float(saved.get('end_price'))
+    except (TypeError, ValueError):
+        return None
+    if start_index < 0 or end_index < 0:
+        return None
+    if not math.isfinite(start_price) or not math.isfinite(end_price):
+        return None
+    start_role = str(saved.get('start_role', '') or '').strip().lower()
+    end_role = str(saved.get('end_role', '') or '').strip().lower()
+    if start_role not in {'high', 'low'} or end_role not in {'high', 'low'}:
+        return None
+    return {
+        'start_index': start_index,
+        'start_price': start_price,
+        'start_role': start_role,
+        'end_index': end_index,
+        'end_price': end_price,
+        'end_role': end_role,
+    }
+
+
+def _normalize_fib_context_key(key: Any) -> str:
+    """Return a normalized Fibonacci manual-anchor context key."""
+    text = str(key or '').strip()
+    if '|' not in text:
+        return ''
+    symbol, timeframe = text.split('|', 1)
+    symbol = str(symbol or '').upper().strip()
+    timeframe = str(timeframe or '').strip()
+    if not symbol or not timeframe:
+        return ''
+    return f'{symbol}|{timeframe}'
+
+
+def _normalize_fib_settings(settings: Any) -> dict[str, Any]:
+    """Normalize Charts page Fibonacci retracement settings."""
+    saved = settings if isinstance(settings, dict) else {}
+    default = DEFAULT_CHART_PAGE_SETTINGS['fib_settings']
+    mode = str(saved.get('mode', default['mode']) or default['mode']).strip().lower()
+    if mode not in {'auto', 'manual'}:
+        mode = default['mode']
+    try:
+        lookback = int(saved.get('lookback', default['lookback']))
+    except (TypeError, ValueError):
+        lookback = int(default['lookback'])
+    lookback = min(max(lookback, 20), 500)
+    manual_by_context = {}
+    raw_manual = saved.get('manual_by_context', {})
+    if isinstance(raw_manual, dict):
+        for raw_key, raw_anchor in raw_manual.items():
+            key = _normalize_fib_context_key(raw_key)
+            anchor = _normalize_fib_manual_anchor(raw_anchor)
+            if key and anchor is not None:
+                manual_by_context[key] = anchor
+    return {
+        'mode': mode,
+        'lookback': lookback,
+        'manual_by_context': manual_by_context,
+    }
 
 
 def _normalize_chart_page_settings(settings: Any) -> Any:
@@ -1183,9 +1359,20 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         label = str(value or '').strip()
         if label in valid_multi_interval_labels and label not in multi_interval_labels:
             multi_interval_labels.append(label)
-    indicators = _normalize_indicator_list(saved.get('indicators'), DEFAULT_CHART_PAGE_SETTINGS['indicators'])
+    indicators = _normalize_indicator_list(
+        saved.get('indicators'),
+        DEFAULT_CHART_PAGE_SETTINGS['indicators'],
+        allow_empty=True,
+    )
     auto_value = saved.get('auto', DEFAULT_CHART_PAGE_SETTINGS['auto'])
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_CHART_PAGE_SETTINGS['auto']
+    playback_speed_label = str(
+        saved.get('playback_speed_label', DEFAULT_CHART_PAGE_SETTINGS['playback_speed_label'])
+        or DEFAULT_CHART_PAGE_SETTINGS['playback_speed_label']
+    ).strip()
+    if playback_speed_label not in {'1x', '2x', '5x', '10x'}:
+        playback_speed_label = DEFAULT_CHART_PAGE_SETTINGS['playback_speed_label']
+    fib_settings = _normalize_fib_settings(saved.get('fib_settings', DEFAULT_CHART_PAGE_SETTINGS['fib_settings']))
     return {
         'symbol': symbol,
         'timeframe_label': timeframe_label,
@@ -1197,6 +1384,57 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         'multi_interval_labels': multi_interval_labels,
         'indicators': indicators,
         'auto': auto_enabled,
+        'playback_speed_label': playback_speed_label,
+        'fib_settings': fib_settings,
+    }
+
+
+def _normalize_backtest_rows(values: Any) -> list[dict[str, Any]]:
+    """Normalize editable Backtest page portfolio rows."""
+    rows = []
+    seen = set()
+    raw_rows = values if isinstance(values, list) else DEFAULT_BACKTEST_PAGE_SETTINGS['rows']
+    for entry in raw_rows:
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get('symbol', '') or '').upper().strip()
+        if not symbol or symbol in seen:
+            continue
+        try:
+            weight = float(entry.get('weight', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        if not math.isfinite(weight):
+            weight = 0.0
+        weight = min(max(weight, 0.0), 10000.0)
+        seen.add(symbol)
+        rows.append({'symbol': symbol, 'weight': weight})
+    if not rows:
+        return [dict(row) for row in DEFAULT_BACKTEST_PAGE_SETTINGS['rows']]
+    return rows
+
+
+def _normalize_backtest_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the standalone Backtest page."""
+    saved = settings if isinstance(settings, dict) else {}
+    compare_symbol = str(saved.get('compare_symbol', DEFAULT_BACKTEST_PAGE_SETTINGS['compare_symbol']) or '').upper().strip()
+    interval_label = str(saved.get('interval_label', DEFAULT_BACKTEST_PAGE_SETTINGS['interval_label']) or DEFAULT_BACKTEST_PAGE_SETTINGS['interval_label']).upper().strip()
+    if interval_label not in {'1D', '1W'}:
+        interval_label = DEFAULT_BACKTEST_PAGE_SETTINGS['interval_label']
+    range_label = str(saved.get('range_label', DEFAULT_BACKTEST_PAGE_SETTINGS['range_label']) or DEFAULT_BACKTEST_PAGE_SETTINGS['range_label']).strip()
+    valid_ranges = {'MAX': 'Max', '5Y': '5Y', '3Y': '3Y', '1Y': '1Y', 'YTD': 'YTD'}
+    range_label = valid_ranges.get(range_label.upper(), DEFAULT_BACKTEST_PAGE_SETTINGS['range_label'])
+    splitter_sizes = _normalize_splitter_sizes(
+        saved.get('splitter_sizes'),
+        DEFAULT_BACKTEST_PAGE_SETTINGS['splitter_sizes'],
+        2,
+    )
+    return {
+        'rows': _normalize_backtest_rows(saved.get('rows', DEFAULT_BACKTEST_PAGE_SETTINGS['rows'])),
+        'compare_symbol': compare_symbol,
+        'interval_label': interval_label,
+        'range_label': range_label,
+        'splitter_sizes': splitter_sizes,
     }
 
 
@@ -1330,6 +1568,69 @@ def _normalize_stocks_page_settings(settings: Any) -> Any:
         'main_splitter_sizes': main_splitter_sizes,
         'left_splitter_sizes': left_splitter_sizes,
         'middle_splitter_sizes': middle_splitter_sizes,
+    }
+
+
+def _normalize_valuation_assumptions(settings: Any) -> dict[str, Any]:
+    """Normalize Valuation page model assumptions."""
+    saved = settings if isinstance(settings, dict) else {}
+    default = DEFAULT_VALUATION_PAGE_SETTINGS['assumptions']
+    basis_type = str(saved.get('basis_type', default['basis_type']) or default['basis_type']).upper().strip()
+    if basis_type not in {'FCF', 'EPS'}:
+        basis_type = default['basis_type']
+
+    def _bounded(value: Any, fallback: float, minimum: float, maximum: float) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = float(fallback)
+        if not math.isfinite(numeric):
+            numeric = float(fallback)
+        return min(max(numeric, minimum), maximum)
+
+    try:
+        years = int(saved.get('projection_years', default['projection_years']))
+    except (TypeError, ValueError):
+        years = int(default['projection_years'])
+    years = min(max(years, 1), 15)
+    return {
+        'basis_type': basis_type,
+        'basis_value': _bounded(saved.get('basis_value', default['basis_value']), float(default['basis_value']), 0.0, 100000.0),
+        'growth_1_5': _bounded(saved.get('growth_1_5', default['growth_1_5']), float(default['growth_1_5']), -50.0, 100.0),
+        'growth_6_10': _bounded(saved.get('growth_6_10', default['growth_6_10']), float(default['growth_6_10']), -50.0, 100.0),
+        'discount_rate': _bounded(saved.get('discount_rate', default['discount_rate']), float(default['discount_rate']), 0.1, 50.0),
+        'terminal_growth': _bounded(saved.get('terminal_growth', default['terminal_growth']), float(default['terminal_growth']), -10.0, 20.0),
+        'exit_multiple': _bounded(saved.get('exit_multiple', default['exit_multiple']), float(default['exit_multiple']), 1.0, 100.0),
+        'projection_years': years,
+        'margin_of_safety': _bounded(saved.get('margin_of_safety', default['margin_of_safety']), float(default['margin_of_safety']), 0.0, 90.0),
+    }
+
+
+def _normalize_valuation_notes(values: Any) -> dict[str, str]:
+    """Normalize one Valuation notes payload."""
+    saved = values if isinstance(values, dict) else {}
+    notes = {}
+    for key in ('thesis', 'risk', 'sources'):
+        text = str(saved.get(key, '') or '').replace('\r', '\n').strip()
+        notes[key] = text[:4000]
+    return notes
+
+
+def _normalize_valuation_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the Valuation page."""
+    saved = settings if isinstance(settings, dict) else {}
+    last_ticker = str(saved.get('last_ticker', DEFAULT_VALUATION_PAGE_SETTINGS['last_ticker']) or DEFAULT_VALUATION_PAGE_SETTINGS['last_ticker']).upper().strip()
+    notes_by_ticker = {}
+    raw_notes = saved.get('notes_by_ticker', DEFAULT_VALUATION_PAGE_SETTINGS['notes_by_ticker'])
+    if isinstance(raw_notes, dict):
+        for ticker_key, notes in raw_notes.items():
+            ticker = str(ticker_key or '').upper().strip()
+            if ticker:
+                notes_by_ticker[ticker] = _normalize_valuation_notes(notes)
+    return {
+        'last_ticker': last_ticker or DEFAULT_VALUATION_PAGE_SETTINGS['last_ticker'],
+        'assumptions': _normalize_valuation_assumptions(saved.get('assumptions', DEFAULT_VALUATION_PAGE_SETTINGS['assumptions'])),
+        'notes_by_ticker': notes_by_ticker,
     }
 
 
@@ -1502,6 +1803,21 @@ def save_theme_settings(settings: Any) -> Any:
     return payload
 
 
+def load_navigation_settings() -> Any:
+    """Load persisted main-window navigation preferences."""
+    config = load_app_config()
+    return normalize_navigation_settings(config.get('navigation', DEFAULT_NAVIGATION_SETTINGS))
+
+
+def save_navigation_settings(settings: Any) -> Any:
+    """Persist main-window navigation preferences in app config."""
+    current = load_app_config()
+    state = normalize_navigation_settings(settings)
+    current['navigation'] = state
+    save_app_config(current)
+    return state
+
+
 def load_chart_page_settings() -> Any:
     """Load persisted state for the dedicated Charts page."""
     config = load_app_config()
@@ -1513,6 +1829,21 @@ def save_chart_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_chart_page_settings(settings)
     current['chart_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_backtest_page_settings() -> Any:
+    """Load persisted state for the standalone Backtest page."""
+    config = load_app_config()
+    return _normalize_backtest_page_settings(config.get('backtest_page', {}))
+
+
+def save_backtest_page_settings(settings: Any) -> Any:
+    """Persist state for the standalone Backtest page."""
+    current = load_app_config()
+    state = _normalize_backtest_page_settings(settings)
+    current['backtest_page'] = state
     save_app_config(current)
     return state
 
@@ -1558,6 +1889,21 @@ def save_stocks_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_stocks_page_settings(settings)
     current['stocks_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_valuation_page_settings() -> Any:
+    """Load persisted state for the Valuation page."""
+    config = load_app_config()
+    return _normalize_valuation_page_settings(config.get('valuation_page', {}))
+
+
+def save_valuation_page_settings(settings: Any) -> Any:
+    """Persist state for the Valuation page."""
+    current = load_app_config()
+    state = _normalize_valuation_page_settings(settings)
+    current['valuation_page'] = state
     save_app_config(current)
     return state
 

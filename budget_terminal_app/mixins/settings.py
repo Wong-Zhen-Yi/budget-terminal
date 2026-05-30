@@ -11,7 +11,16 @@ from budget_terminal_app.workers.politics import CACHE_DIR as POLITICS_CACHE_DIR
 from budget_terminal_app.workers.youtube import YOUTUBE_CACHE_DIR
 
 
+class _NoWheelComboBox(QComboBox):
+    """Combo box that cannot be changed accidentally by mouse-wheel scrolling."""
+
+    def wheelEvent(self, event: Any) -> None:
+        event.ignore()
+
+
 class SettingsMixin:
+    SETTINGS_NAVIGATION_ROW_HEIGHT = 30
+    SETTINGS_NAVIGATION_VISIBLE_ROWS = 12
     SETTINGS_CACHE_DIR_NAMES = (
         calendar_worker._ECONOMIC_EVENTS_CACHE_DIR,
         calendar_worker._MARKET_HOLIDAY_CACHE_DIR,
@@ -19,7 +28,7 @@ class SettingsMixin:
         YOUTUBE_CACHE_DIR,
     )
     SETTINGS_SHORTCUT_ROWS = (
-        ('Ctrl+Tab', 'Switch to the next main tab and wrap from Settings back to Dashboard.'),
+        ('Ctrl+Tab', 'Switch to the next visible main tab and wrap through the current navigation order.'),
         ('F5', 'Refresh the page that is currently open in the main workspace.'),
         ('`', 'Open or close the tab picker. If a main-window text input is focused, exit it first and then open the picker.'),
         ('Esc', 'Close the tab picker or exit the active main-window text input without changing pages.'),
@@ -46,6 +55,7 @@ class SettingsMixin:
 
         header_frame = self._build_settings_header()
         theme_box = self._build_settings_preferences_box()
+        navigation_box = self._build_settings_navigation_box()
         actions_box = self._build_settings_user_data_box()
         data_health_box = self._build_settings_data_health_box()
         logs_box = self._build_settings_logs_box()
@@ -53,6 +63,7 @@ class SettingsMixin:
         startup_box = self._build_settings_startup_performance_box()
         content_grid = self._build_settings_content_grid(
             theme_box,
+            navigation_box,
             actions_box,
             shortcuts_box,
             data_health_box,
@@ -111,7 +122,7 @@ class SettingsMixin:
         theme_layout = QVBoxLayout(theme_box)
         theme_layout.setContentsMargins(12, 12, 12, 10)
         theme_layout.setSpacing(6)
-        self.settings_theme_combo = QComboBox()
+        self.settings_theme_combo = _NoWheelComboBox()
         self.settings_theme_combo.setObjectName('settingsThemeCombo')
         self.settings_theme_combo.setAccessibleName('Theme selector')
         self.settings_theme_combo.setToolTip('Theme selector')
@@ -183,6 +194,47 @@ class SettingsMixin:
         button.setMinimumHeight(30)
         button.clicked.connect(slot)
         return button
+
+    def _build_settings_navigation_box(self) -> QGroupBox:
+        """Build Settings controls for page visibility and order."""
+        navigation_box = QGroupBox('Page Navigation')
+        self.set_theme_role(navigation_box, 'panel')
+        navigation_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        navigation_layout = QVBoxLayout(navigation_box)
+        navigation_layout.setContentsMargins(12, 12, 12, 10)
+        navigation_layout.setSpacing(6)
+        navigation_layout.addWidget(self._settings_section_header('Visible Pages', 'Choose which main pages appear in navigation and set their order.'))
+
+        self.settings_navigation_list = QListWidget()
+        self.settings_navigation_list.setMinimumHeight(260)
+        self.settings_navigation_list.setSpacing(2)
+        self.settings_navigation_list.setUniformItemSizes(True)
+        self.settings_navigation_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.settings_navigation_list.itemChanged.connect(self._on_settings_navigation_item_changed)
+        self.settings_navigation_list.currentRowChanged.connect(lambda *_: self._refresh_settings_navigation_controls())
+        navigation_layout.addWidget(self.settings_navigation_list)
+
+        controls = self._settings_transparent_widget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        self.settings_navigation_up_btn = QPushButton('Move Up')
+        self.settings_navigation_up_btn.setMinimumHeight(28)
+        self.settings_navigation_up_btn.clicked.connect(lambda: self._move_settings_navigation_page(-1))
+        self.settings_navigation_down_btn = QPushButton('Move Down')
+        self.settings_navigation_down_btn.setMinimumHeight(28)
+        self.settings_navigation_down_btn.clicked.connect(lambda: self._move_settings_navigation_page(1))
+        self.settings_navigation_reset_btn = QPushButton('Reset Order')
+        self.settings_navigation_reset_btn.setMinimumHeight(28)
+        self.set_theme_variant(self.settings_navigation_reset_btn, 'danger')
+        self.settings_navigation_reset_btn.clicked.connect(self._reset_settings_navigation_pages)
+        controls_layout.addWidget(self.settings_navigation_up_btn)
+        controls_layout.addWidget(self.settings_navigation_down_btn)
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(self.settings_navigation_reset_btn)
+        navigation_layout.addWidget(controls)
+        self._refresh_settings_navigation_list()
+        return navigation_box
 
     def _build_settings_user_data_box(self) -> QGroupBox:
         """Build Settings controls for user-data maintenance actions."""
@@ -353,26 +405,148 @@ class SettingsMixin:
     def _build_settings_content_grid(
         self,
         theme_box: QGroupBox,
+        navigation_box: QGroupBox,
         actions_box: QGroupBox,
         shortcuts_box: QGroupBox,
         data_health_box: QGroupBox,
         logs_box: QGroupBox,
         startup_box: QGroupBox,
-    ) -> QGridLayout:
-        """Arrange the Settings page panels in the existing two-column grid."""
-        content_grid = QGridLayout()
-        content_grid.setContentsMargins(0, 0, 0, 0)
-        content_grid.setHorizontalSpacing(4)
-        content_grid.setVerticalSpacing(4)
-        content_grid.addWidget(actions_box, 0, 0)
-        content_grid.addWidget(data_health_box, 0, 1)
-        content_grid.addWidget(shortcuts_box, 1, 0)
-        content_grid.addWidget(theme_box, 2, 0)
-        content_grid.addWidget(logs_box, 1, 1, 2, 1)
-        content_grid.addWidget(startup_box, 3, 0, 1, 2)
-        content_grid.setColumnStretch(0, 1)
-        content_grid.setColumnStretch(1, 1)
-        return content_grid
+    ) -> QVBoxLayout:
+        """Arrange the Settings page panels in one vertical stack."""
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(4)
+        content_layout.addWidget(theme_box)
+        content_layout.addWidget(navigation_box)
+        content_layout.addWidget(actions_box)
+        content_layout.addWidget(shortcuts_box)
+        content_layout.addWidget(data_health_box)
+        content_layout.addWidget(logs_box)
+        content_layout.addWidget(startup_box)
+        return content_layout
+
+    def _settings_navigation_item_index(self, item: Any) -> int | None:
+        """Return the page index stored on one Settings navigation row."""
+        if item is None:
+            return None
+        try:
+            return int(item.data(Qt.ItemDataRole.UserRole))
+        except (TypeError, ValueError):
+            return None
+
+    def _settings_navigation_payload_from_list(self) -> dict[str, Any]:
+        """Build a navigation settings payload from the Settings list widget."""
+        order = []
+        hidden_pages = []
+        if not hasattr(self, 'settings_navigation_list'):
+            return normalize_navigation_settings(getattr(self, 'navigation_state', DEFAULT_NAVIGATION_SETTINGS))
+        for row in range(self.settings_navigation_list.count()):
+            item = self.settings_navigation_list.item(row)
+            page_index = self._settings_navigation_item_index(item)
+            if page_index is None:
+                continue
+            order.append(page_index)
+            if page_index != SETTINGS_PAGE_INDEX and item.checkState() != Qt.CheckState.Checked:
+                hidden_pages.append(page_index)
+        return normalize_navigation_settings({'page_order': order, 'hidden_pages': hidden_pages})
+
+    def _resize_settings_navigation_list(self) -> None:
+        """Keep the Settings page manager from compressing rows on first layout."""
+        if not hasattr(self, 'settings_navigation_list'):
+            return
+        count = max(1, self.settings_navigation_list.count())
+        visible_rows = min(count, self.SETTINGS_NAVIGATION_VISIBLE_ROWS)
+        spacing = max(0, int(self.settings_navigation_list.spacing()))
+        frame_width = max(0, int(self.settings_navigation_list.frameWidth()))
+        height = (
+            visible_rows * self.SETTINGS_NAVIGATION_ROW_HEIGHT
+            + max(0, visible_rows - 1) * spacing
+            + frame_width * 2
+            + 8
+        )
+        self.settings_navigation_list.setMinimumHeight(height)
+        self.settings_navigation_list.setMaximumHeight(height)
+        self.settings_navigation_list.updateGeometry()
+
+    def _refresh_settings_navigation_list(self) -> None:
+        """Refresh the Settings page manager from the current navigation state."""
+        if not hasattr(self, 'settings_navigation_list'):
+            return
+        state = normalize_navigation_settings(getattr(self, 'navigation_state', DEFAULT_NAVIGATION_SETTINGS))
+        self.navigation_state = state
+        hidden_pages = set(state.get('hidden_pages', []))
+        self.settings_navigation_list.blockSignals(True)
+        self.settings_navigation_list.clear()
+        for page_index in self._navigation_page_order() if hasattr(self, '_navigation_page_order') else state.get('page_order', []):
+            label = self._PAGE_LABELS.get(page_index, f'Page {page_index}')
+            if page_index == SETTINGS_PAGE_INDEX:
+                label = f'{label} (always visible)'
+            item = QListWidgetItem(label)
+            item.setSizeHint(QSize(0, self.SETTINGS_NAVIGATION_ROW_HEIGHT))
+            item.setData(Qt.ItemDataRole.UserRole, page_index)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Unchecked if page_index in hidden_pages else Qt.CheckState.Checked)
+            if page_index == SETTINGS_PAGE_INDEX:
+                item.setToolTip('Settings cannot be hidden.')
+            self.settings_navigation_list.addItem(item)
+        self.settings_navigation_list.blockSignals(False)
+        self._resize_settings_navigation_list()
+        if self.settings_navigation_list.count() > 0 and self.settings_navigation_list.currentRow() < 0:
+            self.settings_navigation_list.setCurrentRow(0)
+        self._refresh_settings_navigation_controls()
+
+    def _refresh_settings_navigation_controls(self) -> None:
+        """Refresh move button state for the selected navigation row."""
+        if not hasattr(self, 'settings_navigation_list'):
+            return
+        row = self.settings_navigation_list.currentRow()
+        count = self.settings_navigation_list.count()
+        if hasattr(self, 'settings_navigation_up_btn'):
+            self.settings_navigation_up_btn.setEnabled(row > 0)
+        if hasattr(self, 'settings_navigation_down_btn'):
+            self.settings_navigation_down_btn.setEnabled(0 <= row < count - 1)
+
+    def _save_settings_navigation_from_list(self, status_text: str) -> None:
+        """Persist current navigation list state and reapply it to the shell."""
+        self.navigation_state = save_navigation_settings(self._settings_navigation_payload_from_list())
+        if hasattr(self, '_apply_navigation_settings_to_shell'):
+            self._apply_navigation_settings_to_shell()
+        self._refresh_settings_navigation_controls()
+        self._set_settings_status(status_text, 'positive')
+
+    def _on_settings_navigation_item_changed(self, item: Any) -> None:
+        """Persist page visibility changes from the Settings page manager."""
+        page_index = self._settings_navigation_item_index(item)
+        if page_index == SETTINGS_PAGE_INDEX and item.checkState() != Qt.CheckState.Checked:
+            self.settings_navigation_list.blockSignals(True)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.settings_navigation_list.blockSignals(False)
+            self._set_settings_status('Settings must remain visible.', 'muted')
+            return
+        self._save_settings_navigation_from_list('Page navigation updated.')
+
+    def _move_settings_navigation_page(self, direction: int) -> None:
+        """Move the selected page up or down in the persisted navigation order."""
+        if not hasattr(self, 'settings_navigation_list'):
+            return
+        current_row = self.settings_navigation_list.currentRow()
+        target_row = current_row + int(direction)
+        if current_row < 0 or target_row < 0 or target_row >= self.settings_navigation_list.count():
+            return
+        self.settings_navigation_list.blockSignals(True)
+        item = self.settings_navigation_list.takeItem(current_row)
+        self.settings_navigation_list.insertItem(target_row, item)
+        self.settings_navigation_list.setCurrentRow(target_row)
+        self.settings_navigation_list.blockSignals(False)
+        self._save_settings_navigation_from_list('Page navigation order updated.')
+
+    def _reset_settings_navigation_pages(self) -> None:
+        """Restore the default main-page order and visibility."""
+        self.navigation_state = save_navigation_settings(DEFAULT_NAVIGATION_SETTINGS)
+        if hasattr(self, '_apply_navigation_settings_to_shell'):
+            self._apply_navigation_settings_to_shell()
+        self._refresh_settings_navigation_list()
+        self._set_settings_status('Page navigation reset.', 'positive')
 
     def _settings_transparent_widget(self) -> QWidget:
         """Create a Settings helper widget that does not paint a panel background."""
@@ -884,8 +1058,17 @@ class SettingsMixin:
         self.p2_custom_selections_by_ticker = dict(
             fundamentals_page_state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
         )
+        self.valuation_page_state = save_valuation_page_settings(
+            payload.get('valuation_page', DEFAULT_VALUATION_PAGE_SETTINGS)
+        ) if isinstance(payload, dict) else save_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS)
+        if hasattr(self, 'valuation_ticker_input'):
+            self.valuation_ticker_input.setText(str(self.valuation_page_state.get('last_ticker', 'NVDA') or 'NVDA').upper())
+            if hasattr(self, '_valuation_apply_assumptions_to_controls'):
+                self._valuation_apply_assumptions_to_controls(self.valuation_page_state.get('assumptions', DEFAULT_VALUATION_PAGE_SETTINGS['assumptions']))
         self.chart_page_state = save_chart_page_settings(payload.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)) if isinstance(payload, dict) else save_chart_page_settings(DEFAULT_CHART_PAGE_SETTINGS)
         chart_page_state = dict(self.chart_page_state)
+        self.backtest_page_state = save_backtest_page_settings(payload.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)) if isinstance(payload, dict) else save_backtest_page_settings(DEFAULT_BACKTEST_PAGE_SETTINGS)
+        backtest_page_state = dict(self.backtest_page_state)
         self.multi_charts_state = save_multi_charts_settings(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)) if isinstance(payload, dict) else save_multi_charts_settings(DEFAULT_MULTI_CHARTS_SETTINGS)
         multi_charts_state = dict(self.multi_charts_state)
         self.p10_symbol = str(chart_page_state.get('symbol', 'SPY') or 'SPY').upper()
@@ -899,7 +1082,7 @@ class SettingsMixin:
             self.p10_multi_interval_labels = self._p10_initial_multi_interval_labels(chart_page_state.get('multi_interval_labels', []))
         else:
             self.p10_multi_interval_labels = list(chart_page_state.get('multi_interval_labels', []))
-        self.p10_active_indicators = list(chart_page_state.get('indicators', ['Volume', '200 MA']))
+        self.p10_active_indicators = list(chart_page_state.get('indicators', DEFAULT_CHART_PAGE_SETTINGS['indicators']))
         self.p10_auto_follow = bool(chart_page_state.get('auto', True))
         self._mc_custom_symbols = list(multi_charts_state.get('custom_symbols', []))
         self._mc_saved_order = list(multi_charts_state.get('order', []))
@@ -917,10 +1100,24 @@ class SettingsMixin:
         self.p10_compare_errors = []
         self._p10_chart_dirty = True
         self._p10_compare_dirty = True
+        if hasattr(self, 'p25_table'):
+            self.p25_rows = list(backtest_page_state.get('rows', DEFAULT_BACKTEST_PAGE_SETTINGS['rows']))
+            self.p25_compare_symbol = str(backtest_page_state.get('compare_symbol', 'SPY') or '').upper().strip()
+            self.p25_interval_label = str(backtest_page_state.get('interval_label', '1D') or '1D').upper().strip()
+            self.p25_range_label = str(backtest_page_state.get('range_label', 'Max') or 'Max').strip()
+            self.p25_compare_input.setText(self.p25_compare_symbol)
+            self._p25_populate_table(self.p25_rows)
+            self._p25_update_weight_total()
+            self._p25_update_button_styles()
         if hasattr(self, '_p10_compare_target_preset_name'):
             self._p10_compare_target_preset_name = None
         self.dashboard_chart_state = save_dashboard_chart_settings(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)) if isinstance(payload, dict) else save_dashboard_chart_settings(DEFAULT_DASHBOARD_CHART_SETTINGS)
         dashboard_chart_state = dict(self.dashboard_chart_state)
+        self.navigation_state = save_navigation_settings(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)) if isinstance(payload, dict) else save_navigation_settings(DEFAULT_NAVIGATION_SETTINGS)
+        if hasattr(self, '_apply_navigation_settings_to_shell'):
+            self._apply_navigation_settings_to_shell()
+        if hasattr(self, '_refresh_settings_navigation_list'):
+            self._refresh_settings_navigation_list()
         self.dashboard_symbol = str(dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
         self.dashboard_timeframe_label = str(dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
         self.dashboard_active_indicators = list(dashboard_chart_state.get('indicators', ['Volume', '200 MA']))

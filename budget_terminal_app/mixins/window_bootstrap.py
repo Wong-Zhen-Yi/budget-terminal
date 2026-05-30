@@ -75,6 +75,9 @@ class WindowBootstrapMixin:
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
     _SESSION_CACHE_PERSIST_DEBOUNCE_MS = 250
     _OPTIONS_FETCH_MAX_WORKERS = 4
+    _PORTFOLIO_TASK_MAX_WORKERS = 4
+    _DASHBOARD_FETCH_MAX_WORKERS = 2
+    _P17_FETCH_MAX_WORKERS = 3
     _STARTUP_METRIC_STAGE_LABELS = {
         'first_ui': 'First UI',
         'dashboard_data': 'Dashboard Data',
@@ -750,8 +753,11 @@ class WindowBootstrapMixin:
                 self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
                 self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
                 self.fundamentals_page_state = load_fundamentals_page_settings()
+                self.valuation_page_state = load_valuation_page_settings()
                 self.dashboard_chart_state = load_dashboard_chart_settings()
+                self.backtest_page_state = load_backtest_page_settings()
                 self.portfolio_metrics_state = load_portfolio_metrics_settings()
+                self.navigation_state = load_navigation_settings()
                 self.networth_data = load_networth_data()
                 self._tab_session_cache = load_tab_session_cache()
             self._rebuild_portfolio_slots()
@@ -781,9 +787,15 @@ class WindowBootstrapMixin:
             self.chart_configs = []
             self._dashboard_request_seq = 0
             self._dashboard_latest_request_id = 0
+            self._dashboard_fetch_executor = None
+            self._dashboard_latest_future = None
+            self._p17_fetch_executor = None
+            self._p17_fetch_futures = {}
+            self._p25_executor = None
             self._cache_manager = CacheManager()
             self.last_data = None
             self.p2_current_data = None
+            self.valuation_current_data = None
             self.p2_selected_configuration = str(
                 self.fundamentals_page_state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
                 or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
@@ -847,6 +859,7 @@ class WindowBootstrapMixin:
             self._p14_auto_refresh_timer.setInterval(int(getattr(self, '_P14_AUTO_REFRESH_INTERVAL_MS', 15 * 60 * 1000)))
             self._p14_auto_refresh_timer.timeout.connect(self._p14_auto_refresh_tick)
             self._options_fetch_executor = None
+            self._portfolio_task_executor = None
             self._option_chain_memory_cache = {}
             self._option_chain_memory_cache_ttl = 60.0
             self._options_expiry_memory_cache = {}

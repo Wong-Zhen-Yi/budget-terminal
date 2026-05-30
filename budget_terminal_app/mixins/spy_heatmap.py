@@ -5,6 +5,17 @@ from typing import Any
 from ..compat import *
 from budget_terminal_app.data_service.results import data_sources_from_meta, describe_market_data_status
 from budget_terminal_app.data_service.tasks import MarketDataTaskRunner
+from budget_terminal_app.mixins.spy_heatmap_presenters import (
+    build_heatmap_detail,
+    build_heatmap_summary,
+    build_holding_summary,
+    build_spy_heatmap_rows,
+    format_heatmap_pct,
+    format_heatmap_weight_pct,
+    heatmap_interval_summary,
+    select_heatmap_row,
+    weighted_change_from_heatmap_rows,
+)
 from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
 
 
@@ -29,6 +40,7 @@ class SpyHeatmapMixin:
         """Build the ETF holdings heatmap page."""
         self._p17_fetch_in_progress = False
         self._p17_fetching_symbols: set[str] = set()
+        self._p17_fetch_futures: dict[str, Any] = {}
         self._p17_last_fetch_by_etf: dict[str, float] = {}
         self._p17_rows: list[dict[str, Any]] = []
         self._p17_selected_row: dict[str, Any] | None = None
@@ -149,6 +161,15 @@ class SpyHeatmapMixin:
         """Refresh selected ETF heatmap data when the tab is shown."""
         self._p17_request_refresh()
 
+    def _ensure_p17_fetch_executor(self) -> Any:
+        """Create the bounded Heatmap fetch executor on demand."""
+        executor = getattr(self, "_p17_fetch_executor", None)
+        if executor is None:
+            max_workers = int(getattr(self, "_P17_FETCH_MAX_WORKERS", 3) or 3)
+            executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+            self._p17_fetch_executor = executor
+        return executor
+
     def _p17_request_refresh(self, *, force: bool = False, symbol: Any = None) -> bool:
         """Start a heatmap refresh if not throttled or already running."""
         etf_symbol = self._p17_normalize_etf_symbol(symbol or getattr(self, "_p17_etf_symbol", "SPY"))
@@ -192,7 +213,18 @@ class SpyHeatmapMixin:
                 logger.error("%s heatmap refresh failed: %s", etf_symbol, exc)
                 self._invoke_main.emit(lambda err=str(exc), requested_symbol=etf_symbol: self._p17_handle_error(err, requested_symbol))
 
-        threading.Thread(target=_run, daemon=True).start()
+        try:
+            future = self._ensure_p17_fetch_executor().submit(_run)
+            self._p17_fetch_futures[etf_symbol] = future
+        except Exception as exc:
+            fetching.discard(etf_symbol)
+            self._p17_fetching_symbols = fetching
+            self._p17_fetch_in_progress = bool(fetching)
+            self._p17_fetch_futures.pop(etf_symbol, None)
+            self._p17_update_refresh_state()
+            logger.error("%s heatmap refresh could not be scheduled: %s", etf_symbol, exc)
+            self._invoke_main.emit(lambda err=str(exc), requested_symbol=etf_symbol: self._p17_handle_error(err, requested_symbol))
+            return False
         return True
 
     def _p17_apply_result(self, result: Any, requested_symbol: Any = None) -> None:
@@ -204,6 +236,7 @@ class SpyHeatmapMixin:
         fetching.discard(etf_symbol)
         self._p17_fetching_symbols = fetching
         self._p17_fetch_in_progress = bool(fetching)
+        getattr(self, "_p17_fetch_futures", {}).pop(etf_symbol, None)
         self._p17_results[etf_symbol] = result
         self._p17_last_fetch_by_etf[etf_symbol] = datetime.datetime.now().timestamp()
         if etf_symbol == getattr(self, "_p17_etf_symbol", "SPY"):
@@ -216,37 +249,21 @@ class SpyHeatmapMixin:
         result = self._p17_current_result()
         if result is None:
             return
-        rows = []
         etf_symbol = self._p17_normalize_etf_symbol(getattr(self, "_p17_etf_symbol", "SPY"))
         etf_label = self._p17_etf_label(etf_symbol)
         interval_key = self._p17_interval_key
         interval_label = self._p17_interval_label(interval_key)
-        for holding in list(getattr(result, "holdings", []) or []):
-            changes = dict(getattr(holding, "changes", {}) or {})
-            change = changes.get(interval_key)
-            if not isinstance(change, (int, float)) and interval_key == "live":
-                change = getattr(holding, "change_pct", None)
-            rows.append({
-                "symbol": str(getattr(holding, "symbol", "") or "").upper().strip(),
-                "name": str(getattr(holding, "name", "") or "").strip(),
-                "sector": str(getattr(holding, "sector", "") or "Unclassified").strip() or "Unclassified",
-                "weight": getattr(holding, "weight", None),
-                "price": getattr(holding, "price", None),
-                "change_pct": change,
-                "changes": changes,
-                "interval_key": interval_key,
-                "interval_label": interval_label,
-                "change_label": f"{interval_label} Change",
-                "etf": etf_symbol,
-                "etf_label": etf_label,
-            })
+        rows = build_spy_heatmap_rows(
+            result,
+            etf_symbol=etf_symbol,
+            etf_label=etf_label,
+            interval_key=interval_key,
+            interval_label=interval_label,
+        )
         self._p17_rows = rows
         self.p17_heatmap.set_data(rows, reset_view=reset_view)
         self._p17_update_summary(result)
-        selected_row = self._p17_selected_row if (self._p17_selected_row or {}).get("etf") == etf_symbol else None
-        selected_symbol = str((selected_row or {}).get("symbol") or "").upper().strip()
-        selected = next((row for row in rows if row.get("symbol") == selected_symbol), None)
-        self._p17_on_holding_selected(selected or (rows[0] if rows else None))
+        self._p17_on_holding_selected(select_heatmap_row(rows, self._p17_selected_row, etf_symbol))
         issuer = str(getattr(result, "issuer", "") or "ETF holdings source").strip()
         status_text, status_type = describe_market_data_status(
             result,
@@ -258,32 +275,24 @@ class SpyHeatmapMixin:
     def _p17_update_summary(self, result: Any) -> None:
         """Update ETF heatmap summary metrics."""
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
-        holdings_loaded = int(getattr(result, "holdings_loaded", 0) or 0)
-        summary = self._p17_interval_summary(result)
-        quote_coverage = int(getattr(summary, "quote_coverage", getattr(result, "quote_coverage", 0)) or 0)
+        summary = build_heatmap_summary(result, getattr(self, "_p17_interval_key", "live"))
         self.p17_summary_labels["updated"].setText(now_str)
-        self.p17_summary_labels["holdings"].setText(str(holdings_loaded))
-        self.p17_summary_labels["coverage"].setText(f"{quote_coverage}/{holdings_loaded}" if holdings_loaded else "--")
-        weighted = getattr(summary, "weighted_move", getattr(result, "weighted_day_move", None))
-        self._p17_set_change_label(self.p17_summary_labels["weighted"], weighted, large=False)
-        strongest = getattr(summary, "strongest", getattr(result, "strongest", None))
-        weakest = getattr(summary, "weakest", getattr(result, "weakest", None))
-        self._p17_set_holding_summary(self.p17_summary_labels["strongest"], strongest)
-        self._p17_set_holding_summary(self.p17_summary_labels["weakest"], weakest)
+        self.p17_summary_labels["holdings"].setText(str(summary.holdings_loaded))
+        self.p17_summary_labels["coverage"].setText(f"{summary.quote_coverage}/{summary.holdings_loaded}" if summary.holdings_loaded else "--")
+        self._p17_set_change_label(self.p17_summary_labels["weighted"], summary.weighted_move, large=False)
+        self._p17_set_holding_summary(self.p17_summary_labels["strongest"], summary.strongest)
+        self._p17_set_holding_summary(self.p17_summary_labels["weakest"], summary.weakest)
 
     def _p17_set_holding_summary(self, label: QLabel, holding: Any) -> None:
         if label is None:
             return
-        symbol = str(getattr(holding, "symbol", "") or "").upper().strip()
-        change = (getattr(holding, "changes", {}) or {}).get(self._p17_interval_key)
-        if not isinstance(change, (int, float)) and self._p17_interval_key == "live":
-            change = getattr(holding, "change_pct", None)
-        if not symbol or not isinstance(change, (int, float)):
+        summary = holding if hasattr(holding, "text") and hasattr(holding, "change_pct") else build_holding_summary(holding, getattr(self, "_p17_interval_key", "live"))
+        change = summary.change_pct
+        if not isinstance(change, (int, float)):
             label.setText("--")
             label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; font-weight: bold; border: none;')
             return
-        sign = "+" if float(change) >= 0 else ""
-        label.setText(f"{symbol} {sign}{float(change):.2f}%")
+        label.setText(summary.text)
         color = self.theme_color("accent_positive" if float(change) >= 0 else "accent_negative")
         label.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold; border: none;")
 
@@ -292,25 +301,15 @@ class SpyHeatmapMixin:
         payload = row if isinstance(row, dict) else {}
         if not payload:
             self._p17_selected_row = None
-            self.p17_detail_symbol_lbl.setText("Select a holding")
-            self.p17_detail_name_lbl.setText("--")
-            self.p17_detail_sector_lbl.setText("Sector: --")
-            self.p17_detail_weight_lbl.setText("Weight: --")
-            self.p17_detail_price_lbl.setText("Price: --")
-            self.p17_detail_change_lbl.setText("Change: --")
-            return
-        self._p17_selected_row = dict(payload)
-        symbol = str(payload.get("symbol") or "--")
-        self.p17_detail_symbol_lbl.setText(symbol)
-        self.p17_detail_name_lbl.setText(str(payload.get("name") or "--"))
-        self.p17_detail_sector_lbl.setText(f"Sector: {payload.get('sector') or 'Unclassified'}")
-        self.p17_detail_weight_lbl.setText(f"Weight: {self._p17_format_weight_pct(payload.get('weight'))}")
-        price = payload.get("price")
-        self.p17_detail_price_lbl.setText(f"Price: ${float(price):,.2f}" if isinstance(price, (int, float)) else "Price: --")
-        change = payload.get("change_pct")
-        change_label = str(payload.get("change_label") or f"{self._p17_interval_label()} Change")
-        self.p17_detail_change_lbl.setText(f"{change_label}: {self._p17_format_pct(change, signed=True)}")
-        self._p17_set_change_label(self.p17_detail_change_lbl, change, large=True, prefix=f"{change_label}: ")
+        else:
+            self._p17_selected_row = dict(payload)
+        detail = build_heatmap_detail(payload, self._p17_interval_label())
+        self.p17_detail_symbol_lbl.setText(detail.symbol)
+        self.p17_detail_name_lbl.setText(detail.name)
+        self.p17_detail_sector_lbl.setText(detail.sector)
+        self.p17_detail_weight_lbl.setText(detail.weight)
+        self.p17_detail_price_lbl.setText(detail.price)
+        self._p17_set_change_label(self.p17_detail_change_lbl, detail.change_pct, large=True, prefix=f"{detail.change_label}: ")
 
     def _p17_open_symbol_in_charts(self, symbol: Any) -> None:
         """Double-click a heatmap tile to open the holding in Charts."""
@@ -335,6 +334,7 @@ class SpyHeatmapMixin:
         fetching.discard(etf_symbol)
         self._p17_fetching_symbols = fetching
         self._p17_fetch_in_progress = bool(fetching)
+        getattr(self, "_p17_fetch_futures", {}).pop(etf_symbol, None)
         if etf_symbol == getattr(self, "_p17_etf_symbol", "SPY"):
             self.set_status_text(self.p17_status_lbl, f"{self._p17_etf_label(etf_symbol)} heatmap refresh failed: {error}", status="negative")
         if hasattr(self, '_record_data_health_exception'):
@@ -392,15 +392,7 @@ class SpyHeatmapMixin:
         self._p17_style_interval_buttons()
 
     def _p17_current_weighted_change(self) -> float | None:
-        numerator = 0.0
-        denominator = 0.0
-        for row in getattr(self, "_p17_rows", []):
-            weight = row.get("weight")
-            change = row.get("change_pct")
-            if isinstance(weight, (int, float)) and isinstance(change, (int, float)):
-                numerator += float(weight) * float(change)
-                denominator += float(weight)
-        return numerator / denominator if denominator > 0 else None
+        return weighted_change_from_heatmap_rows(getattr(self, "_p17_rows", []))
 
     def _p17_select_etf(self, symbol: Any) -> None:
         etf_symbol = self._p17_normalize_etf_symbol(symbol)
@@ -445,8 +437,7 @@ class SpyHeatmapMixin:
         return dict(self._P17_INTERVALS).get(key, "Live")
 
     def _p17_interval_summary(self, result: Any) -> Any:
-        summaries = getattr(result, "interval_summaries", {}) or {}
-        return summaries.get(getattr(self, "_p17_interval_key", "live")) or summaries.get("live") or result
+        return heatmap_interval_summary(result, getattr(self, "_p17_interval_key", "live"))
 
     def _p17_current_result(self) -> Any:
         etf_symbol = self._p17_normalize_etf_symbol(getattr(self, "_p17_etf_symbol", "SPY"))
@@ -507,8 +498,7 @@ class SpyHeatmapMixin:
             label.setText(f"{prefix}--")
             label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: {"14" if large else "12"}px; font-weight: bold; border: none;')
             return
-        sign = "+" if float(value) >= 0 else ""
-        label.setText(f"{prefix}{sign}{float(value):.2f}%")
+        label.setText(f"{prefix}{format_heatmap_pct(value, signed=True)}")
         color = self.theme_color("accent_positive" if float(value) >= 0 else "accent_negative")
         label.setStyleSheet(f'color: {color}; font-size: {"14" if large else "12"}px; font-weight: bold; border: none;')
 
@@ -538,17 +528,8 @@ class SpyHeatmapMixin:
 
     @staticmethod
     def _p17_format_pct(value: Any, *, signed: bool = False) -> str:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            return "--"
-        sign = "+" if signed and number >= 0 else ""
-        return f"{sign}{number:.2f}%"
+        return format_heatmap_pct(value, signed=signed)
 
     @staticmethod
     def _p17_format_weight_pct(value: Any) -> str:
-        try:
-            number = float(value) * 100.0
-        except (TypeError, ValueError):
-            return "--"
-        return f"{number:.2f}%"
+        return format_heatmap_weight_pct(value)

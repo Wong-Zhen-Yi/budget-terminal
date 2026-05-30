@@ -12,7 +12,7 @@ from .persistence_schema import TAB_SESSION_CACHE_SCHEMA_VERSION, migrate_tab_se
 
 SESSION_CACHE_VERSION = TAB_SESSION_CACHE_SCHEMA_VERSION
 SESSION_CACHE_FILE = user_data_path('tab_session_cache.json')
-_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube', 'roll', 'calendar', 'overview')
+_SESSION_TAB_KEYS = ('stocks', 'valuation', 'fundamentals', 'options', 'etf', 'politics', 'youtube', 'roll', 'calendar', 'overview')
 _DATAFRAME_MARKER = '__bt_dataframe__'
 _SESSION_SAVED_AT_KEY = '_session_saved_at'
 _SESSION_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -20,6 +20,7 @@ _SESSION_CACHE_DEFAULT_MAX_CHARS = 350_000
 _SESSION_CACHE_TAB_MAX_CHARS = {
     'roll': 250_000,
     'options': 250_000,
+    'valuation': 250_000,
     'fundamentals': 250_000,
     'stocks': 250_000,
     'overview': 120_000,

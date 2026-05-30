@@ -4,37 +4,21 @@ from typing import Any
 
 from ..compat import *
 from budget_terminal_app.data_service.results import describe_market_data_status, strip_market_data_keys
+from budget_terminal_app.mixins.portfolio_presenters import (
+    build_portfolio_stock_row,
+    format_market_cap,
+    format_market_cap_value,
+    market_cap_color_token,
+    market_cap_sort_value,
+    market_cap_value,
+)
+from budget_terminal_app.table_cells import TableCell
+from budget_terminal_app.widgets.table_render import render_table_cell, render_table_row, render_table_rows
 from budget_terminal_app.workers.market_metrics import MarketCapWorker, MonthReturnWorker, PortfolioAnalyticsWorker, PortfolioMomentumWorker
 
 _P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
 _P4_MOMENTUM_REFRESH_DEBOUNCE_MS = 250
 _P4_METRICS_REFRESH_DEBOUNCE_MS = 350
-_P4_NUMERIC_SORT_ROLE = Qt.ItemDataRole.UserRole
-_P4_MISSING_NUMERIC_SORT_VALUE = float('-inf')
-_P4_TRACKER_NUMERIC_COLUMNS = {
-    P4_PORTFOLIO_COL_SHARES,
-    P4_PORTFOLIO_COL_AVG_PRICE,
-    P4_PORTFOLIO_COL_COST,
-    P4_PORTFOLIO_COL_PRICE,
-    P4_PORTFOLIO_COL_DAY_CHANGE,
-    P4_PORTFOLIO_COL_MARKET_VALUE,
-    P4_PORTFOLIO_COL_WEIGHT,
-    P4_PORTFOLIO_COL_DOLLAR_GAIN,
-    P4_PORTFOLIO_COL_GROWTH,
-    P4_PORTFOLIO_COL_MARKET_CAP,
-}
-
-
-class _P4NumericTableWidgetItem(QTableWidgetItem):
-    """QTableWidgetItem that sorts by a stored numeric value."""
-
-    def __lt__(self, other: QTableWidgetItem) -> bool:
-        try:
-            left = float(self.data(_P4_NUMERIC_SORT_ROLE))
-            right = float(other.data(_P4_NUMERIC_SORT_ROLE))
-            return left < right
-        except Exception:
-            return super().__lt__(other)
 
 
 _P4_METRICS_CARD_SPECS = (
@@ -780,7 +764,7 @@ class PortfolioMetricsMixin:
                 lambda result=payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, result)
             )
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._p4_submit_background_task(_run)
 
     def _on_portfolio_analytics_ready(self, cache_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle one portfolio-analytics worker result becoming ready."""
@@ -1044,23 +1028,38 @@ class PortfolioMetricsMixin:
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
-    def _p4_ensure_tracker_item(self, row: Any, col: Any, flags: Any) -> Any:
-        """Return an existing tracker cell item or create it once."""
-        item = self.p4_table.item(row, col)
-        if item is None:
-            item = _P4NumericTableWidgetItem('') if col in _P4_TRACKER_NUMERIC_COLUMNS else QTableWidgetItem('')
-            self.p4_table.setItem(row, col, item)
-        item.setFlags(flags)
-        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        return item
+    def _p4_market_cap_color_from_token(self, token: str) -> str:
+        """Resolve the presenter market-cap color token to the active theme."""
+        if token == 'series_0':
+            return self.theme_series_color(0)
+        if token == 'series_3':
+            return self.theme_series_color(3)
+        return self.theme_color(token)
+
+    def _p4_market_cap_cell(self, market_cap: Any) -> TableCell:
+        """Return the themed market-cap table cell."""
+        color = self._p4_market_cap_color_from_token(market_cap_color_token(market_cap))
+        return TableCell(
+            format_market_cap(market_cap),
+            foreground=color,
+            sort_value=market_cap_sort_value(market_cap),
+        )
+
+    def _p4_build_stock_table_row(self, ticker: Any, metrics: dict[str, Any], *, market_cap: Any = None) -> Any:
+        """Return the presenter row for one Portfolio stock position."""
+        return build_portfolio_stock_row(
+            ticker,
+            metrics,
+            default_color=self.theme_color('text_primary'),
+            gain_color=self.theme_color('accent_positive' if float(metrics.get('dollar_gain', 0) or 0) >= 0 else 'accent_negative'),
+            change_color=self.theme_color('accent_positive' if float(metrics.get('change', 0) or 0) >= 0 else 'accent_negative'),
+            market_cap=market_cap,
+            market_cap_color=self._p4_market_cap_color_from_token(market_cap_color_token(market_cap)),
+        )
 
     def _p4_clear_mktcap_item(self, row: Any) -> None:
         """Clear stale market-cap text when a reused row has no cached value yet."""
-        ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
-        item.setText('--')
-        item.setData(_P4_NUMERIC_SORT_ROLE, _P4_MISSING_NUMERIC_SORT_VALUE)
-        item.setForeground(self.theme_qcolor('text_muted'))
+        render_table_cell(self.p4_table, int(row), P4_PORTFOLIO_COL_MARKET_CAP, self._p4_market_cap_cell(None))
 
     def _set_tracker_row(
         self,
@@ -1077,32 +1076,26 @@ class PortfolioMetricsMixin:
         growth: Any,
     ) -> Any:
         """Handle set tracker row."""
-        ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        ed_flags = ro_flags | Qt.ItemFlag.ItemIsEditable
-        default_text_color = self.theme_qcolor('text_primary')
-        gain_color = self.theme_qcolor('accent_positive' if dollar_gain >= 0 else 'accent_negative')
-        change_color = self.theme_qcolor('accent_positive' if change >= 0 else 'accent_negative')
-
-        def _update_item(col: Any, text: Any, flags: Any = ro_flags, color: Any = None, sort_value: Any = None) -> None:
-            item = self._p4_ensure_tracker_item(row, col, flags)
-            item.setText(text)
-            if col in _P4_TRACKER_NUMERIC_COLUMNS:
-                item.setData(_P4_NUMERIC_SORT_ROLE, sort_value if sort_value is not None else _P4_MISSING_NUMERIC_SORT_VALUE)
-            item.setForeground(color if color is not None else default_text_color)
-
-        _update_item(P4_PORTFOLIO_COL_SYMBOL, ticker)
-        _update_item(P4_PORTFOLIO_COL_SHARES, f'{shares:g}', ed_flags, sort_value=shares)
-        _update_item(P4_PORTFOLIO_COL_AVG_PRICE, f'{avg_price:.2f}', ed_flags, sort_value=avg_price)
-        _update_item(P4_PORTFOLIO_COL_COST, f'${cost:,.2f}', sort_value=cost)
-        _update_item(P4_PORTFOLIO_COL_PRICE, f'${price:.2f}', sort_value=price)
-        sign = '+' if change >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_DAY_CHANGE, f'{sign}{change:.2f}%', color=change_color, sort_value=change)
-        _update_item(P4_PORTFOLIO_COL_MARKET_VALUE, f'${mkt_val:,.2f}', sort_value=mkt_val)
-        _update_item(P4_PORTFOLIO_COL_WEIGHT, f'{weight:.1f}%', sort_value=weight)
-        gain_sign = '+' if dollar_gain >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_DOLLAR_GAIN, f'{gain_sign}${dollar_gain:,.2f}', color=gain_color, sort_value=dollar_gain)
-        growth_sign = '+' if growth >= 0 else ''
-        _update_item(P4_PORTFOLIO_COL_GROWTH, f'{growth_sign}{growth:.1f}%', color=gain_color, sort_value=growth)
+        market_cap = None
+        cache_symbol = str(ticker or '').strip().upper()
+        if cache_symbol in getattr(self, '_mktcap_cache', {}):
+            market_cap = self._mktcap_cache[cache_symbol]
+        row_cells = self._p4_build_stock_table_row(
+            ticker,
+            {
+                'shares': shares,
+                'avg_price': avg_price,
+                'price': price,
+                'change': change,
+                'cost': cost,
+                'market_value': mkt_val,
+                'weight': weight,
+                'dollar_gain': dollar_gain,
+                'growth': growth,
+            },
+            market_cap=market_cap,
+        )
+        render_table_row(self.p4_table, int(row), row_cells)
 
     def _p4_remove_active_ticker(self, ticker: Any) -> None:
         """Remove a ticker from the currently selected page-4 portfolio."""
@@ -1386,7 +1379,7 @@ class PortfolioMetricsMixin:
                 lambda result=payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, result)
             )
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._p4_submit_background_task(_run)
 
     def _on_momentum_ready(self, timeframe_key: Any, portfolio_id: Any, payload: Any) -> None:
         """Handle portfolio momentum data becoming ready."""
@@ -1425,7 +1418,7 @@ class PortfolioMetricsMixin:
             return False
         setattr(self, flag_attr, True)
         worker_obj.finished.connect(finished_slot)
-        threading.Thread(target=worker_obj.run, daemon=True).start()
+        self._p4_submit_background_task(worker_obj.run)
         return True
 
     def _fetch_returns_for_timeframe(self, timeframe_key: Any) -> None:
@@ -1475,7 +1468,7 @@ class PortfolioMetricsMixin:
                 lambda payload=results, key=timeframe_key, pid=portfolio_id: self._on_returns_ready(key, pid, payload)
             )
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._p4_submit_background_task(_run)
 
     def _on_returns_ready(self, timeframe_key: Any, portfolio_id: Any, results: Any) -> None:
         """Handle return metrics ready."""
@@ -1502,59 +1495,19 @@ class PortfolioMetricsMixin:
 
     def _format_market_cap(self, mc: Any) -> Any:
         """Handle format market cap."""
-        value = self._p4_market_cap_value(mc)
-        if value is None:
-            return '--'
-        if value >= 200000000000:
-            bucket = 'Mega'
-        elif value >= 10000000000:
-            bucket = 'Large'
-        elif value >= 2000000000:
-            bucket = 'Mid'
-        elif value >= 300000000:
-            bucket = 'Small'
-        else:
-            bucket = 'Micro'
-        return f'{bucket} ${self._p4_format_market_cap_value(value)}'
+        return format_market_cap(mc)
 
     def _p4_market_cap_value(self, mc: Any) -> Any:
         """Return a positive finite market-cap number or None."""
-        if mc is None:
-            return None
-        try:
-            value = float(str(mc).replace(',', '').strip())
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(value) or value <= 0:
-            return None
-        return value
+        return market_cap_value(mc)
 
     def _p4_format_market_cap_value(self, value: float) -> str:
         """Format a market-cap value with a compact suffix."""
-        if value >= 1000000000000.0:
-            return f'{value / 1000000000000.0:.2f}T'
-        if value >= 1000000000.0:
-            return f'{value / 1000000000.0:.2f}B'
-        if value >= 1000000.0:
-            return f'{value / 1000000.0:.2f}M'
-        if value >= 1000.0:
-            return f'{value / 1000.0:.1f}K'
-        return f'{value:.2f}'
+        return format_market_cap_value(value)
 
     def _mktcap_color(self, mc: Any) -> Any:
         """Handle mktcap color."""
-        value = self._p4_market_cap_value(mc)
-        if value is None:
-            return self.theme_color('text_muted')
-        if value >= 200000000000:
-            return self.theme_color('warning')
-        if value >= 10000000000:
-            return self.theme_series_color(0)
-        if value >= 2000000000:
-            return self.theme_color('accent_positive')
-        if value >= 300000000:
-            return self.theme_series_color(3)
-        return self.theme_color('accent_negative')
+        return self._p4_market_cap_color_from_token(market_cap_color_token(mc))
 
     def _p4_mktcap_cache_ttl_seconds(self) -> float:
         """Return the reuse window for cached market-cap values."""
@@ -1608,23 +1561,16 @@ class PortfolioMetricsMixin:
                 results = MarketCapWorker(symbols).fetch()
             self._invoke_main.emit(lambda payload=results: self._on_market_caps_ready(payload))
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._p4_submit_background_task(_run)
         return True
 
     def _update_mktcap_item(self, row: Any, ticker: Any, mc: Any) -> None:
         """Handle update mktcap item."""
-        text = self._format_market_cap(mc)
-        ro_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         self.p4_table.blockSignals(True)
-        item = self._p4_ensure_tracker_item(row, P4_PORTFOLIO_COL_MARKET_CAP, ro_flags)
-        item.setText(text)
         try:
-            sort_value = float(mc)
-        except (TypeError, ValueError):
-            sort_value = _P4_MISSING_NUMERIC_SORT_VALUE
-        item.setData(_P4_NUMERIC_SORT_ROLE, sort_value)
-        self.p4_table.blockSignals(False)
-        item.setForeground(QColor(self._mktcap_color(mc)))
+            render_table_cell(self.p4_table, int(row), P4_PORTFOLIO_COL_MARKET_CAP, self._p4_market_cap_cell(mc))
+        finally:
+            self.p4_table.blockSignals(False)
 
     def _fetch_market_caps(self, tickers: Any = None) -> None:
         """Fetch market caps."""
@@ -1677,43 +1623,26 @@ class PortfolioMetricsMixin:
         portfolio = data.get('portfolio', {})
         tickers = self._p4_active_tickers()
         metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+        sorted_tickers = sorted(
+            tickers,
+            key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0),
+            reverse=True,
+        )
         weights = {}
-        sorting_enabled = self.p4_table.isSortingEnabled()
-        self.p4_table.blockSignals(True)
-        self.p4_table.setSortingEnabled(False)
-        self.p4_table.setUpdatesEnabled(False)
-        try:
-            self.p4_table.setRowCount(len(tickers))
-            sorted_tickers = sorted(
-                tickers,
-                key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0),
-                reverse=True,
-            )
-            for i, ticker in enumerate(sorted_tickers):
-                metrics = metrics_map.get(ticker, {})
-                weights[ticker] = metrics.get('weight', 0)
-                self._set_tracker_row(
-                    i,
+        rows = []
+        for ticker in sorted_tickers:
+            metrics = metrics_map.get(ticker, {})
+            weights[ticker] = metrics.get('weight', 0)
+            cache_symbol = str(ticker or '').strip().upper()
+            rows.append(
+                self._p4_build_stock_table_row(
                     ticker,
-                    metrics.get('shares', 0),
-                    metrics.get('avg_price', 0),
-                    metrics.get('price', 0),
-                    metrics.get('change', 0),
-                    metrics.get('cost', 0),
-                    metrics.get('market_value', 0),
-                    metrics.get('weight', 0),
-                    metrics.get('dollar_gain', 0),
-                    metrics.get('growth', 0),
+                    metrics,
+                    market_cap=self._mktcap_cache.get(cache_symbol) if cache_symbol in self._mktcap_cache else None,
                 )
-                cache_symbol = str(ticker or '').strip().upper()
-                if cache_symbol in self._mktcap_cache:
-                    self._update_mktcap_item(i, ticker, self._mktcap_cache[cache_symbol])
-                else:
-                    self._p4_clear_mktcap_item(i)
-        finally:
-            self.p4_table.setUpdatesEnabled(True)
-            self.p4_table.setSortingEnabled(sorting_enabled)
-            self.p4_table.blockSignals(False)
+            )
+        render_table_rows(self.p4_table, rows)
+
         cash_balance = self._p4_active_cash_balance()
         if cash_balance > 0.0 and total_market_value > 0.0:
             weights['CASH'] = cash_balance / total_market_value * 100.0
@@ -1726,6 +1655,7 @@ class PortfolioMetricsMixin:
         self._update_weight_chart(weights)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
         if not tickers:
             self._return_metrics_cache[active_cache_key] = {}
@@ -1738,6 +1668,7 @@ class PortfolioMetricsMixin:
             )
         else:
             self._fetch_returns_for_timeframe(self._active_return_timeframe)
+
         active_momentum_cache_key = self._p4_momentum_cache_key(self._active_momentum_timeframe)
         if not tickers and cash_balance <= 0.0:
             payload = self._p4_empty_momentum_payload('No portfolio holdings available')
@@ -1751,6 +1682,7 @@ class PortfolioMetricsMixin:
             )
         else:
             self._fetch_momentum_for_timeframe(self._active_momentum_timeframe)
+
         self._fetch_market_caps(sorted_tickers)
         if self._p4_metrics_tab_visible():
             self._p4_refresh_portfolio_metrics_view()
