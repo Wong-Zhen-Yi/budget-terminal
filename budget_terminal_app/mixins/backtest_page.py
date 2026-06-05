@@ -194,6 +194,8 @@ class BacktestPageMixin:
         self.p25_plot.getPlotItem().hideAxis("left")
         self.p25_plot.getPlotItem().showAxis("right")
         self.p25_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.p25_legend = self.p25_plot.getPlotItem().addLegend(offset=(8, 8))
+        self._p25_style_legend()
         right_layout.addWidget(self.p25_plot, 1)
         self.p25_splitter.addWidget(right)
 
@@ -469,7 +471,7 @@ class BacktestPageMixin:
             x_values,
             [float(value) for value in portfolio_return.values],
             pen=self.theme_pen("accent", width=2.4),
-            name="Portfolio",
+            name="Backtest Portfolio",
         )
         compare_return = result.get("compare_return")
         if compare_return is not None and not getattr(compare_return, "empty", True):
@@ -522,6 +524,7 @@ class BacktestPageMixin:
     def _apply_backtest_theme(self) -> None:
         if hasattr(self, "p25_plot"):
             self.style_plot_widget(self.p25_plot)
+            self._p25_style_legend()
         if hasattr(self, "p25_status_label"):
             self.set_status_text(
                 self.p25_status_label,
@@ -530,3 +533,11 @@ class BacktestPageMixin:
             )
         if hasattr(self, "p25_weight_label"):
             self._p25_update_weight_total()
+
+    def _p25_style_legend(self) -> None:
+        legend = getattr(self, "p25_legend", None)
+        if legend is None:
+            return
+        legend.setLabelTextColor(self.theme_color("text_primary"))
+        legend.setBrush(pg.mkBrush(QColor(self.theme_color("chart_bg"))))
+        legend.setPen(pg.mkPen(self.theme_color("panel_border"), width=1))

@@ -20,7 +20,7 @@ class DataHealthMixin:
     def _data_health_now(self) -> datetime.datetime:
         """Return a timezone-aware timestamp for user-facing health records."""
         try:
-            return self._now_for_timezone_index(self._current_clock_timezone_index())
+            return self._now_for_clock_country()
         except Exception:
             return datetime.datetime.now().astimezone()
 
@@ -284,7 +284,7 @@ class DataHealthMixin:
             try:
                 collected_dt = datetime.datetime.fromtimestamp(
                     float(self._data_collection_ts),
-                    tz=self._get_tzinfo(self._current_clock_timezone_index()),
+                    tz=self._get_clock_tzinfo(),
                 )
                 lines.append(f'Latest data collection: {self._data_health_timestamp_text(collected_dt)}')
             except Exception:

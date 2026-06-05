@@ -3,21 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 from budget_terminal_app.compat import *
-from budget_terminal_app.themes import DEFAULT_THEME_ID, ThemeManager
+from budget_terminal_app.themes import ThemeManager
 
 
 class ThemeSupportMixin:
 
     def init_theme_system(self, *, apply: bool=True) -> None:
-        """Create the shared theme manager and apply the saved theme."""
+        """Create the shared theme manager and apply the default theme."""
         if not hasattr(self, 'theme_manager'):
             app = QApplication.instance()
-            self.theme_manager = ThemeManager(app, load_theme_settings, save_theme_settings)
+            self.theme_manager = ThemeManager(app)
             self.theme_manager.theme_changed.connect(self._on_theme_changed)
         self.current_theme_id = self.theme_manager.load_initial_theme_id()
         self.current_theme = self.theme_manager.theme(self.current_theme_id)
         if apply:
-            self.theme_manager.apply_theme(self.current_theme_id, persist=False)
+            self.theme_manager.apply_theme(self.current_theme_id)
 
     def _on_theme_changed(self, theme_id: str) -> None:
         """Refresh page-specific theme surfaces after a theme switch."""
@@ -34,9 +34,10 @@ class ThemeSupportMixin:
             ("_apply_spy_heatmap_theme", "page17"),
             ("_apply_random_recommender_theme", "page18"),
             ("_apply_ipo_theme", "page21"),
-            ("_apply_settings_theme", "page9"),
+            ("_apply_settings_page_theme", "page9"),
             ("_apply_charts_page_theme", "page10"),
             ("_apply_backtest_theme", "page25"),
+            ("_apply_global_page_theme", "page26"),
             ("_apply_stocks_theme", "page12"),
             ("_apply_valuation_theme", "page23"),
             ("_apply_etf_theme", "page13"),
@@ -53,10 +54,6 @@ class ThemeSupportMixin:
             fn = getattr(self, name, None)
             if callable(fn):
                 fn()
-
-    def apply_theme_selection(self, theme_id: str) -> None:
-        """Switch to a new theme at runtime."""
-        self.theme_manager.apply_theme(theme_id, persist=True)
 
     def theme(self) -> Any:
         """Return the currently active theme tokens."""
@@ -165,7 +162,3 @@ class ThemeSupportMixin:
     def theme_pie_palette(self) -> tuple[str, ...]:
         """Return the active palette for pie/donut legends."""
         return self.theme().pie_palette or self.theme().series_palette or (self.theme_color("accent"),)
-
-    def theme_id_to_name(self, theme_id: str) -> str:
-        """Resolve a theme id into its user-facing name."""
-        return self.theme_manager.registered_themes().get(theme_id, self.theme_manager.theme(DEFAULT_THEME_ID)).name

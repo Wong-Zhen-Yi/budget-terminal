@@ -281,9 +281,10 @@ class NetWorthMixin:
         layout.setContentsMargins(10, 2, 10, 10)
         layout.setSpacing(8)
         tables_splitter = QSplitter(Qt.Orientation.Horizontal)
-        cash_widget = QWidget()
+        cash_widget = QGroupBox('Cash')
+        self.set_theme_role(cash_widget, 'panel')
         cash_layout = QVBoxLayout(cash_widget)
-        cash_layout.setContentsMargins(0, 0, 0, 2)
+        cash_layout.setContentsMargins(8, 8, 8, 8)
         cash_layout.setSpacing(6)
         cash_hdr = QHBoxLayout()
         cash_hdr.setContentsMargins(0, 0, 0, 2)
@@ -315,9 +316,10 @@ class NetWorthMixin:
         self.p6_cash_total_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px; font-weight: 600; background: transparent;')
         cash_layout.addWidget(self.p6_cash_total_label)
         tables_splitter.addWidget(cash_widget)
-        debt_widget = QWidget()
+        debt_widget = QGroupBox('Debt')
+        self.set_theme_role(debt_widget, 'panel')
         debt_layout = QVBoxLayout(debt_widget)
-        debt_layout.setContentsMargins(0, 2, 0, 0)
+        debt_layout.setContentsMargins(8, 8, 8, 8)
         debt_layout.setSpacing(6)
         debt_hdr = QHBoxLayout()
         debt_hdr.setContentsMargins(0, 0, 0, 2)
@@ -567,6 +569,15 @@ class NetWorthMixin:
             value = 0.0
         return max(value, 0.0) * (12.0 if self._p6_bill_frequency(frequency) == 'monthly' else 1.0)
 
+    def _p6_bill_monthly_amount(self, amount: Any, frequency: Any) -> float:
+        try:
+            value = float(amount or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not math.isfinite(value):
+            value = 0.0
+        return max(value, 0.0) / (12.0 if self._p6_bill_frequency(frequency) == 'yearly' else 1.0)
+
     @staticmethod
     def _p6_format_bill_amount(amount: Any) -> str:
         try:
@@ -594,17 +605,41 @@ class NetWorthMixin:
             total += self._p6_convert_amount(annual_amount, native, display)
         return total, True
 
+    def _p6_recurring_bills_monthly_total(self, display_currency: Any=None) -> tuple[float, bool]:
+        display = self._p6_normalize_totals_currency(display_currency or self._p6_selected_totals_currency())
+        total = 0.0
+        for bill in self.networth_data.get('recurring_bills', []):
+            bill_data = bill if isinstance(bill, dict) else {}
+            native = self._p6_normalize_totals_currency(bill_data.get('currency', display))
+            monthly_amount = self._p6_bill_monthly_amount(
+                bill_data.get('amount', 0.0),
+                bill_data.get('frequency', 'monthly'),
+            )
+            if monthly_amount <= 0:
+                continue
+            if native != display and self._p6_valid_usd_sgd_rate() is None:
+                return 0.0, False
+            total += self._p6_convert_amount(monthly_amount, native, display)
+        return total, True
+
     def _p6_update_recurring_bills_total(self) -> None:
         label = getattr(self, 'p6_bills_total_label', None)
         if label is None:
             return
         display_currency = self._p6_selected_totals_currency()
-        total, available = self._p6_recurring_bills_annual_total(display_currency)
-        if not available:
-            label.setText(f'Annual total ({display_currency}): FX required')
+        monthly_total, monthly_available = self._p6_recurring_bills_monthly_total(display_currency)
+        annual_total, annual_available = self._p6_recurring_bills_annual_total(display_currency)
+        if not monthly_available or not annual_available:
+            label.setText(
+                f'Monthly total ({display_currency}): FX required    '
+                f'Annual total ({display_currency}): FX required'
+            )
             return
         prefix = self._p6_goal_prefix(display_currency)
-        label.setText(f'Annual total ({display_currency}): {prefix}{total:,.2f}')
+        label.setText(
+            f'Monthly total ({display_currency}): {prefix}{monthly_total:,.2f}    '
+            f'Annual total ({display_currency}): {prefix}{annual_total:,.2f}'
+        )
 
     def _p6_category_total(self, category: Any) -> float:
         total = 0.0

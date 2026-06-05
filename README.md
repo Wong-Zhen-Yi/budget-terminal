@@ -8,7 +8,7 @@ Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio da
 - Options-chain fetching, table rendering, and related Yahoo Finance smoke tests
 - News hub with deterministic headline briefings, politics, calendar, pre-market, and YouTube helpers
 - Fundamentals, earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
-- Theme support through reusable theme tokens and packaged theme implementations
+- Default theme support through reusable theme tokens and shared styling helpers
 - Embedded local data service for background market-data coordination, with direct-worker fallback
 
 ## Project Layout
@@ -19,7 +19,7 @@ Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio da
 - `budget_terminal_app/mixins/`: page, window, and feature behavior
 - `budget_terminal_app/workers/`: background data fetchers and signal-driven tasks
 - `budget_terminal_app/widgets/`: custom charts, pie/bar charts, and heatmap widgets
-- `budget_terminal_app/themes/`: theme tokens and theme implementations
+- `budget_terminal_app/themes/`: default theme tokens and stylesheet helpers
 - `budget_terminal_app/data_service/`: embedded FastAPI/HTTP data service runtime, client, coordinator, and serialization helpers
 - `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
 - `scripts/`: ad hoc diagnostics and smoke tests

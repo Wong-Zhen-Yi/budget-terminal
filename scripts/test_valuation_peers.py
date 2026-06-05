@@ -47,11 +47,34 @@ def test_current_ticker_is_not_duplicated() -> None:
     _assert(len(symbols) == len(set(symbols)), f"peer symbols should be deduped: {symbols}")
 
 
+def test_custom_peers_are_pinned_after_anchor() -> None:
+    symbols = _peer_symbols(
+        "NVDA",
+        {"industry": "Semiconductors", "sector": "Technology", "marketCap": 3_000_000_000_000},
+        custom_peers=["MSFT", "AMD"],
+    )
+    _assert(symbols[:3] == ["NVDA", "MSFT", "AMD"], f"custom peers should be pinned after anchor, got {symbols}")
+    _assert("AVGO" in symbols[3:], f"automatic peers should still fill after custom peers, got {symbols}")
+
+
+def test_custom_peers_are_deduped_and_exclude_anchor() -> None:
+    symbols = _peer_symbols(
+        "NVDA",
+        {"industry": "Semiconductors", "sector": "Technology", "marketCap": 3_000_000_000_000},
+        custom_peers=["NVDA", "AMD", "AMD", ""],
+    )
+    _assert(symbols[:2] == ["NVDA", "AMD"], f"custom peer dedupe/exclusion failed: {symbols}")
+    _assert(symbols.count("NVDA") == 1, f"anchor ticker should not be duplicated: {symbols}")
+    _assert(symbols.count("AMD") == 1, f"custom ticker should not be duplicated: {symbols}")
+
+
 def main() -> None:
     test_semiconductor_peers_are_close()
     test_bank_peers_are_financials()
     test_unknown_ticker_uses_stable_default()
     test_current_ticker_is_not_duplicated()
+    test_custom_peers_are_pinned_after_anchor()
+    test_custom_peers_are_deduped_and_exclude_anchor()
     print("valuation peer selection tests passed")
 
 

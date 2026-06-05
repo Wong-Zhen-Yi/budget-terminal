@@ -16,7 +16,7 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    universe = {'AI', 'COST', 'NET', 'NOW', 'NVDA', 'T'}
+    universe = {'AI', 'BTC', 'COST', 'ETH', 'NET', 'NOW', 'NVDA', 'SOL', 'T', 'XRP'}
     false_cost = _extract_tickers(
         'Cloudflare expands cost controls as demand rises',
         'The company said lower bandwidth cost helped margins.',
@@ -52,6 +52,42 @@ def main() -> None:
         universe,
     )
     _assert({'COST', 'NOW', 'NVDA'}.issubset(set(explicit_tags)), 'explicit ticker evidence should still match')
+
+    bitcoin_context = _extract_tickers(
+        'Bitcoin ETF inflows rise as BTC holds above support',
+        'Spot bitcoin funds drew assets.',
+        [],
+        '',
+        universe,
+    )
+    _assert('BTC' in bitcoin_context, 'BTC should match Bitcoin and BTC crypto context')
+
+    ethereum_context = _extract_tickers(
+        'Ethereum staking queue grows after ether rally',
+        'ETH network activity improved.',
+        [],
+        '',
+        universe,
+    )
+    _assert('ETH' in ethereum_context, 'ETH should match Ethereum, ether, and ETH crypto context')
+
+    solana_context = _extract_tickers(
+        'Solana validators approve upgrade',
+        'SOL network activity rises.',
+        [],
+        '',
+        universe,
+    )
+    _assert('SOL' in solana_context, 'SOL should match Solana and SOL crypto context')
+
+    xrp_context = _extract_tickers(
+        'Ripple expands custody tools for institutions',
+        'XRP Ledger developers proposed a DeFi security upgrade.',
+        [],
+        '',
+        universe,
+    )
+    _assert('XRP' in xrp_context, 'XRP should match Ripple and XRP crypto context')
     print('news ticker extraction smoke tests passed')
 
 

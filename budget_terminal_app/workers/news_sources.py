@@ -27,6 +27,15 @@ KEYLESS_TRADER_NEWS_FEEDS = (
     NewsFeed('Investing.com', 'https://www.investing.com/rss/news_25.rss', 1),
 )
 
+KEYLESS_CRYPTO_NEWS_FEEDS = (
+    NewsFeed('CoinDesk', 'https://www.coindesk.com/arc/outboundfeeds/rss/', 3),
+    NewsFeed('Cointelegraph', 'https://cointelegraph.com/rss', 3),
+    NewsFeed('Decrypt', 'https://decrypt.co/feed', 2),
+    NewsFeed('Bitcoin Magazine', 'https://bitcoinmagazine.com/.rss/full/', 2),
+)
+
+KEYLESS_CRYPTO_NEWS_SOURCES = frozenset(feed.source for feed in KEYLESS_CRYPTO_NEWS_FEEDS)
+
 HTTP_HEADERS = {
     'User-Agent': 'BudgetTerminal/1.0 (+https://local.app) keyless-market-news',
     'Accept': 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5',
@@ -57,6 +66,17 @@ AMBIGUOUS_TICKER_CONTEXT = {
     'NOW': ('servicenow', 'service now'),
     'T': ('at&t', 'at & t', 'at and t'),
 }
+DESCRIPTIVE_TICKER_CONTEXT = {
+    'BNB': ('bnb', 'binance coin', 'binancecoin'),
+    'BTC': ('bitcoin',),
+    'COIN': ('coinbase',),
+    'ETH': ('ethereum', 'ether'),
+    'ETHA': ('etha', 'ishares ethereum trust'),
+    'IBIT': ('ibit', 'ishares bitcoin trust'),
+    'MSTR': ('microstrategy', 'strategy inc', 'strategy shares'),
+    'SOL': ('solana',),
+    'XRP': ('xrp', 'ripple'),
+}
 
 
 def fetch_keyless_trader_news(
@@ -67,15 +87,52 @@ def fetch_keyless_trader_news(
     cancel_check: Any = None,
 ) -> list[dict[str, Any]]:
     """Fetch keyless market news feeds and return trader-ranked article rows."""
+    return _fetch_ranked_news(
+        KEYLESS_TRADER_NEWS_FEEDS,
+        focus_tickers,
+        limit=limit,
+        candidate_limit=candidate_limit,
+        cancel_check=cancel_check,
+        log_label='Keyless trader news feed',
+    )
+
+
+def fetch_keyless_crypto_news(
+    focus_tickers: list[str],
+    *,
+    limit: int,
+    candidate_limit: int,
+    cancel_check: Any = None,
+) -> list[dict[str, Any]]:
+    """Fetch crypto-native keyless RSS feeds and return ranked article rows."""
+    return _fetch_ranked_news(
+        KEYLESS_CRYPTO_NEWS_FEEDS,
+        focus_tickers,
+        limit=limit,
+        candidate_limit=candidate_limit,
+        cancel_check=cancel_check,
+        log_label='Keyless crypto news feed',
+    )
+
+
+def _fetch_ranked_news(
+    feeds: tuple[NewsFeed, ...],
+    focus_tickers: list[str],
+    *,
+    limit: int,
+    candidate_limit: int,
+    cancel_check: Any = None,
+    log_label: str,
+) -> list[dict[str, Any]]:
     ticker_universe = _normalize_ticker_universe(focus_tickers)
     articles: list[dict[str, Any]] = []
-    for feed in KEYLESS_TRADER_NEWS_FEEDS:
+    for feed in feeds:
         if _is_cancelled(cancel_check):
             return []
         try:
             articles.extend(_fetch_feed_articles(feed, ticker_universe))
         except Exception as exc:
-            logger.info('Keyless trader news feed failed for %s: %s', feed.source, exc)
+            logger.info('%s failed for %s: %s', log_label, feed.source, exc)
     unique = _dedupe_articles(articles)
     ranked = sorted(unique, key=lambda article: (article.get('_trader_score', 0), article.get('_ts', 0)), reverse=True)
     return ranked[:max(0, min(int(limit or 0), int(candidate_limit or limit or 0)))]
@@ -150,6 +207,9 @@ def _extract_tickers(
     for ticker in sorted(AMBIGUOUS_TICKER_CONTEXT):
         if ticker in ticker_universe and _has_ambiguous_ticker_context(ticker, combined_text):
             _add_ticker(found, ticker, ticker_universe, strong_evidence=True)
+    for ticker in sorted(DESCRIPTIVE_TICKER_CONTEXT):
+        if ticker in ticker_universe and _has_descriptive_ticker_context(ticker, combined_text):
+            _add_ticker(found, ticker, ticker_universe, strong_evidence=True)
     return found
 
 
@@ -179,6 +239,12 @@ def _normalize_ticker_universe(values: list[str]) -> set[str]:
 
 def _has_ambiguous_ticker_context(ticker: str, evidence_text: str) -> bool:
     context_values = AMBIGUOUS_TICKER_CONTEXT.get(ticker, ())
+    text = str(evidence_text or '').casefold()
+    return bool(context_values and any(context in text for context in context_values))
+
+
+def _has_descriptive_ticker_context(ticker: str, evidence_text: str) -> bool:
+    context_values = DESCRIPTIVE_TICKER_CONTEXT.get(ticker, ())
     text = str(evidence_text or '').casefold()
     return bool(context_values and any(context in text for context in context_values))
 

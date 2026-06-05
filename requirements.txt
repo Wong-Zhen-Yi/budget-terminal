@@ -4,6 +4,7 @@ yfinance
 PyQt6
 pyqtgraph
 requests==2.34.2
+PySocks
 fastapi
 uvicorn==0.47.0
 httpx

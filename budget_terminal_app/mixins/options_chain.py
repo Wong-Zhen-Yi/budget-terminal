@@ -66,6 +66,9 @@ class OptionsChainMixin:
         self._p5_top_volume_payloads = {}
         self._p5_top_volume_type_filter = 'both'
         self._p5_top_volume_type_buttons = {}
+        self._p5_top_volume_sort_state = {}
+        self._p5_top_volume_sort_syncing = False
+        self._p5_top_volume_legend_swatches = {}
         self.p5_top_volume_views = {}
         self._p5_top_volume_tab_order = []
         self._p5_strike_values_request_seq = 0
@@ -194,6 +197,8 @@ class OptionsChainMixin:
             type_group.addButton(mode_btn)
             self._p5_top_volume_type_buttons[mode_key] = mode_btn
             controls.addWidget(mode_btn)
+        controls.addSpacing(16)
+        controls.addWidget(self._p5_build_top_volume_legend(view_key))
         controls.addStretch()
         layout.addLayout(controls, 0)
         scroll = QScrollArea()
@@ -223,6 +228,49 @@ class OptionsChainMixin:
         self._p5_apply_top_volume_type_button_state()
         self._p5_set_top_volume_bucket_config(view_key, tuple(bucket_config))
         return tab
+
+    def _p5_build_top_volume_legend(self, view_key: str) -> Any:
+        """Build a compact cell-highlight legend for the top-volume subtab."""
+        legend = QWidget()
+        legend_layout = QHBoxLayout(legend)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        legend_layout.setSpacing(8)
+        swatches = {}
+        for key, label in (
+            ('price', 'Top price'),
+            ('low_price', 'Lowest price'),
+            ('top_volume', 'Top volume'),
+            ('low_volume', 'Lowest volume'),
+        ):
+            swatch = QLabel()
+            swatch.setFixedSize(12, 12)
+            text = QLabel(label)
+            self.set_theme_role(text, 'status_muted')
+            legend_layout.addWidget(swatch)
+            legend_layout.addWidget(text)
+            swatches[key] = swatch
+        if not hasattr(self, '_p5_top_volume_legend_swatches') or not isinstance(self._p5_top_volume_legend_swatches, dict):
+            self._p5_top_volume_legend_swatches = {}
+        self._p5_top_volume_legend_swatches[view_key] = swatches
+        self._p5_refresh_top_volume_legend(view_key)
+        return legend
+
+    def _p5_refresh_top_volume_legend(self, view_key: str) -> None:
+        """Refresh top-volume legend swatches from the active theme."""
+        swatches_by_view = getattr(self, '_p5_top_volume_legend_swatches', {})
+        swatches = swatches_by_view.get(view_key, {}) if isinstance(swatches_by_view, dict) else {}
+        if not isinstance(swatches, dict):
+            return
+        legend_colors = {
+            'price': self._p5_top_volume_price_highlight_backgrounds()[0],
+            'low_price': self._p5_low_price_highlight_backgrounds()[0],
+            'top_volume': self._p5_high_volume_highlight_backgrounds()[0],
+            'low_volume': self._p5_low_volume_highlight_backgrounds()[0],
+        }
+        for key, color in legend_colors.items():
+            swatch = swatches.get(key)
+            if swatch is not None:
+                swatch.setStyleSheet(f'background: {color}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 2px;')
 
     def _p5_build_strike_tab(self) -> Any:
         """Build the Options by Strike subtab."""
@@ -349,6 +397,7 @@ class OptionsChainMixin:
             section_label = QLabel('')
             self.set_theme_role(section_label, 'section_title')
             table = self._make_top_volume_table()
+            self._p5_attach_top_volume_sort_sync(view_key, table)
             panel_layout.addWidget(section_label)
             panel_layout.addWidget(table, 1)
             sections[bucket_key] = {'label': section_label, 'table': table, 'panel': panel}
@@ -502,8 +551,64 @@ class OptionsChainMixin:
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.setAlternatingRowColors(True)
+        table.setSortingEnabled(True)
         table.setMinimumHeight(220)
         return table
+
+    def _p5_attach_top_volume_sort_sync(self, view_key: str, table: Any) -> None:
+        """Attach one top-volume table to the shared sort coordinator."""
+        if table is None:
+            return
+        header = table.horizontalHeader()
+        if header is None:
+            return
+        header.sortIndicatorChanged.connect(
+            lambda column, order, source_table=table, key=view_key: self._p5_on_top_volume_sort_changed(
+                key,
+                source_table,
+                column,
+                order,
+            )
+        )
+
+    def _p5_on_top_volume_sort_changed(self, view_key: str, source_table: Any, column: int, order: Any) -> None:
+        """Store a top-volume sort choice and apply it to sibling panels."""
+        if bool(getattr(self, '_p5_top_volume_sort_syncing', False)):
+            return
+        try:
+            column_index = int(column)
+        except (TypeError, ValueError):
+            return
+        if column_index < 0 or column_index >= len(self._P5_TOP_VOLUME_COLUMNS):
+            return
+        if not hasattr(self, '_p5_top_volume_sort_state') or not isinstance(self._p5_top_volume_sort_state, dict):
+            self._p5_top_volume_sort_state = {}
+        self._p5_top_volume_sort_state[view_key] = (column_index, order)
+        self._p5_apply_top_volume_sort(view_key, source_table=source_table)
+
+    def _p5_apply_top_volume_sort(self, view_key: str, source_table: Any = None) -> None:
+        """Apply the stored top-volume sort state to every panel in one subtab."""
+        sort_state = getattr(self, '_p5_top_volume_sort_state', {})
+        if not isinstance(sort_state, dict) or view_key not in sort_state:
+            return
+        column, order = sort_state.get(view_key, (None, None))
+        try:
+            column_index = int(column)
+        except (TypeError, ValueError):
+            return
+        if column_index < 0 or column_index >= len(self._P5_TOP_VOLUME_COLUMNS):
+            return
+        view = self._p5_top_volume_view(view_key)
+        sections = view.get('sections', {}) if isinstance(view.get('sections', {}), dict) else {}
+        self._p5_top_volume_sort_syncing = True
+        try:
+            for section in sections.values():
+                table = section.get('table') if isinstance(section, dict) else None
+                if table is None or table is source_table:
+                    continue
+                table.sortItems(column_index, order)
+        finally:
+            self._p5_top_volume_sort_syncing = False
 
     def _p5_format_top_volume_expiration(self, expiry: str) -> str:
         """Render one expiration in compact uppercase month format."""
@@ -1340,9 +1445,59 @@ class OptionsChainMixin:
                     expiry=expiry,
                     positive_color=self.theme_color('accent_positive'),
                     negative_color=self.theme_color('accent_negative'),
+                    price_highlight_backgrounds=self._p5_top_volume_price_highlight_backgrounds(),
+                    low_price_highlight_backgrounds=self._p5_low_price_highlight_backgrounds(),
+                    top_volume_highlight_backgrounds=self._p5_high_volume_highlight_backgrounds(),
+                    low_volume_highlight_backgrounds=self._p5_low_volume_highlight_backgrounds(),
                     pd_module=pd,
                 ),
             )
+        self._p5_apply_top_volume_sort(view_key)
+
+    def _p5_blend_colors(self, base_color: str, accent_color: str, amount: float) -> str:
+        """Blend two colors and return a hex color string."""
+        base = QColor(base_color)
+        accent = QColor(accent_color)
+        if not base.isValid() or not accent.isValid():
+            return accent_color
+        amount = max(0.0, min(1.0, float(amount)))
+        red = round(base.red() + (accent.red() - base.red()) * amount)
+        green = round(base.green() + (accent.green() - base.green()) * amount)
+        blue = round(base.blue() + (accent.blue() - base.blue()) * amount)
+        return QColor(red, green, blue).name()
+
+    def _p5_blend_theme_colors(self, base_token: str, accent_token: str, amount: float) -> str:
+        """Blend two theme colors and return a hex color string."""
+        return self._p5_blend_colors(self.theme_color(base_token), self.theme_color(accent_token), amount)
+
+    def _p5_top_volume_price_highlight_backgrounds(self) -> tuple[str, str]:
+        """Return strongest-to-subtlest green cell backgrounds for top-priced options."""
+        return (
+            self._p5_blend_theme_colors('panel_background', 'accent_positive', 0.48),
+            self._p5_blend_theme_colors('panel_background', 'accent_positive', 0.32),
+        )
+
+    def _p5_low_price_highlight_backgrounds(self) -> tuple[str, str]:
+        """Return strongest-to-subtlest orange-red cell backgrounds for lowest-priced options."""
+        low_price_accent = self._p5_blend_theme_colors('warning', 'accent_negative', 0.68)
+        return (
+            self._p5_blend_colors(self.theme_color('panel_background'), low_price_accent, 0.56),
+            self._p5_blend_colors(self.theme_color('panel_background'), low_price_accent, 0.38),
+        )
+
+    def _p5_high_volume_highlight_backgrounds(self) -> tuple[str, str]:
+        """Return strongest-to-subtlest yellow cell backgrounds for top-volume options."""
+        return (
+            self._p5_blend_theme_colors('panel_background', 'warning', 0.48),
+            self._p5_blend_theme_colors('panel_background', 'warning', 0.32),
+        )
+
+    def _p5_low_volume_highlight_backgrounds(self) -> tuple[str, str]:
+        """Return strongest-to-subtlest red cell backgrounds for lowest-volume options."""
+        return (
+            self._p5_blend_theme_colors('panel_background', 'accent_negative', 0.48),
+            self._p5_blend_theme_colors('panel_background', 'accent_negative', 0.32),
+        )
 
     def _p5_load_expiries(self) -> None:
         """Fetch available expiry dates for the entered ticker."""
@@ -2062,6 +2217,7 @@ class OptionsChainMixin:
         if not getattr(self, '_p5_chain_df', pd.DataFrame()).empty:
             self._p5_populate_tables(self._p5_chain_df, self._p5_chain_expiry)
         for view_key, view in getattr(self, 'p5_top_volume_views', {}).items():
+            self._p5_refresh_top_volume_legend(view_key)
             status_lbl = view.get('status_lbl')
             if status_lbl is not None:
                 self.set_status_text(status_lbl, status_lbl.text(), status=status_lbl.property('bt_status') or 'muted')

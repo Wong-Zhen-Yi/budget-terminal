@@ -756,6 +756,7 @@ class WindowBootstrapMixin:
                 self.valuation_page_state = load_valuation_page_settings()
                 self.dashboard_chart_state = load_dashboard_chart_settings()
                 self.backtest_page_state = load_backtest_page_settings()
+                self.global_page_state = load_global_page_settings()
                 self.portfolio_metrics_state = load_portfolio_metrics_settings()
                 self.navigation_state = load_navigation_settings()
                 self.networth_data = load_networth_data()
@@ -878,7 +879,7 @@ class WindowBootstrapMixin:
             with self._startup_profiler_step('ui_build'), self._startup_progress_step('ui_build', 'UI layout'):
                 self.init_ui()
             with self._startup_profiler_step('theme_apply'), self._startup_progress_step('theme_apply', 'Theme styling'):
-                self.theme_manager.apply_theme(self.current_theme_id, persist=False)
+                self.theme_manager.apply_theme(self.current_theme_id)
             self._sync_after_portfolio_change(refresh_main=False)
             self._apply_startup_window_size()
 

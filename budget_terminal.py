@@ -55,9 +55,16 @@ from budget_terminal_app.dpi import configure_process_dpi_awareness
 
 configure_process_dpi_awareness()
 
+from budget_terminal_app.error_logging import configure_error_logging
+
+configure_error_logging()
+
 try:
     from budget_terminal_app.main import main
 except ModuleNotFoundError as exc:
+    import logging
+
+    logging.getLogger(__name__).exception('Budget Terminal startup dependency import failed.')
     missing_module = exc.name or "a required package"
     raise SystemExit(
         "Missing dependency: "

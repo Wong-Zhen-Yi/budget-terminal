@@ -114,6 +114,8 @@ class StocksPageMixin:
         self.stocks_go_to_fundamentals_btn.clicked.connect(self._stocks_go_to_fundamentals)
         self.stocks_go_to_options_btn = QPushButton('Go to Options')
         self.stocks_go_to_options_btn.clicked.connect(self._stocks_go_to_options)
+        self.stocks_go_to_valuation_btn = QPushButton('Go to Valuation')
+        self.stocks_go_to_valuation_btn.clicked.connect(self._stocks_go_to_valuation)
         self.stocks_export_btn = QPushButton('Export for LLM')
         self.set_theme_variant(self.stocks_export_btn, 'positive')
         self.stocks_export_btn.clicked.connect(self._stocks_export_for_llm)
@@ -124,7 +126,12 @@ class StocksPageMixin:
         ticker_actions.setColumnStretch(0, 1)
         ticker_actions.setColumnStretch(1, 1)
         ticker_layout.addLayout(ticker_actions)
-        ticker_layout.addWidget(self.stocks_export_btn)
+        ticker_handoff_row = QHBoxLayout()
+        ticker_handoff_row.setContentsMargins(0, 0, 0, 0)
+        ticker_handoff_row.setSpacing(6)
+        ticker_handoff_row.addWidget(self.stocks_go_to_valuation_btn, 1)
+        ticker_handoff_row.addWidget(self.stocks_export_btn, 1)
+        ticker_layout.addLayout(ticker_handoff_row)
         left_layout.addWidget(ticker_frame)
 
         fundamentals_frame = QFrame()
@@ -1133,6 +1140,24 @@ class StocksPageMixin:
             self.p5_shared_ticker_input.setText(symbol)
         if hasattr(self, '_p5_load_expiries'):
             self._p5_load_expiries()
+
+    def _stocks_go_to_valuation(self) -> None:
+        symbol = self._stocks_current_symbol()
+        if not symbol:
+            return
+        page_index = self._stocks_page_index('page23', 22)
+        if isinstance(getattr(self, 'valuation_page_state', None), dict):
+            self.valuation_page_state = {
+                **self.valuation_page_state,
+                'last_ticker': symbol,
+            }
+        if hasattr(self, 'valuation_ticker_input'):
+            self.valuation_ticker_input.setText(symbol)
+        self.switch_page(page_index)
+        if hasattr(self, 'valuation_ticker_input'):
+            self.valuation_ticker_input.setText(symbol)
+        if hasattr(self, 'load_valuation_data'):
+            self.load_valuation_data(update_collection_info=True)
 
     def _stocks_export_escape(self, value: Any) -> str:
         text = str(value or '').replace('\r', ' ').replace('\n', ' ').strip()

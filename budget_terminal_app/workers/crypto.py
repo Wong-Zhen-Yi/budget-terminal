@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..dependencies import *
-from .news_sources import fetch_keyless_trader_news
+from .news_sources import fetch_keyless_crypto_news
 
 
 class CryptoMarketWorker(QObject):
@@ -372,7 +372,7 @@ class CryptoMarketWorker(QObject):
 
     def _fetch_news(self) -> list[dict[str, Any]]:
         try:
-            return fetch_keyless_trader_news(
+            return fetch_keyless_crypto_news(
                 ['BTC', 'ETH', 'SOL', 'COIN', 'MSTR', 'BMNR', 'IBIT', 'ETHA', 'BITQ'],
                 limit=10,
                 candidate_limit=80,

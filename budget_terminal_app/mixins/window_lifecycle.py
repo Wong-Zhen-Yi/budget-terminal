@@ -28,11 +28,41 @@ class WindowLifecycleMixin:
         tzinfo = self._get_tzinfo(idx)
         return datetime.datetime.now(tzinfo) if tzinfo else datetime.datetime.now().astimezone()
 
+    def _clock_country_by_code(self, country_code: Any) -> dict[str, Any]:
+        """Return the configured market-country entry for the clock."""
+        code = normalize_clock_country_code(country_code)
+        for choice in getattr(self, '_clock_country_choices', CLOCK_COUNTRY_CHOICES):
+            if str(choice.get('code', '')).upper() == code:
+                return dict(choice)
+        return dict(CLOCK_COUNTRY_CHOICES[0])
+
+    def _current_clock_country_code(self) -> str:
+        """Return the active country code for the shared clock display."""
+        return normalize_clock_country_code(getattr(self, '_clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE))
+
+    def _current_clock_country_index(self) -> int:
+        """Return the active country index for the Settings clock selector."""
+        code = self._current_clock_country_code()
+        for index, choice in enumerate(getattr(self, '_clock_country_choices', CLOCK_COUNTRY_CHOICES)):
+            if str(choice.get('code', '')).upper() == code:
+                return index
+        return 0
+
+    def _get_clock_tzinfo(self) -> Any:
+        """Resolve the selected market country into a tzinfo object."""
+        choice = self._clock_country_by_code(self._current_clock_country_code())
+        return ZoneInfo(str(choice.get('zone', 'America/New_York') or 'America/New_York'))
+
+    def _now_for_clock_country(self) -> Any:
+        """Return a timezone-aware current datetime for the selected clock country."""
+        return datetime.datetime.now(self._get_clock_tzinfo())
+
     def _register_navigation_pages(self) -> None:
         """Handle register navigation pages."""
         self._startup_progress_begin('navigation', 'Navigation')
         self._pages.clear()
         self._register_page(0, self.btn_page1)
+        self._register_page(25, self.btn_page26, on_show=self._p26_on_show if hasattr(self, '_p26_on_show') else None)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
         self._register_page(2, self.btn_page6, on_show=self._p6_on_show if hasattr(self, '_p6_on_show') else None)
         self._register_page(3, self.btn_page7)
@@ -1205,6 +1235,10 @@ class WindowLifecycleMixin:
             if hasattr(self, 'refresh_data'):
                 self.refresh_data(force=True, reason='manual_refresh')
             return
+        if current_index == 25:
+            if hasattr(self, '_p26_request_refresh'):
+                self._p26_request_refresh(force=True)
+            return
         if current_index == 1:
             current_widget = self.p4_content_tabs.currentWidget() if hasattr(self, 'p4_content_tabs') else None
             if current_widget is getattr(self, 'p4_metrics_page', None):
@@ -1231,6 +1265,10 @@ class WindowLifecycleMixin:
                 self.set_status_text(self.status_bar, 'Personal finance view refreshed.', status='positive')
             return
         if current_index == 3:
+            if hasattr(self, '_p7_earnings_tab_is_active') and self._p7_earnings_tab_is_active():
+                if hasattr(self, '_p7_refresh_earnings'):
+                    self._p7_refresh_earnings(force=True)
+                return
             if hasattr(self, '_p7_fetch_events'):
                 self._p7_fetch_events()
             return
@@ -1370,24 +1408,17 @@ class WindowLifecycleMixin:
         save_time_format(self._time_12h)
         self.update_time()
 
-    def _current_clock_timezone_index(self) -> int:
-        """Return the active timezone index for the shared clock display."""
-        try:
-            idx = int(getattr(self, '_clock_tz_index', 0))
-        except (TypeError, ValueError):
-            idx = 0
-        if idx < 0 or idx >= len(getattr(self, '_tz_choices', ())):
-            return 0
-        return idx
-
-    def _on_settings_timezone_changed(self, index: int) -> None:
-        """Handle timezone changes from the Settings page clock controls."""
-        self._clock_tz_index = self._current_clock_timezone_index() if index is None else int(index)
+    def _on_settings_clock_country_changed(self, index: int) -> None:
+        """Handle market-country changes from the Settings page clock controls."""
+        code = None
+        if hasattr(self, 'settings_clock_country_combo') and index is not None and index >= 0:
+            code = self.settings_clock_country_combo.itemData(int(index))
+        self._clock_country_code = save_clock_country_code(code)
         self.update_time()
 
     def update_time(self, *_: Any) -> None:
         """Update time."""
-        now = self._now_for_timezone_index(self._current_clock_timezone_index())
+        now = self._now_for_clock_country()
         if self._time_12h:
             self.time_label.setText(now.strftime('%I:%M:%S %p'))
         else:
@@ -1411,7 +1442,7 @@ class WindowLifecycleMixin:
                 cleaned.append(text)
         self._data_collection_sources = cleaned
         if collected_at is None:
-            now = self._now_for_timezone_index(self._current_clock_timezone_index())
+            now = self._now_for_clock_country()
             self._data_collection_ts = now.timestamp()
         else:
             try:
@@ -1430,7 +1461,7 @@ class WindowLifecycleMixin:
             self.data_collection_label.setText('Data collected: awaiting first refresh')
             return
         try:
-            tzinfo = self._get_tzinfo(self._current_clock_timezone_index())
+            tzinfo = self._get_clock_tzinfo()
             collected_dt = datetime.datetime.fromtimestamp(float(self._data_collection_ts), tz=tzinfo)
         except Exception:
             self.data_collection_label.setText('Data collected: unavailable')
@@ -1536,6 +1567,9 @@ class WindowLifecycleMixin:
         backtest_executor = getattr(self, '_p25_executor', None)
         if backtest_executor is not None:
             backtest_executor.shutdown(wait=False, cancel_futures=True)
+        global_executor = getattr(self, '_p26_executor', None)
+        if global_executor is not None:
+            global_executor.shutdown(wait=False, cancel_futures=True)
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

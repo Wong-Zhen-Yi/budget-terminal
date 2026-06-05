@@ -14,7 +14,7 @@ from budget_terminal_app import __version__
 app_name = f'BudgetTerminal-v{__version__}'
 manifest_path = os.path.join(project_root, 'packaging', 'budget_terminal_dpi_manifest.xml')
 
-datas = collect_data_files('budget_terminal_app', includes=['assets/app_icon.png'])
+datas = collect_data_files('budget_terminal_app', includes=['assets/app_icon.png', 'assets/world_countries_50m.json'])
 datas += collect_data_files('tzdata')
 
 hiddenimports = collect_submodules('yfinance')

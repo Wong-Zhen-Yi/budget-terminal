@@ -482,7 +482,7 @@ class CryptoMixin:
             tone = self._p19_news_tone(title)
             rows.append((str(article.get('time') or '--'), title, tone))
         if not rows:
-            rows = [('--', 'No crypto-related keyless news returned yet.', '--')]
+            rows = [('--', 'No crypto news feed articles returned yet.', '--')]
         self._p19_set_table_rows(self.p19_news_table, rows)
 
     def _p19_export_snapshot(self) -> None:

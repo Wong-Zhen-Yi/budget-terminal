@@ -7,6 +7,20 @@ CLR_DOWN_BG = '#2e1a1a'
 CLR_UP_BG = '#1a2e1a'
 CLR_DOWN_BG = '#2e1a1a'
 TIMEZONE_CHOICES = [('Local', None), ('UTC', 'UTC'), ('EST', 'America/New_York'), ('CST', 'America/Chicago'), ('PST', 'America/Los_Angeles'), ('GMT', 'Europe/London'), ('CET', 'Europe/Paris'), ('IST', 'Asia/Kolkata'), ('JST', 'Asia/Tokyo'), ('SGT', 'Asia/Singapore'), ('AEST', 'Australia/Sydney'), ('NZST', 'Pacific/Auckland')]
+CLOCK_COUNTRY_CHOICES = [
+    {'code': 'US', 'name': 'United States', 'zone': 'America/New_York'},
+    {'code': 'SG', 'name': 'Singapore', 'zone': 'Asia/Singapore'},
+    {'code': 'CA', 'name': 'Canada', 'zone': 'America/Toronto'},
+    {'code': 'GB', 'name': 'United Kingdom', 'zone': 'Europe/London'},
+    {'code': 'DE', 'name': 'Germany', 'zone': 'Europe/Berlin'},
+    {'code': 'FR', 'name': 'France', 'zone': 'Europe/Paris'},
+    {'code': 'CH', 'name': 'Switzerland', 'zone': 'Europe/Zurich'},
+    {'code': 'JP', 'name': 'Japan', 'zone': 'Asia/Tokyo'},
+    {'code': 'HK', 'name': 'Hong Kong', 'zone': 'Asia/Hong_Kong'},
+    {'code': 'AU', 'name': 'Australia', 'zone': 'Australia/Sydney'},
+    {'code': 'NZ', 'name': 'New Zealand', 'zone': 'Pacific/Auckland'},
+]
+CLOCK_DEFAULT_COUNTRY_CODE = 'US'
 P4_PORTFOLIO_COLUMNS = ['Symbol', 'Shares', 'Avg Price', 'Cost', 'Price', "Day's Change", 'Market Value', 'Weight', 'Dollar Gain', 'Growth', 'Market Cap']
 P4_PORTFOLIO_COL_SYMBOL = 0
 P4_PORTFOLIO_COL_SHARES = 1

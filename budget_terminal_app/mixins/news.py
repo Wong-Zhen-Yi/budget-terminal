@@ -444,9 +444,12 @@ class NewsMixin:
         """Resize News page rows so wrapped headlines are readable."""
         table.resizeRowsToContents()
         min_height = 54
-        max_height = 112
+        max_height_property = table.property('bt_full_headlines_max_height')
+        max_height = 112 if max_height_property is None else int(max_height_property)
         for row in range(table.rowCount()):
-            height = max(min_height, min(max_height, table.rowHeight(row)))
+            height = max(min_height, table.rowHeight(row))
+            if max_height > 0:
+                height = min(max_height, height)
             table.setRowHeight(row, height)
 
     def update_page3(self, data: Any) -> None:

@@ -20,6 +20,7 @@ _P1_PORT_SECTION_MIN_HEIGHT = 75
 P1_AUTO_ANCHOR = 0.85
 P1_DEFAULT_STARTUP_SPAN = 80.0
 P1_MIN_REUSABLE_SPAN = 10.0
+P1_DASHBOARD_NEWS_PER_TICKER_LIMIT = 2
 _DASHBOARD_MEMBERSHIP_REFRESH_REASON = 'portfolio_membership_change'
 P1_OPTIONS_EXPORT_BUCKETS = (
     ('0_week', '0 Week'),
@@ -230,6 +231,47 @@ class DashboardMixin:
         snapshot['news'] = news_items
         return snapshot
 
+    def _dashboard_portfolio_news_ticker(self, article: dict[str, Any], visible_tickers: set[str]) -> str:
+        """Return the visible portfolio ticker represented by a dashboard news article."""
+        ticker_text = str(article.get('ticker', '') or '').upper().strip()
+        article_tickers = [
+            ticker.strip()
+            for ticker in ticker_text.split(',')
+            if ticker.strip()
+        ]
+        for ticker in article_tickers:
+            if ticker in visible_tickers:
+                return ticker
+        return ''
+
+    def _dashboard_limited_portfolio_news(self, articles: Any) -> list[dict[str, Any]]:
+        """Return at most the two newest dashboard news articles for each visible ticker."""
+        visible_tickers = {
+            str(ticker or '').upper().strip()
+            for ticker in getattr(self, 'tickers', [])
+            if str(ticker or '').strip()
+        }
+        buckets: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in visible_tickers}
+        for article in articles or []:
+            if not isinstance(article, dict):
+                continue
+            category = str(article.get('category', '') or '').strip().lower()
+            if category != 'portfolio':
+                continue
+            ticker = self._dashboard_portfolio_news_ticker(article, visible_tickers)
+            if not ticker:
+                continue
+            buckets.setdefault(ticker, []).append(dict(article))
+
+        limited_articles = []
+        for ticker in getattr(self, 'tickers', []):
+            normalized_ticker = str(ticker or '').upper().strip()
+            if not normalized_ticker:
+                continue
+            ticker_articles = self._sort_articles_by_newest(buckets.get(normalized_ticker, []))
+            limited_articles.extend(ticker_articles[:P1_DASHBOARD_NEWS_PER_TICKER_LIMIT])
+        return self._sort_articles_by_newest(limited_articles)
+
     def _dashboard_render_target_rows(self, targets: list[dict[str, Any]]) -> None:
         """Render Dashboard analyst target rows through the shared table renderer."""
         rows = build_dashboard_target_rows(
@@ -248,13 +290,7 @@ class DashboardMixin:
         self.repopulate_portfolio()
         main_targets = list(snapshot.get('targets', []))
         self._dashboard_render_target_rows(main_targets)
-        portfolio_news = self._sort_articles_by_newest(
-            [
-                article
-                for article in snapshot.get('news', [])
-                if article.get('category') == 'portfolio' and article.get('ticker') in self.tickers
-            ]
-        )
+        portfolio_news = self._dashboard_limited_portfolio_news(snapshot.get('news', []))
         self._populate_news_table(self.news_table, portfolio_news)
         self._call_if_page_initialized('update_page3', snapshot, page_attr='page3')
         self._call_if_page_initialized('_p7_fetch_events', page_attr='page7')
@@ -1419,7 +1455,7 @@ class DashboardMixin:
                 self.index_labels[idx].setStyleSheet(f'color: {color}; font-weight: bold; background: {self.theme_color("panel_background")}; border: 1px solid {self.theme_color("panel_border")}; border-radius: 4px; padding: 4px 8px;')
         main_targets = [item for item in data.get('targets', []) if item.get('ticker') in self.tickers]
         self._dashboard_render_target_rows(main_targets)
-        portfolio_news = self._sort_articles_by_newest([article for article in data.get('news', []) if article.get('category') == 'portfolio' and article.get('ticker') in self.tickers])
+        portfolio_news = self._dashboard_limited_portfolio_news(data.get('news', []))
         self._populate_news_table(self.news_table, portfolio_news)
         self._call_if_page_initialized('update_page3', data, page_attr='page3')
         self._call_if_page_initialized('update_page4', data, page_attr='page4')

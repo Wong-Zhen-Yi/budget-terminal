@@ -10,11 +10,13 @@ if __package__ in {None, ''}:
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
     from budget_terminal_app import __version__ as APP_VERSION
+    from budget_terminal_app.constants import CLOCK_COUNTRY_CHOICES, CLOCK_DEFAULT_COUNTRY_CODE
     from budget_terminal_app.dependencies import datetime, json, logger, math, pd
     from budget_terminal_app.paths import legacy_documents_user_data_path, user_data_path
     from budget_terminal_app.persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
 else:
     from . import __version__ as APP_VERSION
+    from .constants import CLOCK_COUNTRY_CHOICES, CLOCK_DEFAULT_COUNTRY_CODE
     from .dependencies import datetime, json, logger, math, pd
     from .paths import legacy_documents_user_data_path, user_data_path
     from .persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
@@ -52,6 +54,7 @@ DEFAULT_BACKTEST_PAGE_SETTINGS = {
     'range_label': 'Max',
     'splitter_sizes': [2, 5],
 }
+DEFAULT_GLOBAL_PAGE_SETTINGS = {'interval_label': '1D'}
 DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
     'last_ticker': '',
     'selected_configuration': 'default',
@@ -88,22 +91,22 @@ DEFAULT_VALUATION_PAGE_SETTINGS = {
         'margin_of_safety': 15.0,
     },
     'notes_by_ticker': {},
+    'custom_peers_by_ticker': {},
 }
 DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key': '1y'}
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
-DEFAULT_THEME_SETTINGS = {'selected_theme': 'trading_dark'}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 1, 2, 3, 19, 4, 5, 6, 7, 22, 8, 9, 24, 11, 12, 13, 14, 15, 21, 23, 16, 18, 20, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 2, 19, 4, 11, 7, 22, 8, 9, 13, 6, 5, 12, 14, 15, 3, 20, 23, 16, 18, 24, 17, 21]
 SETTINGS_PAGE_INDEX = 17
-DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
+DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': [21]}
 MAX_PORTFOLIOS = 5
 MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
 DEFAULT_MAIN_PORTFOLIO_ID = PORTFOLIO_IDS[0]
 DEFAULT_PORTFOLIO_NAMES = {portfolio_id: f'Portfolio {index}' for index, portfolio_id in enumerate(PORTFOLIO_IDS, start=1)}
-SUPPORTED_THEME_IDS = (DEFAULT_THEME_SETTINGS['selected_theme'], 'cyberpunk_terminal')
 PORTFOLIO_METRICS_LOOKBACK_CHOICES = ('1y', '3y', '5y', 'max')
+CLOCK_COUNTRY_CODES = {str(choice.get('code', '')).upper() for choice in CLOCK_COUNTRY_CHOICES}
 
 
 def _read_json(path: Any, default: Any) -> Any:
@@ -120,6 +123,12 @@ def _read_json(path: Any, default: Any) -> Any:
     except OSError as exc:
         logger.error('Unable to read JSON from %s: %s', target, exc)
     return default
+
+
+def normalize_clock_country_code(value: Any) -> str:
+    """Normalize the persisted top-bar clock market-country code."""
+    code = str(value or '').strip().upper()
+    return code if code in CLOCK_COUNTRY_CODES else CLOCK_DEFAULT_COUNTRY_CODE
 
 
 def _backup_unreadable_json_file(path: Any, *, reason: str='unreadable') -> str:
@@ -206,12 +215,6 @@ def _normalize_selected_portfolio_id(value: Any, portfolio_order: Any, fallback:
     fallback_id = _normalize_portfolio_id(fallback or (order[0] if order else DEFAULT_MAIN_PORTFOLIO_ID))
     portfolio_id = _normalize_portfolio_id(value)
     return portfolio_id if portfolio_id in order else fallback_id
-
-
-def _normalize_theme_setting(value: Any) -> Any:
-    """Clamp persisted theme ids to the currently supported user-selectable set."""
-    text = str(value or '').strip()
-    return text if text in SUPPORTED_THEME_IDS else DEFAULT_THEME_SETTINGS['selected_theme']
 
 
 def _normalize_unique_symbol_list(values: Any) -> Any:
@@ -642,12 +645,6 @@ def normalize_networth_data(data: Any) -> Any:
     return _normalize_networth_payload(data)
 
 
-def _normalize_theme_payload(settings: Any) -> Any:
-    """Normalize persisted theme settings for the single-file document."""
-    saved = settings if isinstance(settings, dict) else {}
-    return {'selected_theme': _normalize_theme_setting(saved.get('selected_theme'))}
-
-
 def _normalize_options_chain_payload(settings: Any) -> Any:
     """Normalize persisted options-chain defaults for the single-file document."""
     saved = settings if isinstance(settings, dict) else {}
@@ -675,7 +672,10 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.append(page_index)
     for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
         if page_index not in order:
-            order.append(page_index)
+            if page_index == 25 and 0 in order:
+                order.insert(order.index(0) + 1, page_index)
+            else:
+                order.append(page_index)
     hidden_pages = []
     raw_hidden = saved.get('hidden_pages', [])
     if isinstance(raw_hidden, list):
@@ -741,6 +741,7 @@ def _default_user_data_document() -> Any:
         'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
+        'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
         'valuation_page': _normalize_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS),
@@ -748,9 +749,9 @@ def _default_user_data_document() -> Any:
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
-        'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
+        'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
     }
 
@@ -784,6 +785,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'fundamentals_page': _normalize_fundamentals_page_settings(saved.get('fundamentals_page', default['fundamentals_page'])),
         'chart_page': _normalize_chart_page_settings(chart_page_payload),
         'backtest_page': _normalize_backtest_page_settings(saved.get('backtest_page', default['backtest_page'])),
+        'global_page': _normalize_global_page_settings(saved.get('global_page', default['global_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(dashboard_chart_payload),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
         'valuation_page': _normalize_valuation_page_settings(saved.get('valuation_page', default['valuation_page'])),
@@ -791,9 +793,9 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'multi_charts': _normalize_multi_charts_settings(saved.get('multi_charts', default['multi_charts'])),
         'youtube': _normalize_youtube_settings(saved.get('youtube', default['youtube'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
-        'theme': _normalize_theme_payload(saved.get('theme', default['theme'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
         'navigation': normalize_navigation_settings(saved.get('navigation', default['navigation'])),
+        'clock_country_code': normalize_clock_country_code(saved.get('clock_country_code', default['clock_country_code'])),
         'time_12h': bool(saved.get('time_12h', False)),
     }
 
@@ -1056,10 +1058,6 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
         '',
-        '## Theme Settings',
-        '',
-        _json_block(payload.get('theme', DEFAULT_THEME_SETTINGS)),
-        '',
         '## Options Chain Settings',
         '',
         _json_block(payload.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
@@ -1067,6 +1065,13 @@ def build_ai_user_data_export() -> str:
         '## Navigation Settings',
         '',
         _json_block(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
+        '',
+        '## Clock Settings',
+        '',
+        _json_block({
+            'clock_country_code': normalize_clock_country_code(payload.get('clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE)),
+            'time_12h': bool(payload.get('time_12h', False)),
+        }),
         '',
         '## Full Normalized Payload',
         '',
@@ -1125,6 +1130,7 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'fundamentals_page': _normalize_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS),
         'chart_page': DEFAULT_CHART_PAGE_SETTINGS.copy(),
         'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
+        'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
         'valuation_page': _normalize_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS),
@@ -1132,9 +1138,9 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'multi_charts': DEFAULT_MULTI_CHARTS_SETTINGS.copy(),
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
-        'theme': DEFAULT_THEME_SETTINGS.copy(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
+        'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
     }
     return apply_user_data_backup(normalized)
@@ -1150,10 +1156,10 @@ def load_app_config() -> Any:
             'portfolio_order': list(document.get('portfolio_order', [document['main_portfolio_id']])),
             'portfolios': {portfolio_id: {'name': entry.get('name')} for portfolio_id, entry in document.get('portfolios', {}).items()},
         },
-        'theme': dict(document.get('theme', DEFAULT_THEME_SETTINGS)),
         'fundamentals_page': dict(document.get('fundamentals_page', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS)),
         'chart_page': dict(document.get('chart_page', DEFAULT_CHART_PAGE_SETTINGS)),
         'backtest_page': dict(document.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)),
+        'global_page': dict(document.get('global_page', DEFAULT_GLOBAL_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
         'valuation_page': dict(document.get('valuation_page', DEFAULT_VALUATION_PAGE_SETTINGS)),
@@ -1162,6 +1168,7 @@ def load_app_config() -> Any:
         'youtube': dict(document.get('youtube', DEFAULT_YOUTUBE_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
         'navigation': normalize_navigation_settings(document.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
+        'clock_country_code': normalize_clock_country_code(document.get('clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE)),
         'time_12h': bool(document.get('time_12h', False)),
     }
 
@@ -1192,14 +1199,14 @@ def save_app_config(data: Any) -> None:
                 entry = _default_portfolio_entry(portfolio_id)
             entry['name'] = names.get(portfolio_id, {}).get('name', entry.get('name'))
             current['portfolios'][portfolio_id] = entry
-    if 'theme' in saved:
-        current['theme'] = _normalize_theme_payload(saved.get('theme'))
     if 'fundamentals_page' in saved:
         current['fundamentals_page'] = _normalize_fundamentals_page_settings(saved.get('fundamentals_page'))
     if 'chart_page' in saved:
         current['chart_page'] = _normalize_chart_page_settings(saved.get('chart_page'))
     if 'backtest_page' in saved:
         current['backtest_page'] = _normalize_backtest_page_settings(saved.get('backtest_page'))
+    if 'global_page' in saved:
+        current['global_page'] = _normalize_global_page_settings(saved.get('global_page'))
     if 'dashboard_chart' in saved:
         current['dashboard_chart'] = _normalize_dashboard_chart_settings(saved.get('dashboard_chart'))
     if 'stocks_page' in saved:
@@ -1216,6 +1223,8 @@ def save_app_config(data: Any) -> None:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
     if 'navigation' in saved:
         current['navigation'] = normalize_navigation_settings(saved.get('navigation'))
+    if 'clock_country_code' in saved:
+        current['clock_country_code'] = normalize_clock_country_code(saved.get('clock_country_code'))
     if 'time_12h' in saved:
         current['time_12h'] = bool(saved['time_12h'])
     _save_user_data_document(current)
@@ -1438,6 +1447,18 @@ def _normalize_backtest_page_settings(settings: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_global_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the standalone Global page."""
+    saved = settings if isinstance(settings, dict) else {}
+    interval_label = str(
+        saved.get('interval_label', DEFAULT_GLOBAL_PAGE_SETTINGS['interval_label'])
+        or DEFAULT_GLOBAL_PAGE_SETTINGS['interval_label']
+    ).upper().strip()
+    if interval_label not in {'1D', '5D', '30D', 'YTD', '1Y', '5Y'}:
+        interval_label = DEFAULT_GLOBAL_PAGE_SETTINGS['interval_label']
+    return {'interval_label': interval_label}
+
+
 def _normalize_fundamentals_selection_rows(values: Any) -> list[str]:
     """Normalize one ordered Fundamentals row-selection list."""
     rows = []
@@ -1616,6 +1637,21 @@ def _normalize_valuation_notes(values: Any) -> dict[str, str]:
     return notes
 
 
+def _normalize_valuation_custom_peers(values: Any) -> dict[str, list[str]]:
+    """Normalize custom Valuation peers keyed by anchor ticker."""
+    normalized: dict[str, list[str]] = {}
+    if not isinstance(values, dict):
+        return normalized
+    for ticker_key, peers in values.items():
+        ticker = str(ticker_key or '').upper().strip()
+        if not ticker:
+            continue
+        symbols = [symbol for symbol in _normalize_unique_symbol_list(peers) if symbol != ticker]
+        if symbols:
+            normalized[ticker] = symbols
+    return normalized
+
+
 def _normalize_valuation_page_settings(settings: Any) -> dict[str, Any]:
     """Normalize persisted state for the Valuation page."""
     saved = settings if isinstance(settings, dict) else {}
@@ -1631,6 +1667,7 @@ def _normalize_valuation_page_settings(settings: Any) -> dict[str, Any]:
         'last_ticker': last_ticker or DEFAULT_VALUATION_PAGE_SETTINGS['last_ticker'],
         'assumptions': _normalize_valuation_assumptions(saved.get('assumptions', DEFAULT_VALUATION_PAGE_SETTINGS['assumptions'])),
         'notes_by_ticker': notes_by_ticker,
+        'custom_peers_by_ticker': _normalize_valuation_custom_peers(saved.get('custom_peers_by_ticker', DEFAULT_VALUATION_PAGE_SETTINGS['custom_peers_by_ticker'])),
     }
 
 
@@ -1783,26 +1820,6 @@ def save_portfolio_preferences(settings: Any) -> Any:
     return state
 
 
-def load_theme_settings() -> Any:
-    """Load persisted UI theme preferences."""
-    config = load_app_config()
-    saved = config.get('theme', {})
-    if not isinstance(saved, dict):
-        saved = {}
-    return {'selected_theme': _normalize_theme_setting(saved.get('selected_theme'))}
-
-
-def save_theme_settings(settings: Any) -> Any:
-    """Persist UI theme preferences in app config."""
-    current = load_app_config()
-    payload = load_theme_settings()
-    if isinstance(settings, dict):
-        payload['selected_theme'] = _normalize_theme_setting(settings.get('selected_theme', payload['selected_theme']))
-    current['theme'] = payload
-    save_app_config(current)
-    return payload
-
-
 def load_navigation_settings() -> Any:
     """Load persisted main-window navigation preferences."""
     config = load_app_config()
@@ -1844,6 +1861,21 @@ def save_backtest_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_backtest_page_settings(settings)
     current['backtest_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_global_page_settings() -> Any:
+    """Load persisted state for the standalone Global page."""
+    config = load_app_config()
+    return _normalize_global_page_settings(config.get('global_page', {}))
+
+
+def save_global_page_settings(settings: Any) -> Any:
+    """Persist state for the standalone Global page."""
+    current = load_app_config()
+    state = _normalize_global_page_settings(settings)
+    current['global_page'] = state
     save_app_config(current)
     return state
 
@@ -1992,3 +2024,16 @@ def load_time_format() -> bool:
 def save_time_format(use_12h: bool) -> None:
     """Persist 12h/24h time format preference."""
     save_app_config({'time_12h': bool(use_12h)})
+
+
+def load_clock_country_code() -> str:
+    """Load persisted top-bar clock market-country preference."""
+    config = load_app_config()
+    return normalize_clock_country_code(config.get('clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE))
+
+
+def save_clock_country_code(country_code: Any) -> str:
+    """Persist top-bar clock market-country preference."""
+    state = normalize_clock_country_code(country_code)
+    save_app_config({'clock_country_code': state})
+    return state

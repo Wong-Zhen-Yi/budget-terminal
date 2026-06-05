@@ -23,6 +23,18 @@ class ValuationMixin:
         ('PEG', 'peg', 'ratio'),
         ('Dividend Yield', 'dividend_yield', 'pct'),
     )
+    _VALUATION_PEER_SORT_FIELDS = {
+        0: 'company',
+        1: 'source',
+        2: 'market_cap',
+        3: 'revenue_growth',
+        4: 'net_margin',
+        5: 'pe',
+        6: 'forward_pe',
+        7: 'ev_ebitda',
+        8: 'fcf_yield',
+    }
+    _VALUATION_PEER_NUMERIC_SORT_COLUMNS = {2, 3, 4, 5, 6, 7, 8}
 
     def init_page23(self) -> None:
         """Build the Valuation page UI."""
@@ -35,6 +47,9 @@ class ValuationMixin:
         self.valuation_current_data = None
         self.valuation_loaded_ticker = ''
         self.valuation_current_scenarios = None
+        self._valuation_peer_rows = []
+        self._valuation_peer_sort_column = None
+        self._valuation_peer_sort_descending = False
 
         layout = QVBoxLayout(self.page23)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -228,8 +243,12 @@ class ValuationMixin:
         self.valuation_trend_plot = self._valuation_plot('Revenue / EPS / FCF Trend')
         self.valuation_trend_plot.setMinimumHeight(260)
 
-        self.valuation_peer_table = self._valuation_table(['Company', 'Market Cap', 'Rev Growth', 'Net Margin', 'P/E', 'Forward P/E', 'EV/EBITDA', 'FCF Yield'])
+        self.valuation_peer_table = self._valuation_table(['Company', 'Source', 'Market Cap', 'Rev Growth', 'Net Margin', 'P/E', 'Forward P/E', 'EV/EBITDA', 'FCF Yield'])
         self.valuation_peer_table.setMinimumHeight(340)
+        peer_header = self.valuation_peer_table.horizontalHeader()
+        peer_header.setSectionsClickable(True)
+        peer_header.setSortIndicatorShown(False)
+        peer_header.sectionClicked.connect(self._valuation_on_peer_header_clicked)
 
         self.valuation_source_table = self._valuation_table(['Source', 'Detail'])
         self.valuation_source_table.setMinimumHeight(190)
@@ -238,7 +257,7 @@ class ValuationMixin:
 
         self.valuation_detail_tabs.addTab(main_tab, 'Main')
         self.valuation_detail_tabs.addTab(self._valuation_detail_page(self.valuation_scenario_table), 'Scenarios')
-        self.valuation_detail_tabs.addTab(self._valuation_detail_page(self.valuation_peer_table), 'Peers')
+        self.valuation_detail_tabs.addTab(self._valuation_peers_page(), 'Peers')
         self.valuation_detail_tabs.addTab(self._valuation_detail_page(self.valuation_risk_table), 'Risk')
         trends_page = QWidget()
         trends_layout = QVBoxLayout(trends_page)
@@ -254,6 +273,7 @@ class ValuationMixin:
         self.set_theme_role(self.valuation_status_label, 'status_muted')
         layout.addWidget(self.valuation_status_label)
         self._valuation_apply_assumptions_to_controls(self.valuation_page_state.get('assumptions', DEFAULT_VALUATION_ASSUMPTIONS))
+        self._valuation_sync_custom_peer_list()
         self._apply_valuation_theme()
 
     def _valuation_detail_page(self, widget: Any) -> Any:
@@ -262,6 +282,53 @@ class ValuationMixin:
         page_layout.setContentsMargins(6, 6, 6, 6)
         page_layout.setSpacing(6)
         page_layout.addWidget(widget, 1)
+        return page
+
+    def _valuation_peers_page(self) -> Any:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        title = QLabel('Custom Peers')
+        self.set_theme_role(title, 'section_title')
+        self.valuation_peer_input = QLineEdit()
+        self.valuation_peer_input.setPlaceholderText('Ticker')
+        self.valuation_peer_input.setFixedWidth(120)
+        self.valuation_peer_input.returnPressed.connect(self._valuation_add_custom_peer)
+        self.valuation_peer_add_btn = QPushButton('Add')
+        self.set_theme_variant(self.valuation_peer_add_btn, 'accent')
+        self.valuation_peer_add_btn.clicked.connect(self._valuation_add_custom_peer)
+        self.valuation_peer_remove_btn = QPushButton('Remove')
+        self.set_theme_variant(self.valuation_peer_remove_btn, 'danger')
+        self.valuation_peer_remove_btn.clicked.connect(self._valuation_remove_custom_peer)
+        toolbar.addWidget(title)
+        toolbar.addSpacing(10)
+        toolbar.addWidget(self.valuation_peer_input)
+        toolbar.addWidget(self.valuation_peer_add_btn)
+        toolbar.addWidget(self.valuation_peer_remove_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setHandleWidth(6)
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(6)
+        peer_help = QLabel('Saved only for the currently loaded valuation ticker.')
+        peer_help.setWordWrap(True)
+        self.set_theme_role(peer_help, 'muted')
+        self.valuation_peer_list = QListWidget()
+        self.valuation_peer_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        sidebar_layout.addWidget(peer_help)
+        sidebar_layout.addWidget(self.valuation_peer_list, 1)
+        body.addWidget(sidebar)
+        body.addWidget(self.valuation_peer_table)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 5)
+        layout.addWidget(body, 1)
         return page
 
     def _valuation_double_spin(self, minimum: float, maximum: float, prefix: str = '', decimals: int = 1, *, suffix: str = '') -> Any:
@@ -304,6 +371,172 @@ class ValuationMixin:
             return str(self.valuation_ticker_input.text() or '').upper().strip()
         return str(getattr(self, 'valuation_loaded_ticker', '') or '').upper().strip()
 
+    def _valuation_normalize_peer_symbol(self, value: Any) -> str:
+        return str(value or '').upper().strip()
+
+    def _valuation_custom_peers_for_ticker(self, ticker: Any=None) -> list[str]:
+        ticker_text = self._valuation_normalize_peer_symbol(ticker or self._valuation_current_ticker())
+        raw_map = getattr(self, 'valuation_page_state', {}).get('custom_peers_by_ticker', {})
+        raw_symbols = raw_map.get(ticker_text, []) if isinstance(raw_map, dict) else []
+        symbols = []
+        if isinstance(raw_symbols, list):
+            for raw_symbol in raw_symbols:
+                symbol = self._valuation_normalize_peer_symbol(raw_symbol)
+                if symbol and symbol != ticker_text and symbol not in symbols:
+                    symbols.append(symbol)
+        return symbols
+
+    def _valuation_set_custom_peers_for_ticker(self, ticker: Any, symbols: list[str]) -> None:
+        ticker_text = self._valuation_normalize_peer_symbol(ticker)
+        if not ticker_text:
+            return
+        normalized = []
+        for raw_symbol in symbols:
+            symbol = self._valuation_normalize_peer_symbol(raw_symbol)
+            if symbol and symbol != ticker_text and symbol not in normalized:
+                normalized.append(symbol)
+        state = dict(getattr(self, 'valuation_page_state', load_valuation_page_settings()))
+        custom_peers_by_ticker = dict(state.get('custom_peers_by_ticker', {}))
+        if normalized:
+            custom_peers_by_ticker[ticker_text] = normalized
+        else:
+            custom_peers_by_ticker.pop(ticker_text, None)
+        state['custom_peers_by_ticker'] = custom_peers_by_ticker
+        self.valuation_page_state = state
+        self._valuation_sync_custom_peer_list(ticker_text)
+        self._valuation_persist_settings()
+
+    def _valuation_sync_custom_peer_list(self, ticker: Any=None) -> None:
+        if not hasattr(self, 'valuation_peer_list'):
+            return
+        self.valuation_peer_list.clear()
+        for symbol in self._valuation_custom_peers_for_ticker(ticker):
+            self.valuation_peer_list.addItem(QListWidgetItem(symbol))
+
+    def _valuation_reload_after_peer_change(self, ticker: str) -> None:
+        if not ticker:
+            return
+        self.valuation_ticker_input.setText(ticker)
+        if getattr(self, 'valuation_thread', None) is not None and self.valuation_thread.isRunning():
+            self.set_status_text(self.valuation_status_label, 'Peer list saved. Reload after the current valuation request finishes.', status='warning')
+            return
+        self.load_valuation_data(update_collection_info=False)
+
+    def _valuation_add_custom_peer(self) -> None:
+        ticker = self._valuation_current_ticker()
+        symbol = self._valuation_normalize_peer_symbol(self.valuation_peer_input.text() if hasattr(self, 'valuation_peer_input') else '')
+        if not ticker:
+            self.set_status_text(self.valuation_status_label, 'Load or enter a valuation ticker before adding a peer.', status='warning')
+            return
+        if not symbol:
+            self.set_status_text(self.valuation_status_label, 'Enter a peer ticker to add.', status='warning')
+            return
+        if symbol == ticker:
+            self.set_status_text(self.valuation_status_label, 'The loaded ticker is already included as the first peer row.', status='warning')
+            return
+        peers = self._valuation_custom_peers_for_ticker(ticker)
+        if symbol in peers:
+            self.set_status_text(self.valuation_status_label, f'{symbol} is already a custom peer for {ticker}.', status='warning')
+            return
+        peers.append(symbol)
+        if hasattr(self, 'valuation_peer_input'):
+            self.valuation_peer_input.clear()
+        self._valuation_set_custom_peers_for_ticker(ticker, peers)
+        self.set_status_text(self.valuation_status_label, f'Added {symbol} as a custom peer for {ticker}. Reloading...', status='positive')
+        self._valuation_reload_after_peer_change(ticker)
+
+    def _valuation_remove_custom_peer(self) -> None:
+        ticker = self._valuation_current_ticker()
+        if not ticker:
+            return
+        selected_items = self.valuation_peer_list.selectedItems() if hasattr(self, 'valuation_peer_list') else []
+        if not selected_items:
+            self.set_status_text(self.valuation_status_label, 'Select a custom peer to remove.', status='warning')
+            return
+        symbol = self._valuation_normalize_peer_symbol(selected_items[0].text())
+        peers = [peer for peer in self._valuation_custom_peers_for_ticker(ticker) if peer != symbol]
+        self._valuation_set_custom_peers_for_ticker(ticker, peers)
+        self.set_status_text(self.valuation_status_label, f'Removed {symbol} from custom peers for {ticker}. Reloading...', status='positive')
+        self._valuation_reload_after_peer_change(ticker)
+
+    def _valuation_on_peer_header_clicked(self, column: int) -> None:
+        if column not in self._VALUATION_PEER_SORT_FIELDS:
+            return
+        if getattr(self, '_valuation_peer_sort_column', None) == column:
+            self._valuation_peer_sort_descending = not bool(getattr(self, '_valuation_peer_sort_descending', False))
+        else:
+            self._valuation_peer_sort_column = column
+            self._valuation_peer_sort_descending = False
+        self._valuation_update_peer_sort_indicator()
+        self._valuation_populate_peer_table(
+            self._valuation_sorted_peer_rows(getattr(self, '_valuation_peer_rows', []))
+        )
+
+    def _valuation_update_peer_sort_indicator(self) -> None:
+        if not hasattr(self, 'valuation_peer_table'):
+            return
+        header = self.valuation_peer_table.horizontalHeader()
+        column = getattr(self, '_valuation_peer_sort_column', None)
+        if column is None:
+            header.setSortIndicatorShown(False)
+            return
+        order = Qt.SortOrder.DescendingOrder if bool(getattr(self, '_valuation_peer_sort_descending', False)) else Qt.SortOrder.AscendingOrder
+        header.setSortIndicator(column, order)
+        header.setSortIndicatorShown(True)
+
+    def _valuation_sorted_peer_rows(self, rows: list[Any]) -> list[Any]:
+        column = getattr(self, '_valuation_peer_sort_column', None)
+        field = self._VALUATION_PEER_SORT_FIELDS.get(column)
+        if field is None:
+            return list(rows)
+        valid_rows = []
+        missing_rows = []
+        numeric_sort = column in self._VALUATION_PEER_NUMERIC_SORT_COLUMNS
+        for row in rows:
+            if not isinstance(row, dict):
+                missing_rows.append(row)
+                continue
+            sort_value = self._valuation_peer_sort_value(row, column, field, numeric_sort)
+            if sort_value is None:
+                missing_rows.append(row)
+            else:
+                valid_rows.append((sort_value, row))
+        valid_rows.sort(key=lambda item: item[0], reverse=bool(getattr(self, '_valuation_peer_sort_descending', False)))
+        return [row for _sort_value, row in valid_rows] + missing_rows
+
+    def _valuation_peer_sort_value(self, row: dict[str, Any], column: int, field: str, numeric_sort: bool) -> Any:
+        if numeric_sort:
+            return self._valuation_float(row.get(field))
+        if column == 0:
+            ticker = str(row.get('ticker') or '').upper().strip()
+            company = str(row.get('company') or ticker).strip()
+            text = f'{company} ({ticker})' if ticker else company
+        elif column == 1:
+            text = str(row.get('source') or 'Auto')
+        else:
+            text = str(row.get(field) or '')
+        text = text.strip().casefold()
+        return text or None
+
+    def _valuation_populate_peer_table(self, rows: list[Any]) -> None:
+        self.valuation_peer_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            row_data = row if isinstance(row, dict) else {}
+            values = [
+                f"{row_data.get('company') or row_data.get('ticker')} ({row_data.get('ticker')})",
+                str(row_data.get('source') or 'Auto'),
+                self._valuation_compact_money(row_data.get('market_cap')),
+                self._valuation_pct(row_data.get('revenue_growth')),
+                self._valuation_pct(row_data.get('net_margin')),
+                self._valuation_ratio(row_data.get('pe')),
+                self._valuation_ratio(row_data.get('forward_pe')),
+                self._valuation_ratio(row_data.get('ev_ebitda')),
+                self._valuation_pct(row_data.get('fcf_yield')),
+            ]
+            for column, value in enumerate(values):
+                self.valuation_peer_table.setItem(row_index, column, self._valuation_item(value, align_right=column > 1))
+        self.valuation_peer_table.resizeRowsToContents()
+
     def _valuation_notes_for_ticker(self, ticker: str) -> dict[str, str]:
         notes = dict(getattr(self, 'valuation_page_state', {}).get('notes_by_ticker', {}).get(ticker, {}))
         return {
@@ -317,6 +550,7 @@ class ValuationMixin:
             'last_ticker': self._valuation_current_ticker() or 'NVDA',
             'assumptions': self._valuation_assumptions_from_controls() if hasattr(self, 'valuation_basis_type_combo') else getattr(self, 'valuation_page_state', {}).get('assumptions', DEFAULT_VALUATION_ASSUMPTIONS),
             'notes_by_ticker': dict(getattr(self, 'valuation_page_state', {}).get('notes_by_ticker', {})),
+            'custom_peers_by_ticker': dict(getattr(self, 'valuation_page_state', {}).get('custom_peers_by_ticker', {})),
         }
 
     def _valuation_persist_settings(self) -> None:
@@ -516,7 +750,7 @@ class ValuationMixin:
         self._valuation_request_contexts[request_id] = {'update_collection_info': bool(update_collection_info)}
         self.valuation_load_btn.setEnabled(False)
         self.set_status_text(self.valuation_status_label, f'Loading {ticker} valuation data...', status='warning')
-        worker = ValuationWorker(ticker)
+        worker = ValuationWorker(ticker, self._valuation_custom_peers_for_ticker(ticker))
         thread = QThread()
         self.valuation_worker = worker
         self.valuation_thread = thread
@@ -559,6 +793,7 @@ class ValuationMixin:
         self.valuation_current_data = payload
         ticker = str(payload.get('ticker') or self._valuation_current_ticker() or 'NVDA').upper().strip()
         self.valuation_ticker_input.setText(ticker)
+        self._valuation_sync_custom_peer_list(ticker)
         self._valuation_apply_payload_basis(payload)
         auto_applied = False
         if getattr(self, 'valuation_auto_fill_toggle', None) is not None and self.valuation_auto_fill_toggle.isChecked():
@@ -577,7 +812,12 @@ class ValuationMixin:
         self.valuation_load_btn.setEnabled(True)
         if update_collection_info:
             self._set_data_collection_info(['yfinance'])
-        self.set_status_text(self.valuation_status_label, status_text or f'Loaded valuation data for {ticker}.', status='positive')
+        peer_warnings = [str(message) for message in list(payload.get('peer_warnings', []) or []) if str(message or '').strip()]
+        if peer_warnings and not status_text:
+            warning_text = f'Loaded valuation data for {ticker}. ' + ' '.join(peer_warnings[:2])
+            self.set_status_text(self.valuation_status_label, warning_text, status='warning')
+        else:
+            self.set_status_text(self.valuation_status_label, status_text or f'Loaded valuation data for {ticker}.', status='positive')
         self._valuation_persist_settings()
         self._valuation_save_session_snapshot()
 
@@ -722,21 +962,9 @@ class ValuationMixin:
 
     def _valuation_render_peer_table(self, payload: dict[str, Any]) -> None:
         rows = list(payload.get('peer_rows', []) or [])
-        self.valuation_peer_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            values = [
-                f"{row.get('company') or row.get('ticker')} ({row.get('ticker')})",
-                self._valuation_compact_money(row.get('market_cap')),
-                self._valuation_pct(row.get('revenue_growth')),
-                self._valuation_pct(row.get('net_margin')),
-                self._valuation_ratio(row.get('pe')),
-                self._valuation_ratio(row.get('forward_pe')),
-                self._valuation_ratio(row.get('ev_ebitda')),
-                self._valuation_pct(row.get('fcf_yield')),
-            ]
-            for column, value in enumerate(values):
-                self.valuation_peer_table.setItem(row_index, column, self._valuation_item(value, align_right=column > 0))
-        self.valuation_peer_table.resizeRowsToContents()
+        self._valuation_peer_rows = rows
+        self._valuation_update_peer_sort_indicator()
+        self._valuation_populate_peer_table(self._valuation_sorted_peer_rows(rows))
 
     def _valuation_render_risk_table(self, payload: dict[str, Any]) -> None:
         metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
@@ -822,6 +1050,7 @@ class ValuationMixin:
         ticker = str(payload.get('ticker', '') or '').upper().strip()
         if ticker:
             self.valuation_ticker_input.setText(ticker)
+            self._valuation_sync_custom_peer_list(ticker)
         assumptions = payload.get('assumptions')
         if isinstance(assumptions, dict):
             self._valuation_apply_assumptions_to_controls(assumptions)

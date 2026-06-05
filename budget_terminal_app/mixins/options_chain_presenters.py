@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 from typing import Any, Callable
 
 from budget_terminal_app.table_cells import TableCell, TableRow
@@ -70,12 +71,100 @@ def _format_volume(value: Any, *, pd_module: Any = None) -> str:
         return str(value)
 
 
+def _numeric_sort_value(value: Any, *, pd_module: Any = None) -> float | None:
+    if _is_missing(value, pd_module):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if _is_missing(numeric, pd_module) or not math.isfinite(numeric):
+        return None
+    return numeric
+
+
 def _option_type_foreground(option_type: str, *, positive_color: str, negative_color: str) -> str | None:
     if option_type == "Call":
         return positive_color
     if option_type == "Put":
         return negative_color
     return None
+
+
+def _ranked_numeric_indexes(
+    records: list[Any],
+    key: str,
+    *,
+    descending: bool,
+    excluded_indexes: set[int] | None = None,
+    pd_module: Any = None,
+) -> list[int]:
+    excluded = set(excluded_indexes or set())
+    ranked_values = []
+    for row_index, opt in enumerate(records):
+        if row_index in excluded or not isinstance(opt, dict):
+            continue
+        value = opt.get(key)
+        if _is_missing(value, pd_module):
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if _is_missing(numeric_value, pd_module) or not math.isfinite(numeric_value):
+            continue
+        ranked_values.append((row_index, numeric_value))
+
+    ranked_values.sort(key=lambda item: item[1], reverse=descending)
+    return [row_index for row_index, _value in ranked_values]
+
+
+def _summary_cell_backgrounds(
+    records: list[Any],
+    *,
+    price_highlight_backgrounds: tuple[str, ...],
+    low_price_highlight_backgrounds: tuple[str, ...],
+    top_volume_highlight_backgrounds: tuple[str, ...],
+    low_volume_highlight_backgrounds: tuple[str, ...],
+    pd_module: Any = None,
+) -> list[dict[str, str]]:
+    backgrounds: list[dict[str, str]] = [{} for _record in records]
+    price_backgrounds = tuple(price_highlight_backgrounds or ())
+    low_price_backgrounds = tuple(low_price_highlight_backgrounds or ())
+    top_volume_backgrounds = tuple(top_volume_highlight_backgrounds or ())
+    low_volume_backgrounds = tuple(low_volume_highlight_backgrounds or ())
+
+    top_price_indexes = _ranked_numeric_indexes(records, "lastPrice", descending=True, pd_module=pd_module)[:len(price_backgrounds)]
+    top_price_index_set = set(top_price_indexes)
+    low_price_indexes = _ranked_numeric_indexes(
+        records,
+        "lastPrice",
+        descending=False,
+        excluded_indexes=top_price_index_set,
+        pd_module=pd_module,
+    )[:len(low_price_backgrounds)]
+
+    for rank_index, row_index in enumerate(top_price_indexes):
+        backgrounds[row_index]["price"] = price_backgrounds[rank_index]
+    for rank_index, row_index in enumerate(low_price_indexes):
+        backgrounds[row_index]["price"] = low_price_backgrounds[rank_index]
+
+    top_volume_indexes = _ranked_numeric_indexes(records, "volume", descending=True, pd_module=pd_module)[:len(top_volume_backgrounds)]
+    top_volume_index_set = set(top_volume_indexes)
+    low_volume_indexes = _ranked_numeric_indexes(
+        records,
+        "volume",
+        descending=False,
+        excluded_indexes=top_volume_index_set,
+        pd_module=pd_module,
+    )[:len(low_volume_backgrounds)]
+
+    for rank_index, row_index in enumerate(low_volume_indexes):
+        backgrounds[row_index]["volume"] = low_volume_backgrounds[rank_index]
+    for rank_index, row_index in enumerate(top_volume_indexes):
+        backgrounds[row_index]["volume"] = top_volume_backgrounds[rank_index]
+
+    return backgrounds
 
 
 def build_option_summary_rows(
@@ -85,13 +174,27 @@ def build_option_summary_rows(
     expiry: str = "",
     positive_color: str,
     negative_color: str,
+    price_highlight_backgrounds: tuple[str, ...] = (),
+    low_price_highlight_backgrounds: tuple[str, ...] = (),
+    top_volume_highlight_backgrounds: tuple[str, ...] = (),
+    low_volume_highlight_backgrounds: tuple[str, ...] = (),
     pd_module: Any = None,
 ) -> list[TableRow]:
     """Return six-column rows for top-volume and strike summary tables."""
     rows: list[TableRow] = []
-    for opt in list(records or []):
+    record_list = list(records or [])
+    backgrounds = _summary_cell_backgrounds(
+        record_list,
+        price_highlight_backgrounds=tuple(price_highlight_backgrounds or ()),
+        low_price_highlight_backgrounds=tuple(low_price_highlight_backgrounds or ()),
+        top_volume_highlight_backgrounds=tuple(top_volume_highlight_backgrounds or ()),
+        low_volume_highlight_backgrounds=tuple(low_volume_highlight_backgrounds or ()),
+        pd_module=pd_module,
+    )
+    for row_index, opt in enumerate(record_list):
         option_type = str(opt.get("type", "") or "")
         exp_value = str(opt.get("expiration", "") or expiry)
+        cell_backgrounds = backgrounds[row_index]
         rows.append(
             (
                 TableCell(str(opt.get("ticker", ticker) or ticker)),
@@ -103,10 +206,21 @@ def build_option_summary_rows(
                         negative_color=negative_color,
                     ),
                 ),
-                TableCell(_format_strike(opt.get("strike"), pd_module=pd_module)),
+                TableCell(
+                    _format_strike(opt.get("strike"), pd_module=pd_module),
+                    sort_value=_numeric_sort_value(opt.get("strike"), pd_module=pd_module),
+                ),
                 TableCell(format_top_volume_expiration(exp_value)),
-                TableCell(_format_price(opt.get("lastPrice"), pd_module=pd_module)),
-                TableCell(_format_volume(opt.get("volume", 0), pd_module=pd_module)),
+                TableCell(
+                    _format_price(opt.get("lastPrice"), pd_module=pd_module),
+                    background=cell_backgrounds.get("price"),
+                    sort_value=_numeric_sort_value(opt.get("lastPrice"), pd_module=pd_module),
+                ),
+                TableCell(
+                    _format_volume(opt.get("volume", 0), pd_module=pd_module),
+                    background=cell_backgrounds.get("volume"),
+                    sort_value=_numeric_sort_value(opt.get("volume", 0), pd_module=pd_module),
+                ),
             )
         )
     return rows

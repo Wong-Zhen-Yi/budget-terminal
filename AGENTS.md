@@ -7,7 +7,7 @@ Keep changes close to the subsystem they affect:
 - `budget_terminal_app/mixins/`: window, page, and feature behavior
 - `budget_terminal_app/workers/`: background data fetchers and signal-driven tasks
 - `budget_terminal_app/widgets/`: custom charts and visual widgets
-- `budget_terminal_app/themes/`: theme tokens and theme implementations
+- `budget_terminal_app/themes/`: default theme tokens and stylesheet helpers
 - `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
 
 Scripts under `scripts/` such as `test_options_fetch.py`, `debug_yf.py`, `inspect_cache.py`, and related helpers are ad hoc diagnostics and smoke tests. Packaging files live in `packaging/`. Build and release artifacts live in `build/`, `dist/`, and `release/` and should be treated as generated output unless a task explicitly targets packaging.

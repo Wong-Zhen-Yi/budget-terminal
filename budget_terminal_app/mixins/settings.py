@@ -6,16 +6,10 @@ from budget_terminal_app.paths import user_data_dir
 from budget_terminal_app.startup_integration import get_startup_registration_status, set_run_on_startup
 from budget_terminal_app.startup_metrics import clear_startup_metrics_history, load_startup_metrics_history
 from budget_terminal_app.workers import calendar as calendar_worker
+from budget_terminal_app.workers import earnings_calendar as earnings_calendar_worker
 from budget_terminal_app.workers.data import DataWorker
 from budget_terminal_app.workers.politics import CACHE_DIR as POLITICS_CACHE_DIR
 from budget_terminal_app.workers.youtube import YOUTUBE_CACHE_DIR
-
-
-class _NoWheelComboBox(QComboBox):
-    """Combo box that cannot be changed accidentally by mouse-wheel scrolling."""
-
-    def wheelEvent(self, event: Any) -> None:
-        event.ignore()
 
 
 class SettingsMixin:
@@ -24,6 +18,7 @@ class SettingsMixin:
     SETTINGS_CACHE_DIR_NAMES = (
         calendar_worker._ECONOMIC_EVENTS_CACHE_DIR,
         calendar_worker._MARKET_HOLIDAY_CACHE_DIR,
+        earnings_calendar_worker.EARNINGS_CALENDAR_CACHE_DIR,
         POLITICS_CACHE_DIR,
         YOUTUBE_CACHE_DIR,
     )
@@ -54,7 +49,7 @@ class SettingsMixin:
         self.settings_separator_lines = []
 
         header_frame = self._build_settings_header()
-        theme_box = self._build_settings_preferences_box()
+        preferences_box = self._build_settings_preferences_box()
         navigation_box = self._build_settings_navigation_box()
         actions_box = self._build_settings_user_data_box()
         data_health_box = self._build_settings_data_health_box()
@@ -62,7 +57,7 @@ class SettingsMixin:
         shortcuts_box = self._build_settings_shortcuts_box()
         startup_box = self._build_settings_startup_performance_box()
         content_grid = self._build_settings_content_grid(
-            theme_box,
+            preferences_box,
             navigation_box,
             actions_box,
             shortcuts_box,
@@ -100,67 +95,25 @@ class SettingsMixin:
         description = QLabel('Tune the app workspace, manage saved data, and inspect the current session without leaving Budget Terminal.')
         description.setWordWrap(True)
         self.set_theme_role(description, 'muted')
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(10)
-        title_row.addWidget(title, 1)
-        self.settings_header_badge = QLabel('Live theme switching enabled')
-        self.settings_header_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.set_theme_role(self.settings_header_badge, 'accent')
-        self.settings_header_badge.setMinimumHeight(24)
-        self.settings_header_badge.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        title_row.addWidget(self.settings_header_badge, 0, Qt.AlignmentFlag.AlignRight)
-        header_layout.addLayout(title_row)
+        header_layout.addWidget(title)
         header_layout.addWidget(description)
         return header_frame
 
     def _build_settings_preferences_box(self) -> QGroupBox:
-        """Build Settings controls for theme, clock, and Windows startup preferences."""
-        theme_box = QGroupBox('Preferences')
-        self.set_theme_role(theme_box, 'panel')
-        theme_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        theme_layout = QVBoxLayout(theme_box)
-        theme_layout.setContentsMargins(12, 12, 12, 10)
-        theme_layout.setSpacing(6)
-        self.settings_theme_combo = _NoWheelComboBox()
-        self.settings_theme_combo.setObjectName('settingsThemeCombo')
-        self.settings_theme_combo.setAccessibleName('Theme selector')
-        self.settings_theme_combo.setToolTip('Theme selector')
-        self.set_theme_role(self.settings_theme_combo, 'theme_selector')
-        self.settings_theme_combo.setMinimumHeight(30)
-        self.settings_theme_combo.setMinimumWidth(230)
-        self.settings_theme_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        available_themes = self.theme_manager.available_themes()
-        for theme_id, theme in available_themes.items():
-            self.settings_theme_combo.addItem(theme.name, theme_id)
-        longest_theme_name = max((len(theme.name) for theme in available_themes.values()), default=12)
-        self.settings_theme_combo.setMinimumContentsLength(longest_theme_name + 2)
-        self.settings_theme_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.settings_theme_combo.setMaxVisibleItems(max(4, len(available_themes)))
-        theme_menu = self.settings_theme_combo.view()
-        self.set_theme_role(theme_menu, 'theme_menu')
-        theme_menu.setMinimumWidth(max(260, longest_theme_name * 10 + 88))
-        theme_menu.setTextElideMode(Qt.TextElideMode.ElideNone)
-        theme_menu.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        if hasattr(theme_menu, 'setUniformItemSizes'):
-            theme_menu.setUniformItemSizes(True)
-        self.settings_theme_combo.setEnabled(len(available_themes) > 1)
-        current_index = self.settings_theme_combo.findData(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id))
-        if current_index >= 0:
-            self.settings_theme_combo.setCurrentIndex(current_index)
-        self.settings_theme_combo.currentIndexChanged.connect(self._on_theme_selected)
-        self.settings_theme_preview = QLabel(self.theme_id_to_name(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id)))
-        self.set_theme_role(self.settings_theme_preview, 'theme_preview')
-        self.settings_theme_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.settings_theme_preview.setMinimumHeight(28)
-        self.settings_theme_preview.setMinimumWidth(150)
-        self.settings_timezone_combo = QComboBox()
-        self.settings_timezone_combo.setMinimumHeight(28)
-        self.settings_timezone_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        for name, _ in self._tz_choices:
-            self.settings_timezone_combo.addItem(name)
-        self.settings_timezone_combo.setCurrentIndex(self._current_clock_timezone_index())
-        self.settings_timezone_combo.currentIndexChanged.connect(self._on_settings_timezone_changed)
+        """Build Settings controls for clock and Windows startup preferences."""
+        preferences_box = QGroupBox('Preferences')
+        self.set_theme_role(preferences_box, 'panel')
+        preferences_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        preferences_layout = QVBoxLayout(preferences_box)
+        preferences_layout.setContentsMargins(12, 12, 12, 10)
+        preferences_layout.setSpacing(6)
+        self.settings_clock_country_combo = QComboBox()
+        self.settings_clock_country_combo.setMinimumHeight(28)
+        self.settings_clock_country_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for choice in self._clock_country_choices:
+            self.settings_clock_country_combo.addItem(str(choice.get('name', '')), str(choice.get('code', '')))
+        self.settings_clock_country_combo.setCurrentIndex(self._current_clock_country_index())
+        self.settings_clock_country_combo.currentIndexChanged.connect(self._on_settings_clock_country_changed)
         self.settings_time_format_checkbox = QCheckBox('Use 12-hour time in the top-bar clock')
         self.settings_time_format_checkbox.setChecked(bool(getattr(self, '_time_12h', True)))
         self.settings_time_format_checkbox.toggled.connect(lambda checked: self._toggle_time_format() if bool(checked) != bool(getattr(self, '_time_12h', False)) else None)
@@ -169,23 +122,14 @@ class SettingsMixin:
         self.settings_startup_hint = QLabel('Checking startup registration...')
         self.settings_startup_hint.setWordWrap(True)
         self.set_theme_role(self.settings_startup_hint, 'muted')
-        theme_layout.addWidget(self._settings_section_header('Appearance', 'Choose the visual theme used across charts, tables, and controls.'))
-        theme_row_controls = self._settings_transparent_widget()
-        theme_row_layout = QHBoxLayout(theme_row_controls)
-        theme_row_layout.setContentsMargins(0, 0, 0, 0)
-        theme_row_layout.setSpacing(8)
-        theme_row_layout.addWidget(self.settings_theme_combo, 1)
-        theme_row_layout.addWidget(self.settings_theme_preview)
-        theme_layout.addWidget(theme_row_controls)
-        theme_layout.addWidget(self._settings_separator())
-        theme_layout.addWidget(self._settings_section_header('Clock', 'Set the top-bar timezone and display format.'))
-        theme_layout.addWidget(self.settings_timezone_combo)
-        theme_layout.addWidget(self.settings_time_format_checkbox)
-        theme_layout.addWidget(self._settings_separator())
-        theme_layout.addWidget(self._settings_section_header('Windows Startup', 'Control whether the packaged app starts when you sign in.'))
-        theme_layout.addWidget(self.settings_startup_checkbox)
-        theme_layout.addWidget(self.settings_startup_hint)
-        return theme_box
+        preferences_layout.addWidget(self._settings_section_header('Clock', 'Set the top-bar market country and display format.'))
+        preferences_layout.addWidget(self.settings_clock_country_combo)
+        preferences_layout.addWidget(self.settings_time_format_checkbox)
+        preferences_layout.addWidget(self._settings_separator())
+        preferences_layout.addWidget(self._settings_section_header('Windows Startup', 'Control whether the packaged app starts when you sign in.'))
+        preferences_layout.addWidget(self.settings_startup_checkbox)
+        preferences_layout.addWidget(self.settings_startup_hint)
+        return preferences_box
 
     def _settings_action_button(self, text: str, variant: str, slot: Any) -> QPushButton:
         """Create a Settings action button with the standard height and variant."""
@@ -404,7 +348,7 @@ class SettingsMixin:
 
     def _build_settings_content_grid(
         self,
-        theme_box: QGroupBox,
+        preferences_box: QGroupBox,
         navigation_box: QGroupBox,
         actions_box: QGroupBox,
         shortcuts_box: QGroupBox,
@@ -416,7 +360,7 @@ class SettingsMixin:
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(4)
-        content_layout.addWidget(theme_box)
+        content_layout.addWidget(preferences_box)
         content_layout.addWidget(navigation_box)
         content_layout.addWidget(actions_box)
         content_layout.addWidget(shortcuts_box)
@@ -828,28 +772,9 @@ class SettingsMixin:
         self._refresh_startup_performance_views()
         self._set_settings_status('Startup history cleared.', 'positive')
 
-    def _on_theme_selected(self, index: int) -> None:
-        """Switch themes immediately from the Settings page."""
-        if index < 0:
-            return
-        theme_id = self.settings_theme_combo.itemData(index)
-        if not theme_id:
-            return
-        self.apply_theme_selection(str(theme_id))
-
-    def _apply_settings_theme(self) -> None:
+    def _apply_settings_page_theme(self) -> None:
         """Refresh Settings-page theme-dependent widgets."""
         logger.info('Applying Settings page theme for %s.', self.theme().name)
-        if hasattr(self, 'settings_theme_preview'):
-            self.settings_theme_preview.setText(self.theme().name)
-        if hasattr(self, 'settings_header_badge'):
-            self.settings_header_badge.setText(f'Active Theme: {self.theme().name}')
-        if hasattr(self, 'settings_theme_combo'):
-            current_index = self.settings_theme_combo.findData(getattr(self, 'current_theme_id', self.theme_manager.current_theme_id))
-            if current_index >= 0 and current_index != self.settings_theme_combo.currentIndex():
-                self.settings_theme_combo.blockSignals(True)
-                self.settings_theme_combo.setCurrentIndex(current_index)
-                self.settings_theme_combo.blockSignals(False)
         if hasattr(self, 'settings_status_label'):
             self.set_status_text(self.settings_status_label, self.settings_status_label.text(), status=self.settings_status_label.property('bt_status') or 'muted')
         if hasattr(self, 'settings_data_health_summary_label'):
@@ -1069,6 +994,8 @@ class SettingsMixin:
         chart_page_state = dict(self.chart_page_state)
         self.backtest_page_state = save_backtest_page_settings(payload.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)) if isinstance(payload, dict) else save_backtest_page_settings(DEFAULT_BACKTEST_PAGE_SETTINGS)
         backtest_page_state = dict(self.backtest_page_state)
+        self.global_page_state = save_global_page_settings(payload.get('global_page', DEFAULT_GLOBAL_PAGE_SETTINGS)) if isinstance(payload, dict) else save_global_page_settings(DEFAULT_GLOBAL_PAGE_SETTINGS)
+        global_page_state = dict(self.global_page_state)
         self.multi_charts_state = save_multi_charts_settings(payload.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)) if isinstance(payload, dict) else save_multi_charts_settings(DEFAULT_MULTI_CHARTS_SETTINGS)
         multi_charts_state = dict(self.multi_charts_state)
         self.p10_symbol = str(chart_page_state.get('symbol', 'SPY') or 'SPY').upper()
@@ -1109,6 +1036,10 @@ class SettingsMixin:
             self._p25_populate_table(self.p25_rows)
             self._p25_update_weight_total()
             self._p25_update_button_styles()
+        if hasattr(self, 'p26_table'):
+            self.p26_interval_label = str(global_page_state.get('interval_label', '1D') or '1D').upper().strip()
+            self._p26_update_button_styles()
+            self._p26_render_payload()
         if hasattr(self, '_p10_compare_target_preset_name'):
             self._p10_compare_target_preset_name = None
         self.dashboard_chart_state = save_dashboard_chart_settings(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)) if isinstance(payload, dict) else save_dashboard_chart_settings(DEFAULT_DASHBOARD_CHART_SETTINGS)
@@ -1362,6 +1293,10 @@ class SettingsMixin:
             calendar_worker._ECONOMIC_EVENTS_MEMORY_CACHE.clear()
         with calendar_worker._MARKET_HOLIDAY_CACHE_LOCK:
             calendar_worker._MARKET_HOLIDAY_MEMORY_CACHE.clear()
+        with earnings_calendar_worker._EARNINGS_MEMORY_CACHE_LOCK:
+            earnings_calendar_worker._EARNINGS_MEMORY_CACHE.clear()
+        with earnings_calendar_worker._SYMBOL_UNIVERSE_MEMORY_CACHE_LOCK:
+            earnings_calendar_worker._SYMBOL_UNIVERSE_MEMORY_CACHE = None
 
     def _settings_clear_runtime_cache_state(self) -> None:
         """Reset in-memory caches and loaded market payloads without touching saved user data."""

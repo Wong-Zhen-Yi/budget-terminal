@@ -91,7 +91,28 @@ class WindowSetupMixin:
         22: 'Valuation',
         23: 'Institutions',
         24: 'Backtest',
+        25: 'Global',
     }
+
+    @staticmethod
+    def _configure_dashboard_news_table(table: Any) -> None:
+        """Configure the compact Dashboard live news table."""
+        table.setHorizontalHeaderLabels(['Headline', 'Ticker', 'Source', 'Time'])
+        table.setMinimumWidth(0)
+        table.horizontalHeader().setSectionsMovable(True)
+        table.horizontalHeader().setMinimumHeight(28)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for index in range(1, 4):
+            table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+        table.setColumnHidden(1, False)
+        table.setColumnHidden(2, True)
+        table.setColumnHidden(3, True)
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        table.setProperty('bt_full_headlines', True)
+        table.setProperty('bt_full_headlines_max_height', 0)
+        table.verticalHeader().setDefaultSectionSize(24)
+        table.setMaximumHeight(150)
 
     def init_ui(self) -> None:
         """Initialize ui."""
@@ -130,6 +151,8 @@ class WindowSetupMixin:
         self.btn_page1 = QPushButton('Dashboard')
         self.btn_page1.setCheckable(True)
         self.btn_page1.setChecked(True)
+        self.btn_page26 = QPushButton('Global')
+        self.btn_page26.setCheckable(True)
         self.btn_page2 = QPushButton('Fundamentals')
         self.btn_page2.setCheckable(True)
         self.btn_page3 = QPushButton('News')
@@ -180,29 +203,30 @@ class WindowSetupMixin:
         self.btn_page21.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
+            self.btn_page26,
             self.btn_page4,
             self.btn_page6,
-            self.btn_page7,
             self.btn_page20,
             self.btn_page3,
-            self.btn_page8,
-            self.btn_page17,
+            self.btn_page5,
             self.btn_page12,
             self.btn_page23,
             self.btn_page2,
             self.btn_page10,
-            self.btn_page25,
-            self.btn_page5,
-            self.btn_page13,
             self.btn_page14,
+            self.btn_page17,
+            self.btn_page8,
+            self.btn_page13,
             self.btn_page19,
             self.btn_page15,
-            self.btn_page22,
+            self.btn_page7,
+            self.btn_page21,
             self.btn_page24,
             self.btn_page16,
             self.btn_page18,
-            self.btn_page21,
+            self.btn_page25,
             self.btn_page9,
+            self.btn_page22,
         ]
         self.top_refresh_btn = QPushButton('Reload (F5)')
         self.top_refresh_btn.setToolTip('Reload the current page (F5)')
@@ -286,7 +310,8 @@ class WindowSetupMixin:
         self._tab_picker_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._tab_picker_shortcut.activated.connect(self._handle_tab_picker_shortcut)
         self._tz_choices = TIMEZONE_CHOICES
-        self._clock_tz_index = 0
+        self._clock_country_choices = CLOCK_COUNTRY_CHOICES
+        self._clock_country_code = load_clock_country_code()
         self._time_12h = load_time_format()
         self.top_bar.addWidget(self.time_label)
         self.top_bar.addSpacing(8)
@@ -543,18 +568,7 @@ class WindowSetupMixin:
         self.target_table.setAlternatingRowColors(True)
         self.target_table.setMaximumHeight(150)
         self.news_table = QTableWidget(0, 4)
-        self.news_table.setHorizontalHeaderLabels(['Headline', 'Ticker', 'Source', 'Time'])
-        self.news_table.setMinimumWidth(0)
-        self.news_table.horizontalHeader().setSectionsMovable(True)
-        self.news_table.horizontalHeader().setMinimumHeight(28)
-        self.news_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for index in range(1, 4):
-            self.news_table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
-        self.news_table.setColumnHidden(1, True)
-        self.news_table.setColumnHidden(2, True)
-        self.news_table.setColumnHidden(3, True)
-        self.news_table.verticalHeader().setDefaultSectionSize(24)
-        self.news_table.setMaximumHeight(150)
+        self._configure_dashboard_news_table(self.news_table)
         self.news_table.itemClicked.connect(self.open_news_link)
         portfolio_box = QFrame()
         portfolio_box.setMinimumWidth(0)
@@ -850,7 +864,7 @@ class WindowSetupMixin:
             {'index': 14, 'page_attr': 'page19', 'init_method': 'init_page19', 'theme_hook': '_apply_crypto_theme'},
             {'index': 15, 'page_attr': 'page15', 'init_method': 'init_page15', 'theme_hook': '_apply_politics_theme'},
             {'index': 16, 'page_attr': 'page16', 'init_method': 'init_page16', 'theme_hook': '_apply_youtube_theme'},
-            {'index': 17, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_theme'},
+            {'index': 17, 'page_attr': 'page9', 'init_method': 'init_page9', 'theme_hook': '_apply_settings_page_theme'},
             {'index': 18, 'page_attr': 'page18', 'init_method': 'init_page18', 'theme_hook': '_apply_random_recommender_theme'},
             {'index': 19, 'page_attr': 'page20', 'init_method': 'init_page20'},
             {'index': 20, 'page_attr': 'page21', 'init_method': 'init_page21', 'theme_hook': '_apply_ipo_theme'},
@@ -858,6 +872,7 @@ class WindowSetupMixin:
             {'index': 22, 'page_attr': 'page23', 'init_method': 'init_page23', 'theme_hook': '_apply_valuation_theme'},
             {'index': 23, 'page_attr': 'page24', 'init_method': 'init_page24', 'theme_hook': '_apply_institutions_theme'},
             {'index': 24, 'page_attr': 'page25', 'init_method': 'init_page25', 'theme_hook': '_apply_backtest_theme'},
+            {'index': 25, 'page_attr': 'page26', 'init_method': 'init_page26', 'theme_hook': '_apply_global_page_theme'},
         )
 
     def _register_lazy_pages(self) -> None:

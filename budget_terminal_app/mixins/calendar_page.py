@@ -10,9 +10,18 @@ from budget_terminal_app.workers.calendar import (
     _get_market_holiday_events,
     _market_holidays_cached_for_year,
 )
+from budget_terminal_app.workers.earnings_calendar import (
+    EARNINGS_CALENDAR_CACHE_TTL_SECONDS,
+    EARNINGS_CALENDAR_SOURCE_NAME,
+    EARNINGS_DEFAULT_RANGE_KEY,
+    EarningsCalendarService,
+    EarningsCalendarWorker,
+)
 
 _P7_SPLITTER_CONFIG = user_data_path('p7_splitter.json')
 _P7_SPLITTER_PANE_COUNT = 5
+_P7_EARNINGS_WEEKDAY_LABELS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri')
+_P7_EARNINGS_VISIBLE_DAY_COUNT = len(_P7_EARNINGS_WEEKDAY_LABELS)
 
 class CalendarPageMixin:
     def _p7_calendar_display_flags(self) -> Any:
@@ -331,7 +340,17 @@ class CalendarPageMixin:
 
     def init_page7(self) -> None:
         """Build the Calendar page UI."""
-        layout = QVBoxLayout(self.page7)
+        page_layout = QVBoxLayout(self.page7)
+        page_layout.setContentsMargins(8, 6, 8, 6)
+        page_layout.setSpacing(4)
+        self.p7_tabs = QTabWidget()
+        self.p7_calendar_tab = QWidget()
+        self.p7_earnings_tab = QWidget()
+        self.p7_tabs.addTab(self.p7_calendar_tab, 'Calendar')
+        self.p7_tabs.addTab(self.p7_earnings_tab, 'Earnings')
+        self.p7_tabs.currentChanged.connect(self._p7_on_tab_changed)
+        page_layout.addWidget(self.p7_tabs)
+        layout = QVBoxLayout(self.p7_calendar_tab)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(4)
         header = QHBoxLayout()
@@ -347,6 +366,9 @@ class CalendarPageMixin:
         self.p7_next_btn = QPushButton('▶')
         self.p7_next_btn.setFixedSize(30, 26)
         self.p7_next_btn.clicked.connect(partial(self._p7_change_month, 1))
+        self.p7_today_btn = QPushButton('Jump to present')
+        self.p7_today_btn.setFixedHeight(26)
+        self.p7_today_btn.clicked.connect(self._p7_jump_to_present)
         self.p7_tz_combo = QComboBox()
         self.p7_tz_combo.setFixedWidth(120)
         self.p7_tz_combo.setStyleSheet('QComboBox { font-size: 11px; }')
@@ -356,6 +378,7 @@ class CalendarPageMixin:
         header.addWidget(self.p7_prev_btn)
         header.addWidget(self.p7_month_label)
         header.addWidget(self.p7_next_btn)
+        header.addWidget(self.p7_today_btn)
         header.addSpacing(12)
         header.addWidget(QLabel('Ref TZ'))
         header.addWidget(self.p7_tz_combo)
@@ -526,7 +549,757 @@ class CalendarPageMixin:
         self._p7_market_holiday_fetching = False
         self._p7_market_holiday_force_refresh = False
         self._p7_market_holiday_pending_years = []
+        self._p7_earnings_rows: list[dict[str, Any]] = []
+        self._p7_earnings_fetching = False
+        self._p7_earnings_loaded = False
+        self._p7_earnings_worker = None
+        self._p7_earnings_source = EARNINGS_CALENDAR_SOURCE_NAME
+        self._p7_earnings_fetched_at = ''
+        self._p7_earnings_request: dict[str, Any] = {}
+        self._p7_earnings_panel_widgets: list[Any] = []
+        self._p7_earnings_week_start = self._p7_start_of_week(today)
+        self._p7_build_earnings_tab()
+        self._p7_restore_cached_earnings()
         self._p7_apply_detail_table_widths()
+        self._apply_calendar_theme()
+
+    def _p7_build_earnings_tab(self) -> None:
+        """Build the all-market earnings calendar subpage."""
+        layout = QVBoxLayout(self.p7_earnings_tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        toolbar = QFrame()
+        self.set_theme_role(toolbar, 'panel')
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(12, 8, 12, 8)
+        toolbar_layout.setSpacing(8)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(2)
+        title = QLabel('Earnings')
+        self.set_theme_role(title, 'section_title')
+        self.p7_earnings_status_lbl = QLabel('Loading cached earnings data...')
+        self.set_theme_role(self.p7_earnings_status_lbl, 'status_muted')
+        title_col.addWidget(title)
+        title_col.addWidget(self.p7_earnings_status_lbl)
+        toolbar_layout.addLayout(title_col)
+        toolbar_layout.addStretch()
+
+        self.p7_earnings_prev_week_btn = QPushButton('<')
+        self.p7_earnings_prev_week_btn.setFixedSize(30, 28)
+        self.p7_earnings_prev_week_btn.clicked.connect(lambda *_: self._p7_change_earnings_week(-1))
+        toolbar_layout.addWidget(self.p7_earnings_prev_week_btn)
+        self.p7_earnings_week_label = QLabel('')
+        self.p7_earnings_week_label.setMinimumWidth(190)
+        self.p7_earnings_week_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(self.p7_earnings_week_label, 'status_muted')
+        toolbar_layout.addWidget(self.p7_earnings_week_label)
+        self.p7_earnings_next_week_btn = QPushButton('>')
+        self.p7_earnings_next_week_btn.setFixedSize(30, 28)
+        self.p7_earnings_next_week_btn.clicked.connect(lambda *_: self._p7_change_earnings_week(1))
+        toolbar_layout.addWidget(self.p7_earnings_next_week_btn)
+        self.p7_earnings_current_week_btn = QPushButton('Current week')
+        self.p7_earnings_current_week_btn.setMinimumHeight(28)
+        self.p7_earnings_current_week_btn.clicked.connect(self._p7_jump_earnings_current_week)
+        toolbar_layout.addWidget(self.p7_earnings_current_week_btn)
+        toolbar_layout.addSpacing(8)
+
+        toolbar_layout.addWidget(QLabel('Range'))
+        self.p7_earnings_range_combo = QComboBox()
+        self.p7_earnings_range_combo.addItem('Current + next 12 months', 'rolling')
+        self.p7_earnings_range_combo.addItem('Selected year', 'year')
+        self.p7_earnings_range_combo.setMinimumWidth(180)
+        self.p7_earnings_range_combo.currentIndexChanged.connect(self._p7_on_earnings_range_changed)
+        toolbar_layout.addWidget(self.p7_earnings_range_combo)
+
+        toolbar_layout.addWidget(QLabel('Year'))
+        self.p7_earnings_year_spin = QSpinBox()
+        current_year = datetime.date.today().year
+        self.p7_earnings_year_spin.setRange(1990, current_year + 10)
+        self.p7_earnings_year_spin.setValue(current_year)
+        self.p7_earnings_year_spin.setEnabled(False)
+        self.p7_earnings_year_spin.valueChanged.connect(self._p7_on_earnings_range_changed)
+        toolbar_layout.addWidget(self.p7_earnings_year_spin)
+
+        self.p7_earnings_refresh_btn = QPushButton('Refresh')
+        self.set_theme_variant(self.p7_earnings_refresh_btn, 'accent')
+        self.p7_earnings_refresh_btn.clicked.connect(lambda *_: self._p7_refresh_earnings(force=True))
+        toolbar_layout.addWidget(self.p7_earnings_refresh_btn)
+        self.p7_earnings_export_llm_btn = QPushButton('Export to LLM')
+        self.p7_earnings_export_llm_btn.setMinimumHeight(28)
+        self.p7_earnings_export_llm_btn.clicked.connect(self._p7_export_earnings_week_for_llm)
+        toolbar_layout.addWidget(self.p7_earnings_export_llm_btn)
+        layout.addWidget(toolbar)
+        self._p7_earnings_panel_widgets.append(toolbar)
+
+        filter_bar = QFrame()
+        self.set_theme_role(filter_bar, 'panel')
+        filter_layout = QHBoxLayout(filter_bar)
+        filter_layout.setContentsMargins(12, 8, 12, 8)
+        filter_layout.setSpacing(8)
+
+        self.p7_earnings_search_input = QLineEdit()
+        self.p7_earnings_search_input.setPlaceholderText('Search symbol, company, or event')
+        self.p7_earnings_search_input.textChanged.connect(self._p7_render_earnings_rows)
+        filter_layout.addWidget(self.p7_earnings_search_input, 1)
+
+        self.p7_earnings_timing_combo = QComboBox()
+        self.p7_earnings_timing_combo.addItems(['All timing', 'BMO', 'AMC', 'TAS', 'TBD'])
+        self.p7_earnings_timing_combo.currentIndexChanged.connect(self._p7_render_earnings_rows)
+        filter_layout.addWidget(self.p7_earnings_timing_combo)
+
+        self.p7_earnings_changed_only_cb = QCheckBox('Changed dates only')
+        self.p7_earnings_changed_only_cb.toggled.connect(self._p7_render_earnings_rows)
+        filter_layout.addWidget(self.p7_earnings_changed_only_cb)
+
+        self.p7_earnings_cache_lbl = QLabel('Cache not loaded')
+        self.p7_earnings_cache_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.set_theme_role(self.p7_earnings_cache_lbl, 'status_muted')
+        filter_layout.addWidget(self.p7_earnings_cache_lbl)
+        layout.addWidget(filter_bar)
+        self._p7_earnings_panel_widgets.append(filter_bar)
+
+        week_panel = QFrame()
+        self.set_theme_role(week_panel, 'panel')
+        week_layout = QVBoxLayout(week_panel)
+        week_layout.setContentsMargins(8, 8, 8, 8)
+        week_layout.setSpacing(6)
+        week_header = QHBoxLayout()
+        week_title = QLabel('Weekly Earnings Calendar')
+        self.set_theme_role(week_title, 'section_title')
+        self.p7_earnings_count_lbl = QLabel('0 rows')
+        self.p7_earnings_count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.set_theme_role(self.p7_earnings_count_lbl, 'status_muted')
+        week_header.addWidget(week_title)
+        week_header.addStretch()
+        week_header.addWidget(self.p7_earnings_count_lbl)
+        week_layout.addLayout(week_header)
+
+        self.p7_earnings_week_grid = QGridLayout()
+        self.p7_earnings_week_grid.setSpacing(6)
+        self.p7_earnings_day_headers: list[QLabel] = []
+        self.p7_earnings_day_counts: list[QLabel] = []
+        self.p7_earnings_day_layouts: list[QVBoxLayout] = []
+        self.p7_earnings_day_empty_labels: list[QLabel] = []
+        self.p7_earnings_day_cards: list[list[Any]] = [[] for _ in range(_P7_EARNINGS_VISIBLE_DAY_COUNT)]
+        self.p7_earnings_day_card_symbols: list[list[str]] = [[] for _ in range(_P7_EARNINGS_VISIBLE_DAY_COUNT)]
+        for day_index in range(_P7_EARNINGS_VISIBLE_DAY_COUNT):
+            day_frame = QFrame()
+            day_frame.setObjectName(f'p7EarningsDay{day_index}')
+            day_frame.setStyleSheet(
+                'QFrame { background: #101827; border: 1px solid #27344a; border-radius: 6px; }'
+            )
+            day_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            day_layout = QVBoxLayout(day_frame)
+            day_layout.setContentsMargins(6, 6, 6, 6)
+            day_layout.setSpacing(5)
+
+            header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
+            header = QLabel(_P7_EARNINGS_WEEKDAY_LABELS[day_index])
+            header.setObjectName(f'p7EarningsDayHeader{day_index}')
+            header.setStyleSheet('font-size: 12px; font-weight: bold; color: #d6e0f0; border: none;')
+            count = QLabel('0')
+            count.setObjectName(f'p7EarningsDayCount{day_index}')
+            count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            count.setStyleSheet('font-size: 11px; color: #9aa4ad; border: none;')
+            header_row.addWidget(header)
+            header_row.addStretch()
+            header_row.addWidget(count)
+            day_layout.addLayout(header_row)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            content = QWidget()
+            content.setStyleSheet('background: transparent; border: none;')
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(5)
+            empty_label = QLabel('No earnings')
+            empty_label.setObjectName(f'p7EarningsEmptyDay{day_index}')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setStyleSheet('font-size: 11px; color: #667085; border: none; padding: 14px 2px;')
+            content_layout.addWidget(empty_label)
+            content_layout.addStretch()
+            scroll.setWidget(content)
+            day_layout.addWidget(scroll, 1)
+
+            self.p7_earnings_day_headers.append(header)
+            self.p7_earnings_day_counts.append(count)
+            self.p7_earnings_day_layouts.append(content_layout)
+            self.p7_earnings_day_empty_labels.append(empty_label)
+            self.p7_earnings_week_grid.addWidget(day_frame, 0, day_index)
+            self.p7_earnings_week_grid.setColumnStretch(day_index, 1)
+        week_layout.addLayout(self.p7_earnings_week_grid, 1)
+        layout.addWidget(week_panel, 1)
+        self._p7_earnings_panel_widgets.append(week_panel)
+
+    def _p7_on_tab_changed(self, index: Any) -> None:
+        """Start the all-market earnings load the first time the Earnings tab is opened."""
+        if not hasattr(self, 'p7_tabs') or self.p7_tabs.widget(int(index)) is not getattr(self, 'p7_earnings_tab', None):
+            return
+        if not getattr(self, '_p7_earnings_loaded', False) and not getattr(self, '_p7_earnings_fetching', False):
+            if not self._p7_restore_cached_earnings():
+                self._p7_refresh_earnings(force=False)
+
+    def _p7_current_earnings_range(self) -> tuple[datetime.date, datetime.date, str, str]:
+        """Return the selected earnings request range and cache key."""
+        mode = self.p7_earnings_range_combo.currentData() if hasattr(self, 'p7_earnings_range_combo') else 'rolling'
+        if mode == 'year':
+            year_value = int(self.p7_earnings_year_spin.value()) if hasattr(self, 'p7_earnings_year_spin') else datetime.date.today().year
+            start_date, end_date = EarningsCalendarService.year_date_range(year_value)
+            return start_date, end_date, f'year_{year_value}', str(year_value)
+        start_date, end_date = EarningsCalendarService.default_date_range()
+        return start_date, end_date, EARNINGS_DEFAULT_RANGE_KEY, 'Current + next 12 months'
+
+    def _p7_on_earnings_range_changed(self, *_: Any) -> None:
+        """Reload cached earnings when the selected range changes."""
+        if hasattr(self, 'p7_earnings_year_spin') and hasattr(self, 'p7_earnings_range_combo'):
+            self.p7_earnings_year_spin.setEnabled(self.p7_earnings_range_combo.currentData() == 'year')
+        if not hasattr(self, 'p7_earnings_week_grid'):
+            return
+        self._p7_clamp_earnings_week_to_range()
+        restored = self._p7_restore_cached_earnings()
+        if self._p7_earnings_tab_is_active() and not restored and not getattr(self, '_p7_earnings_fetching', False):
+            self._p7_refresh_earnings(force=False)
+
+    def _p7_earnings_tab_is_active(self) -> bool:
+        return (
+            hasattr(self, 'p7_tabs')
+            and hasattr(self, 'p7_earnings_tab')
+            and self.p7_tabs.currentWidget() is self.p7_earnings_tab
+        )
+
+    def _p7_restore_cached_earnings(self) -> bool:
+        """Load cached all-market earnings rows for the selected range without refreshing."""
+        if not hasattr(self, 'p7_earnings_week_grid'):
+            return False
+        start_date, end_date, cache_key, label = self._p7_current_earnings_range()
+        cached = EarningsCalendarService.load_cached_payload(
+            start_date=start_date,
+            end_date=end_date,
+            cache_key=cache_key,
+            allow_stale=True,
+        )
+        if not cached:
+            self._p7_earnings_loaded = False
+            self._p7_earnings_rows = []
+            self._p7_render_earnings_rows()
+            self._p7_set_earnings_status(f'No cached earnings data for {label}.', 'warning')
+            self._p7_set_earnings_cache_text('No cache loaded', 'warning')
+            return False
+        self._p7_apply_earnings_payload(cached, restored=True)
+        return bool(cached.get('rows'))
+
+    def _p7_refresh_earnings(self, *, force: bool = False) -> bool:
+        """Refresh all-market US-listed company earnings rows."""
+        if getattr(self, '_p7_earnings_fetching', False):
+            self._p7_set_earnings_status('Earnings refresh already running...', 'muted')
+            return False
+        start_date, end_date, cache_key, label = self._p7_current_earnings_range()
+        worker = EarningsCalendarWorker(
+            start_date=start_date,
+            end_date=end_date,
+            cache_key=cache_key,
+            force=force,
+        )
+        worker.error.connect(self._p7_on_earnings_error)
+        self._p7_earnings_request = {
+            'start_date': start_date,
+            'end_date': end_date,
+            'cache_key': cache_key,
+            'label': label,
+        }
+        self._p7_earnings_worker = worker
+        launched = self._launch_worker(worker, self._p7_on_earnings_ready, '_p7_earnings_fetching')
+        if launched:
+            self._p7_update_earnings_refresh_button_state()
+            self._p7_set_earnings_status(f'Refreshing earnings for {label}...', 'muted')
+            self._p7_set_earnings_cache_text('Refreshing...', 'muted')
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, f'Refreshing earnings for {label}...', status='muted')
+        return bool(launched)
+
+    def _p7_on_earnings_ready(self, payload: Any) -> None:
+        """Render all-market earnings rows returned by the worker."""
+        self._p7_earnings_fetching = False
+        self._p7_earnings_worker = None
+        self._p7_update_earnings_refresh_button_state()
+        self._p7_apply_earnings_payload(payload, restored=False)
+        row_count = len(getattr(self, '_p7_earnings_rows', []) or [])
+        if hasattr(self, 'status_bar'):
+            self.set_status_text(
+                self.status_bar,
+                f'Earnings calendar refreshed: {row_count} row(s).',
+                status='positive' if row_count else 'warning',
+            )
+
+    def _p7_on_earnings_error(self, message: Any) -> None:
+        """Display an earnings refresh error while preserving any stale cache."""
+        self._p7_earnings_fetching = False
+        self._p7_earnings_worker = None
+        self._p7_update_earnings_refresh_button_state()
+        text = str(message or 'Earnings calendar unavailable').strip()
+        request = getattr(self, '_p7_earnings_request', {}) if isinstance(getattr(self, '_p7_earnings_request', {}), dict) else {}
+        start_date = request.get('start_date')
+        end_date = request.get('end_date')
+        cache_key = str(request.get('cache_key') or EARNINGS_DEFAULT_RANGE_KEY)
+        if isinstance(start_date, datetime.date) and isinstance(end_date, datetime.date):
+            cached = EarningsCalendarService.load_cached_payload(
+                start_date=start_date,
+                end_date=end_date,
+                cache_key=cache_key,
+                allow_stale=True,
+            )
+        else:
+            cached = None
+        if cached and cached.get('rows'):
+            self._p7_apply_earnings_payload(cached, restored=True)
+            self._p7_set_earnings_status(f'Refresh failed; showing stale cache. {text}', 'warning')
+        else:
+            self._p7_set_earnings_status(f'Earnings refresh failed: {text}', 'negative')
+            self._p7_set_earnings_cache_text('Refresh failed', 'negative')
+        if hasattr(self, 'status_bar'):
+            self.set_status_text(self.status_bar, f'Earnings refresh failed: {text}', status='negative')
+
+    def _p7_apply_earnings_payload(self, payload: Any, *, restored: bool) -> None:
+        """Apply earnings cache/live payload to the Earnings weekly view."""
+        data = payload if isinstance(payload, dict) else {}
+        rows = [dict(row) for row in list(data.get('rows') or []) if isinstance(row, dict)]
+        self._p7_earnings_rows = rows
+        self._p7_earnings_loaded = True
+        self._p7_earnings_source = str(data.get('source') or EARNINGS_CALENDAR_SOURCE_NAME).strip()
+        self._p7_earnings_fetched_at = str(data.get('fetched_at') or '').strip()
+        self._p7_clamp_earnings_week_to_range()
+        self._p7_render_earnings_rows()
+
+        source = self._p7_earnings_source or EARNINGS_CALENDAR_SOURCE_NAME
+        start_text = str(data.get('start_date') or '')
+        end_text = str(data.get('end_date') or '')
+        range_text = f'{start_text} to {end_text}' if start_text and end_text else 'selected range'
+        fetched = self._p7_format_timestamp(self._p7_earnings_fetched_at)
+        from_cache = bool(data.get('from_cache')) or restored
+        stale = bool(data.get('stale'))
+        changed_count = sum(1 for row in rows if bool(row.get('changed_date')))
+        status = f'{len(rows)} earnings row(s) for {range_text} from {source}'
+        if changed_count:
+            status = f'{status}; {changed_count} changed date(s)'
+        if fetched:
+            status = f'{status}; fetched {fetched}'
+        if from_cache:
+            status = f'{status}; cache loaded'
+        if stale:
+            warning = str(data.get('warning') or '').strip()
+            status = f'{status}; refresh failed, stale cache shown'
+            if warning:
+                self.p7_earnings_status_lbl.setToolTip(warning)
+        else:
+            self.p7_earnings_status_lbl.setToolTip(status)
+        if not rows:
+            status = f'No earnings rows available for {range_text}.'
+        self._p7_set_earnings_status(status, 'warning' if stale or not rows else 'positive')
+        self._p7_set_earnings_cache_text(self._p7_earnings_cache_status_text(data), 'warning' if stale else 'muted')
+
+    def _p7_filtered_earnings_rows(self) -> list[dict[str, Any]]:
+        """Return earnings rows after visible filters are applied."""
+        rows = [dict(row) for row in getattr(self, '_p7_earnings_rows', []) or [] if isinstance(row, dict)]
+        search = str(self.p7_earnings_search_input.text() if hasattr(self, 'p7_earnings_search_input') else '').casefold().strip()
+        timing = str(self.p7_earnings_timing_combo.currentText() if hasattr(self, 'p7_earnings_timing_combo') else 'All timing').upper()
+        changed_only = bool(self.p7_earnings_changed_only_cb.isChecked()) if hasattr(self, 'p7_earnings_changed_only_cb') else False
+        if search:
+            rows = [
+                row for row in rows
+                if search in str(row.get('symbol') or '').casefold()
+                or search in str(row.get('company') or '').casefold()
+                or search in str(row.get('event_name') or '').casefold()
+            ]
+        if timing and timing != 'ALL TIMING':
+            rows = [row for row in rows if str(row.get('timing') or '').upper() == timing]
+        if changed_only:
+            rows = [row for row in rows if bool(row.get('changed_date'))]
+        return rows
+
+    def _p7_earnings_row_date(self, row: dict[str, Any]) -> datetime.date | None:
+        """Return the normalized date for one earnings row."""
+        try:
+            return datetime.date.fromisoformat(str(row.get('date') or '')[:10])
+        except ValueError:
+            return self._p7_normalize_event_date(row.get('date_display'))
+
+    @staticmethod
+    def _p7_earnings_market_cap_sort_key(row: dict[str, Any]) -> tuple[int, float, str, str]:
+        """Sort known market caps highest first, then fall back to time and symbol."""
+        try:
+            market_cap = float(row.get('market_cap_value'))
+        except (TypeError, ValueError):
+            market_cap = None
+        if market_cap is None or market_cap != market_cap:
+            return (1, 0.0, str(row.get('datetime_utc') or ''), str(row.get('symbol') or ''))
+        return (0, -market_cap, str(row.get('datetime_utc') or ''), str(row.get('symbol') or ''))
+
+    @staticmethod
+    def _p7_start_of_week(value: datetime.date) -> datetime.date:
+        """Return the Monday for the provided date."""
+        return value - datetime.timedelta(days=value.weekday())
+
+    def _p7_clamp_earnings_week_to_range(self) -> None:
+        """Keep the visible earnings week inside the selected request range."""
+        start_date, end_date, _cache_key, _label = self._p7_current_earnings_range()
+        week_start = getattr(self, '_p7_earnings_week_start', None)
+        if not isinstance(week_start, datetime.date):
+            week_start = self._p7_start_of_week(datetime.date.today())
+        start_limit = self._p7_start_of_week(start_date)
+        end_limit = self._p7_start_of_week(end_date)
+        if week_start < start_limit:
+            week_start = start_limit
+        if week_start > end_limit:
+            week_start = end_limit
+        self._p7_earnings_week_start = week_start
+
+    def _p7_change_earnings_week(self, delta_weeks: int) -> None:
+        """Move the Earnings weekly calendar by whole weeks."""
+        week_start = getattr(self, '_p7_earnings_week_start', None)
+        if not isinstance(week_start, datetime.date):
+            week_start = self._p7_start_of_week(datetime.date.today())
+        self._p7_earnings_week_start = week_start + datetime.timedelta(days=7 * int(delta_weeks or 0))
+        self._p7_clamp_earnings_week_to_range()
+        self._p7_render_earnings_rows()
+
+    def _p7_jump_earnings_current_week(self, *_: Any) -> None:
+        """Move the Earnings weekly calendar to the current week."""
+        self._p7_earnings_week_start = self._p7_start_of_week(datetime.date.today())
+        self._p7_clamp_earnings_week_to_range()
+        self._p7_render_earnings_rows()
+
+    def _p7_update_earnings_week_label(self) -> None:
+        """Refresh the visible week label and navigation enabled states."""
+        if not hasattr(self, 'p7_earnings_week_label'):
+            return
+        self._p7_clamp_earnings_week_to_range()
+        start_date, end_date, _cache_key, _label = self._p7_current_earnings_range()
+        week_start = self._p7_earnings_week_start
+        week_end = week_start + datetime.timedelta(days=_P7_EARNINGS_VISIBLE_DAY_COUNT - 1)
+        if week_start.year == week_end.year:
+            display = f'{week_start.strftime("%b %d")} - {week_end.strftime("%b %d, %Y")}'
+        else:
+            display = f'{week_start.strftime("%b %d, %Y")} - {week_end.strftime("%b %d, %Y")}'
+        self.p7_earnings_week_label.setText(display)
+        start_limit = self._p7_start_of_week(start_date)
+        end_limit = self._p7_start_of_week(end_date)
+        if hasattr(self, 'p7_earnings_prev_week_btn'):
+            self.p7_earnings_prev_week_btn.setEnabled(week_start > start_limit)
+        if hasattr(self, 'p7_earnings_next_week_btn'):
+            self.p7_earnings_next_week_btn.setEnabled(week_start < end_limit)
+
+    def _p7_visible_earnings_week_rows(self) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
+        """Return filtered earnings rows grouped into the visible Monday-Friday week."""
+        self._p7_clamp_earnings_week_to_range()
+        rows = self._p7_filtered_earnings_rows()
+        week_start = self._p7_earnings_week_start
+        week_end = week_start + datetime.timedelta(days=_P7_EARNINGS_VISIBLE_DAY_COUNT - 1)
+        rows_by_day: list[list[dict[str, Any]]] = [[] for _ in range(_P7_EARNINGS_VISIBLE_DAY_COUNT)]
+        for row in rows:
+            row_date = self._p7_earnings_row_date(row)
+            if row_date is None or row_date < week_start or row_date > week_end:
+                continue
+            day_index = (row_date - week_start).days
+            if 0 <= day_index < _P7_EARNINGS_VISIBLE_DAY_COUNT:
+                rows_by_day[day_index].append(row)
+        for day_rows in rows_by_day:
+            day_rows.sort(key=self._p7_earnings_market_cap_sort_key)
+        return rows_by_day, rows
+
+    def _p7_clear_earnings_day_layout(self, day_index: int) -> None:
+        """Remove existing event cards from one earnings day column."""
+        if not hasattr(self, 'p7_earnings_day_layouts'):
+            return
+        layout = self.p7_earnings_day_layouts[day_index]
+        empty_label = self.p7_earnings_day_empty_labels[day_index]
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget is not empty_label:
+                widget.deleteLater()
+
+    def _p7_create_earnings_card(self, row: dict[str, Any]) -> QFrame:
+        """Create one compact weekly-calendar earnings event card."""
+        symbol = str(row.get('symbol') or '--').upper()
+        company = str(row.get('company') or '--')
+        timing = str(row.get('timing') or '--')
+        time_display = str(row.get('time_display') or '--')
+        event_name = str(row.get('event_name') or '--')
+        status = str(row.get('status') or '--')
+        eps_est = str(row.get('eps_estimate') or '--')
+        reported = str(row.get('reported_eps') or '--')
+        surprise = str(row.get('surprise_pct') or '--')
+        market_cap = str(row.get('market_cap') or '--')
+        changed = bool(row.get('changed_date'))
+
+        card = QFrame()
+        card.setObjectName(f'p7EarningsCard_{symbol}')
+        card.setProperty('symbol', symbol)
+        card.setProperty('changed_date', changed)
+        border = '#ffca28' if changed else '#34425a'
+        card.setStyleSheet(
+            f'QFrame {{ background: #182235; border: 1px solid {border}; border-radius: 5px; }}'
+            'QLabel { border: none; background: transparent; }'
+        )
+        card.setToolTip(event_name)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(6, 5, 6, 5)
+        card_layout.setSpacing(3)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        ticker_label = QLabel(symbol)
+        ticker_label.setStyleSheet('font-size: 13px; font-weight: bold; color: #ffffff;')
+        status_label = QLabel(status)
+        status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_color = '#4caf50' if status.casefold() == 'reported' else '#ffd700' if status.casefold() == 'today' else '#9aa4ad'
+        status_label.setStyleSheet(f'font-size: 10px; color: {status_color};')
+        top_row.addWidget(ticker_label)
+        top_row.addStretch()
+        top_row.addWidget(status_label)
+        card_layout.addLayout(top_row)
+
+        company_label = QLabel(company)
+        company_label.setWordWrap(True)
+        company_label.setStyleSheet('font-size: 11px; color: #d6e0f0;')
+        card_layout.addWidget(company_label)
+
+        time_label = QLabel(f'{timing} | {time_display}')
+        time_label.setWordWrap(True)
+        time_label.setStyleSheet('font-size: 10px; color: #9aa4ad;')
+        card_layout.addWidget(time_label)
+
+        eps_label = QLabel(f'EPS {eps_est} / {reported} | Surprise {surprise}')
+        eps_label.setWordWrap(True)
+        eps_label.setStyleSheet('font-size: 10px; color: #b7c2d0;')
+        card_layout.addWidget(eps_label)
+
+        cap_label = QLabel(f'Market cap {market_cap}')
+        cap_label.setWordWrap(True)
+        cap_label.setStyleSheet('font-size: 10px; color: #8ea0b8;')
+        card_layout.addWidget(cap_label)
+
+        if changed:
+            previous = str(row.get('previous_date') or 'previous date')
+            changed_label = QLabel(f'Changed from {previous}')
+            changed_label.setWordWrap(True)
+            changed_label.setStyleSheet('font-size: 10px; color: #ffca28; font-weight: bold;')
+            card_layout.addWidget(changed_label)
+        return card
+
+    def _p7_render_earnings_rows(self, *_: Any) -> None:
+        """Render the filtered all-market earnings rows as a weekly calendar."""
+        if not hasattr(self, 'p7_earnings_week_grid'):
+            return
+        self._p7_update_earnings_week_label()
+        rows_by_day, rows = self._p7_visible_earnings_week_rows()
+        week_start = self._p7_earnings_week_start
+        today = datetime.date.today()
+        self.p7_earnings_day_cards = [[] for _ in range(_P7_EARNINGS_VISIBLE_DAY_COUNT)]
+        self.p7_earnings_day_card_symbols = [[] for _ in range(_P7_EARNINGS_VISIBLE_DAY_COUNT)]
+        visible_week_count = 0
+        for day_index in range(_P7_EARNINGS_VISIBLE_DAY_COUNT):
+            day_date = week_start + datetime.timedelta(days=day_index)
+            day_rows = rows_by_day[day_index]
+            visible_week_count += len(day_rows)
+            self._p7_clear_earnings_day_layout(day_index)
+            header = self.p7_earnings_day_headers[day_index]
+            count_label = self.p7_earnings_day_counts[day_index]
+            header.setText(f'{_P7_EARNINGS_WEEKDAY_LABELS[day_index]} {day_date.strftime("%b %d")}')
+            header_color = '#ffd700' if day_date == today else '#d6e0f0'
+            header.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {header_color}; border: none;')
+            count_label.setText(str(len(day_rows)))
+            layout = self.p7_earnings_day_layouts[day_index]
+            empty_label = self.p7_earnings_day_empty_labels[day_index]
+            if not day_rows:
+                empty_label.show()
+                layout.addWidget(empty_label)
+            else:
+                empty_label.hide()
+                for row in day_rows:
+                    card = self._p7_create_earnings_card(row)
+                    layout.addWidget(card)
+                    self.p7_earnings_day_cards[day_index].append(card)
+                    self.p7_earnings_day_card_symbols[day_index].append(str(row.get('symbol') or '').upper())
+            layout.addStretch()
+        if hasattr(self, 'p7_earnings_count_lbl'):
+            total = len(getattr(self, '_p7_earnings_rows', []) or [])
+            filtered = len(rows)
+            label = f'{visible_week_count} this week'
+            if filtered != total:
+                label = f'{label}; {filtered} filtered of {total}'
+            self.set_status_text(self.p7_earnings_count_lbl, label, status='muted')
+
+    @staticmethod
+    def _p7_earnings_export_value(value: Any, default: str = '--') -> str:
+        text = str(value if value is not None else '').replace('\r', ' ').replace('\n', ' ').strip()
+        return text or default
+
+    def _p7_build_earnings_week_llm_export(self) -> tuple[str, int]:
+        """Build an LLM-friendly export for the currently visible earnings business week."""
+        rows_by_day, filtered_rows = self._p7_visible_earnings_week_rows()
+        week_start = self._p7_earnings_week_start
+        week_end = week_start + datetime.timedelta(days=_P7_EARNINGS_VISIBLE_DAY_COUNT - 1)
+        visible_count = sum(len(day_rows) for day_rows in rows_by_day)
+        total_rows = len(getattr(self, '_p7_earnings_rows', []) or [])
+        exported_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        source = self._p7_earnings_export_value(getattr(self, '_p7_earnings_source', EARNINGS_CALENDAR_SOURCE_NAME))
+        fetched_at = self._p7_format_timestamp(str(getattr(self, '_p7_earnings_fetched_at', '') or '')) or '--'
+        range_start, range_end, _cache_key, range_label = self._p7_current_earnings_range()
+
+        search = self._p7_earnings_export_value(self.p7_earnings_search_input.text() if hasattr(self, 'p7_earnings_search_input') else '', '')
+        timing = self._p7_earnings_export_value(self.p7_earnings_timing_combo.currentText() if hasattr(self, 'p7_earnings_timing_combo') else 'All timing')
+        changed_only = bool(self.p7_earnings_changed_only_cb.isChecked()) if hasattr(self, 'p7_earnings_changed_only_cb') else False
+        filters = []
+        if search:
+            filters.append(f'search="{search}"')
+        if timing and timing.upper() != 'ALL TIMING':
+            filters.append(f'timing={timing}')
+        if changed_only:
+            filters.append('changed_dates_only=true')
+        filter_text = ', '.join(filters) if filters else 'none'
+
+        lines: list[str] = []
+        lines.append('=' * 70)
+        lines.append('BUDGET TERMINAL - EARNINGS WEEK EXPORT')
+        lines.append(f'Business week: {week_start.isoformat()} to {week_end.isoformat()} (Monday-Friday)')
+        lines.append(f'Exported: {exported_at}')
+        lines.append(f'Source: {source}')
+        lines.append(f'Data fetched: {fetched_at}')
+        lines.append(f'Selected range: {range_label} ({range_start.isoformat()} to {range_end.isoformat()})')
+        lines.append(f'Visible filters: {filter_text}')
+        lines.append(f'Visible events: {visible_count}; filtered rows in range: {len(filtered_rows)}; cached rows: {total_rows}')
+        lines.append('=' * 70)
+        lines.append('')
+        lines.append('LLM INSTRUCTIONS')
+        lines.append('- Review these US-listed company earnings for the visible business week.')
+        lines.append('- Identify the most important events, crowded reporting days, notable date changes, and names where EPS expectations or reported results deserve follow-up.')
+        lines.append('- Treat DATE CHANGED markers as schedule-risk signals.')
+        lines.append('- Do not assume rows outside this Monday-Friday view are included.')
+        lines.append('')
+        lines.append('EARNINGS BY DAY')
+        lines.append('-' * 70)
+        for day_index, day_rows in enumerate(rows_by_day):
+            day_date = week_start + datetime.timedelta(days=day_index)
+            lines.append(f'{_P7_EARNINGS_WEEKDAY_LABELS[day_index]} {day_date.isoformat()} ({len(day_rows)} events)')
+            if not day_rows:
+                lines.append('  (none)')
+            for row in day_rows:
+                symbol = self._p7_earnings_export_value(row.get('symbol')).upper()
+                company = self._p7_earnings_export_value(row.get('company'))
+                event_name = self._p7_earnings_export_value(row.get('event_name'))
+                timing = self._p7_earnings_export_value(row.get('timing'))
+                time_display = self._p7_earnings_export_value(row.get('time_display'))
+                eps_est = self._p7_earnings_export_value(row.get('eps_estimate'))
+                reported = self._p7_earnings_export_value(row.get('reported_eps'))
+                surprise = self._p7_earnings_export_value(row.get('surprise_pct'))
+                market_cap = self._p7_earnings_export_value(row.get('market_cap'))
+                status = self._p7_earnings_export_value(row.get('status'))
+                changed = bool(row.get('changed_date'))
+                changed_text = ''
+                if changed:
+                    previous = self._p7_earnings_export_value(row.get('previous_date'), 'unknown previous date')
+                    changed_text = f' | DATE CHANGED from {previous}'
+                lines.append(
+                    f'  - {symbol} | {company} | {event_name} | timing={timing} | time={time_display} | '
+                    f'eps_estimate={eps_est} | reported_eps={reported} | surprise={surprise} | '
+                    f'market_cap={market_cap} | status={status}{changed_text}'
+                )
+            lines.append('')
+        lines.append('=' * 70)
+        lines.append('END OF EXPORT')
+        lines.append('=' * 70)
+        return '\n'.join(lines), visible_count
+
+    def _p7_export_earnings_week_for_llm(self, *_: Any) -> None:
+        """Copy the currently visible earnings business week to the clipboard."""
+        content, visible_count = self._p7_build_earnings_week_llm_export()
+        try:
+            QApplication.clipboard().setText(content)
+            message = f'Earnings week export copied to clipboard ({visible_count} events)'
+            self._p7_set_earnings_status(message, 'positive')
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, message, status='positive')
+        except Exception as e:
+            if hasattr(self, 'status_bar'):
+                self.set_status_text(self.status_bar, f'Earnings export failed: {e}', status='negative')
+            QMessageBox.warning(self, 'Export Failed', f'Could not copy earnings export to the clipboard:\n{e}')
+
+    def _p7_update_earnings_refresh_button_state(self) -> None:
+        fetching = bool(getattr(self, '_p7_earnings_fetching', False))
+        if hasattr(self, 'p7_earnings_refresh_btn'):
+            self.p7_earnings_refresh_btn.setEnabled(not fetching)
+
+    def _p7_set_earnings_status(self, text: Any, status: str = 'muted') -> None:
+        if hasattr(self, 'p7_earnings_status_lbl'):
+            self.set_status_text(self.p7_earnings_status_lbl, str(text or ''), status=status)
+
+    def _p7_set_earnings_cache_text(self, text: Any, status: str = 'muted') -> None:
+        if hasattr(self, 'p7_earnings_cache_lbl'):
+            self.set_status_text(self.p7_earnings_cache_lbl, str(text or ''), status=status)
+
+    def _p7_earnings_cache_status_text(self, payload: dict[str, Any]) -> str:
+        age_seconds = payload.get('cache_age_seconds')
+        age_text = self._p7_format_age(age_seconds)
+        fetched = self._p7_format_timestamp(str(payload.get('fetched_at') or ''))
+        universe = payload.get('symbol_universe') if isinstance(payload.get('symbol_universe'), dict) else {}
+        universe_count = int(universe.get('count') or 0) if isinstance(universe, dict) else 0
+        universe_text = f'; {universe_count:,} US company symbols' if universe_count else ''
+        if age_text:
+            freshness = 'fresh' if float(age_seconds or 0.0) <= EARNINGS_CALENDAR_CACHE_TTL_SECONDS else 'stale'
+            return f'Cache {freshness}: {age_text} old{universe_text}'
+        if fetched:
+            return f'Cached at {fetched}{universe_text}'
+        return f'Cache status unavailable{universe_text}'
+
+    @staticmethod
+    def _p7_format_timestamp(value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(str(value or ''))
+        except ValueError:
+            return ''
+        return parsed.strftime('%Y-%m-%d %H:%M')
+
+    @staticmethod
+    def _p7_format_age(value: Any) -> str:
+        try:
+            seconds = float(value)
+        except Exception:
+            return ''
+        if not math.isfinite(seconds):
+            return ''
+        minutes = max(seconds / 60.0, 0.0)
+        if minutes < 60:
+            return f'{minutes:.0f}m'
+        hours = minutes / 60.0
+        if hours < 48:
+            return f'{hours:.1f}h'
+        return f'{hours / 24.0:.1f}d'
+
+    @staticmethod
+    def _p7_numeric_sort_value(value: Any) -> float:
+        try:
+            numeric = float(value)
+        except Exception:
+            return float('-inf')
+        return numeric if math.isfinite(numeric) else float('-inf')
+
+    def _apply_calendar_theme(self) -> None:
+        """Refresh theme-dependent Calendar subpage surfaces."""
+        for panel in getattr(self, '_p7_earnings_panel_widgets', []):
+            self.set_theme_role(panel, 'panel')
+        for label_name in ('p7_earnings_status_lbl', 'p7_earnings_cache_lbl', 'p7_earnings_count_lbl'):
+            label = getattr(self, label_name, None)
+            if label is not None and not str(label.styleSheet() or '').strip():
+                self.set_theme_role(label, 'status_muted')
 
     def _p7_change_month(self, delta: Any, *_: Any) -> None:
         """Handle p7 change month."""
@@ -542,6 +1315,15 @@ class CalendarPageMixin:
         self._p7_year = y
         self._p7_queue_market_holiday_year(self._p7_year)
         self._p7_render_month()
+
+    def _p7_jump_to_present(self, *_: Any) -> None:
+        """Move the calendar view to the current day in the selected reference timezone."""
+        today = self._p7_get_reference_today()
+        self._p7_year = today.year
+        self._p7_month = today.month
+        self._p7_queue_market_holiday_year(self._p7_year)
+        self._p7_render_month()
+        self._p7_save_session_snapshot()
 
     def _p7_fetch_events(self) -> None:
         """Handle p7 fetch events."""

@@ -21,6 +21,7 @@ DEFAULT_VALUATION_ASSUMPTIONS: dict[str, float | int | str] = {
 
 PEER_ROW_LIMIT = 5
 PEER_CANDIDATE_LIMIT = 16
+PEER_CUSTOM_ROW_LIMIT = 12
 DEFAULT_PEERS = ('MSFT', 'AAPL', 'GOOGL', 'AMZN')
 
 INDUSTRY_PEER_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
@@ -429,6 +430,19 @@ def _peer_add_candidates(scores: dict[str, float], symbols: tuple[str, ...] | li
         scores[peer_symbol] = max(scores.get(peer_symbol, 0.0), source_score)
 
 
+def _normalize_peer_symbols(values: Any, *, current_symbol: str='') -> list[str]:
+    symbols = []
+    if not isinstance(values, list | tuple):
+        return symbols
+    current_symbol = str(current_symbol or '').upper().strip()
+    for raw_symbol in values:
+        peer_symbol = str(raw_symbol or '').upper().strip()
+        if not peer_symbol or peer_symbol == current_symbol or peer_symbol in symbols:
+            continue
+        symbols.append(peer_symbol)
+    return symbols
+
+
 def _peer_sector_name(sector: Any) -> str:
     key = _peer_key(sector)
     if key in SECTOR_ALIASES:
@@ -494,8 +508,12 @@ def _peer_score(symbol: str, info: dict[str, Any], peer_symbol: str, peer_info: 
     return score
 
 
-def _peer_symbols(symbol: str, info: dict[str, Any], peer_infos: dict[str, dict[str, Any]] | None = None) -> list[str]:
+def _peer_symbols(symbol: str, info: dict[str, Any], peer_infos: dict[str, dict[str, Any]] | None = None, custom_peers: Any=None, row_limit: int | None=None) -> list[str]:
     current_symbol = str(symbol or '').upper().strip()
+    custom_symbols = _normalize_peer_symbols(custom_peers, current_symbol=current_symbol)
+    if row_limit is None:
+        row_limit = PEER_ROW_LIMIT if not custom_symbols else max(PEER_ROW_LIMIT, 1 + len(custom_symbols) + max(0, PEER_ROW_LIMIT - 1))
+    row_limit = min(max(int(row_limit), PEER_ROW_LIMIT), PEER_CUSTOM_ROW_LIMIT)
     source_scores = _peer_candidate_scores(current_symbol, info)
     peer_infos = peer_infos or {}
     ordered = sorted(
@@ -503,43 +521,74 @@ def _peer_symbols(symbol: str, info: dict[str, Any], peer_infos: dict[str, dict[
         key=lambda peer: -_peer_score(current_symbol, info, peer, peer_infos.get(peer, {}), source_scores[peer]),
     )
     symbols = [current_symbol] if current_symbol else []
+    for peer in custom_symbols:
+        if peer and peer not in symbols:
+            symbols.append(peer)
+        if len(symbols) >= row_limit:
+            return symbols
     for peer in ordered:
         if peer and peer not in symbols:
             symbols.append(peer)
-        if len(symbols) >= PEER_ROW_LIMIT:
+        if len(symbols) >= row_limit:
             break
     return symbols
 
 
-def _build_peer_rows(symbol: str, info: dict[str, Any]) -> list[dict[str, Any]]:
+def _peer_info_has_usable_data(info: dict[str, Any]) -> bool:
+    if not isinstance(info, dict) or not info:
+        return False
+    return any(info.get(key) is not None for key in ('shortName', 'longName', 'currentPrice', 'regularMarketPrice', 'marketCap'))
+
+
+def _peer_row(peer: str, peer_info: dict[str, Any], source: str) -> dict[str, Any]:
+    return {
+        'ticker': peer,
+        'company': _first_text(peer_info, 'shortName', 'longName', fallback=peer),
+        'source': source,
+        'market_cap': _info_value(peer_info, 'marketCap'),
+        'revenue_growth': (_info_value(peer_info, 'revenueGrowth') * 100.0) if _info_value(peer_info, 'revenueGrowth') is not None else None,
+        'net_margin': (_info_value(peer_info, 'profitMargins') * 100.0) if _info_value(peer_info, 'profitMargins') is not None else None,
+        'pe': _info_value(peer_info, 'trailingPE'),
+        'forward_pe': _info_value(peer_info, 'forwardPE'),
+        'ev_ebitda': _info_value(peer_info, 'enterpriseToEbitda'),
+        'fcf_yield': (_info_value(peer_info, 'freeCashflow') / _info_value(peer_info, 'marketCap') * 100.0) if _info_value(peer_info, 'freeCashflow') is not None and _info_value(peer_info, 'marketCap') else None,
+    }
+
+
+def _build_peer_rows(symbol: str, info: dict[str, Any], custom_peers: Any=None) -> tuple[list[dict[str, Any]], list[str]]:
+    current_symbol = str(symbol or '').upper().strip()
+    custom_symbols = _normalize_peer_symbols(custom_peers, current_symbol=current_symbol)
     peer_infos = {str(symbol or '').upper().strip(): info}
+    peer_warnings = []
+    for peer in custom_symbols:
+        ticker_obj = yf.Ticker(peer)
+        peer_info = _load_info(peer, ticker_obj)
+        if _peer_info_has_usable_data(peer_info):
+            peer_infos[peer] = peer_info
+        else:
+            peer_warnings.append(f'{peer} returned no usable peer data.')
     for peer in _peer_candidate_symbols(symbol, info):
+        if peer in peer_infos:
+            continue
         ticker_obj = yf.Ticker(peer)
         peer_infos[peer] = _load_info(peer, ticker_obj)
     rows = []
-    for peer in _peer_symbols(symbol, info, peer_infos):
+    usable_custom_symbols = [peer for peer in custom_symbols if peer in peer_infos]
+    for peer in _peer_symbols(symbol, info, peer_infos, usable_custom_symbols):
         peer_info = peer_infos.get(peer, {})
-        rows.append({
-            'ticker': peer,
-            'company': _first_text(peer_info, 'shortName', 'longName', fallback=peer),
-            'market_cap': _info_value(peer_info, 'marketCap'),
-            'revenue_growth': (_info_value(peer_info, 'revenueGrowth') * 100.0) if _info_value(peer_info, 'revenueGrowth') is not None else None,
-            'net_margin': (_info_value(peer_info, 'profitMargins') * 100.0) if _info_value(peer_info, 'profitMargins') is not None else None,
-            'pe': _info_value(peer_info, 'trailingPE'),
-            'forward_pe': _info_value(peer_info, 'forwardPE'),
-            'ev_ebitda': _info_value(peer_info, 'enterpriseToEbitda'),
-            'fcf_yield': (_info_value(peer_info, 'freeCashflow') / _info_value(peer_info, 'marketCap') * 100.0) if _info_value(peer_info, 'freeCashflow') is not None and _info_value(peer_info, 'marketCap') else None,
-        })
-    return rows
+        source = 'Loaded' if peer == current_symbol else 'Custom' if peer in usable_custom_symbols else 'Auto'
+        rows.append(_peer_row(peer, peer_info, source))
+    return rows, peer_warnings
 
 
 class ValuationWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, ticker: Any) -> None:
+    def __init__(self, ticker: Any, custom_peers: Any=None) -> None:
         super().__init__()
         self.ticker = str(ticker or '').upper().strip()
+        self.custom_peers = _normalize_peer_symbols(custom_peers, current_symbol=self.ticker)
 
     def run(self) -> None:
         try:
@@ -569,7 +618,7 @@ class ValuationWorker(QObject):
             if metrics.get('price') is None:
                 self.error.emit(f"No quote data found for '{self.ticker}'. Check the ticker symbol.")
                 return
-            peer_rows = _build_peer_rows(self.ticker, info)
+            peer_rows, peer_warnings = _build_peer_rows(self.ticker, info, self.custom_peers)
             self.finished.emit({
                 'ticker': self.ticker,
                 'info': info,
@@ -583,6 +632,7 @@ class ValuationWorker(QObject):
                 'quarterly_balance_sheet': quarterly_balance_sheet,
                 'trends': _build_trends(financials, cashflow, metrics),
                 'peer_rows': peer_rows,
+                'peer_warnings': peer_warnings,
                 'fetched_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
                 'sources': {
                     'quote': 'yfinance quote/history',
