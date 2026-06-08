@@ -1231,8 +1231,14 @@ class WindowLifecycleMixin:
             return
         current_index = int(self.stacked_widget.currentIndex())
         logger.info('Manual refresh requested: %s page (index %s).', self._page_label(current_index), current_index)
-        if current_index in (0, 4):
+        if current_index == 0:
             if hasattr(self, 'refresh_data'):
+                self.refresh_data(force=True, reason='manual_refresh')
+            return
+        if current_index == 4:
+            if hasattr(self, '_p3_request_news_refresh'):
+                self._p3_request_news_refresh()
+            elif hasattr(self, 'refresh_data'):
                 self.refresh_data(force=True, reason='manual_refresh')
             return
         if current_index == 25:
@@ -1424,6 +1430,8 @@ class WindowLifecycleMixin:
         else:
             self.time_label.setText(now.strftime('%H:%M:%S'))
         self._refresh_data_collection_label()
+        if hasattr(self, '_p26_maybe_refresh_market_status_display'):
+            self._p26_maybe_refresh_market_status_display()
 
     def _set_data_collection_info(self, sources: Any, collected_at: Any=None) -> None:
         """Persist footer metadata about the latest completed data fetch."""

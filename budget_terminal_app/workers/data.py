@@ -23,6 +23,7 @@ from ..dependencies import (
 
 DEFAULT_BATCH_SYMBOLS = ['SPY', 'DX-Y.NYB', '^VIX', 'GLD', 'CL=F']
 MACRO_TICKERS = ['SPY', 'QQQ', 'GLD', 'CL=F', '^VIX', '^TNX', 'DX-Y.NYB']
+NEWS_PAGE_REFRESH_REASON = 'news_page_refresh'
 OTHER_NEWS_QUERIES = ['market movers', 'earnings movers', 'sector rotation', 'analyst upgrades']
 OTHER_NEWS_SECTOR_TICKERS = ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLI', 'XLP', 'XLU', 'XLB', 'XLRE']
 OTHER_NEWS_FOCUS_TICKERS = [
@@ -59,6 +60,7 @@ class DataWorker(QObject):
     _DETAILS_CACHE_TTL_SECONDS = 900.0
     _NON_CHART_SNAPSHOT_TTL_SECONDS = 30.0
     _stock_details_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _portfolio_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
     _macro_news_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
     _other_news_cache: tuple[float, list[dict[str, Any]]] | None = None
     _non_chart_snapshot_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
@@ -460,6 +462,26 @@ class DataWorker(QObject):
             )
         return payload
 
+    def _fetch_portfolio_news(self, ticker: str) -> list[dict[str, Any]]:
+        """Fetch portfolio news without populating target/detail cache entries."""
+        now = time.time()
+        with self._details_cache_lock:
+            cached = self._stock_details_cache.get(ticker)
+            if cached and (now - cached[0]) < self._DETAILS_CACHE_TTL_SECONDS:
+                payload = cached[1]
+                if isinstance(payload, dict) and isinstance(payload.get('targets'), dict) and isinstance(payload.get('news'), list):
+                    return [dict(item) for item in payload.get('news', [])]
+            cached_news = self._portfolio_news_cache.get(ticker)
+            if cached_news and (now - cached_news[0]) < self._DETAILS_CACHE_TTL_SECONDS:
+                return [dict(item) for item in cached_news[1]]
+        try:
+            articles = self._read_news_items(self._ticker(ticker), ticker, 'portfolio')
+            with self._details_cache_lock:
+                self._portfolio_news_cache[ticker] = (now, [dict(item) for item in articles])
+            return articles
+        except Exception:
+            return []
+
     def _fetch_macro_news(self, ticker: str) -> list[dict[str, Any]]:
         now = time.time()
         with self._details_cache_lock:
@@ -518,6 +540,68 @@ class DataWorker(QObject):
         other_news = self._filter_other_news(self._fetch_other_news(), news_list)
         news_list.extend(other_news)
         return targets, news_list
+
+    def _collect_news_page_payload(self) -> dict[str, Any] | None:
+        """Fetch only the News page article payload."""
+        news_list = []
+        if self.tickers:
+            with ThreadPoolExecutor(max_workers=self._executor_workers(len(self.tickers))) as executor:
+                for articles in executor.map(self._fetch_portfolio_news, self.tickers):
+                    if self._is_cancelled():
+                        return None
+                    news_list.extend(articles)
+        with ThreadPoolExecutor(max_workers=self._executor_workers(len(MACRO_TICKERS))) as executor:
+            for articles in executor.map(self._fetch_macro_news, MACRO_TICKERS):
+                if self._is_cancelled():
+                    return None
+                news_list.extend(articles)
+        if self._is_cancelled():
+            return None
+        other_news = self._filter_other_news(self._fetch_other_news(), news_list)
+        news_list.extend(other_news)
+        return {'news': news_list}
+
+    def _fetch_news_page_refresh(self, total_started: float) -> dict[str, Any] | None:
+        """Return a News-page-only payload without chart, quote, or target work."""
+        news_started = time.perf_counter()
+        news_payload = self._collect_news_page_payload()
+        if news_payload is None and self._is_cancelled():
+            logger.info('Worker %s cancelled during News page refresh.', self.request_id)
+            return None
+        news_ms = (time.perf_counter() - news_started) * 1000.0
+        payload = {
+            'request_id': self.request_id,
+            'chart_configs': [],
+            'portfolio': {},
+            'market': {},
+            'targets': [],
+            'news': list((news_payload or {}).get('news', [])),
+            'charts': {},
+            'chart_options': {},
+            'chart_option_expirations': {},
+            'chart_ma200': {},
+            'chart_rsi': {},
+            '_dashboard_refresh_meta': {
+                'refresh_reason': self.refresh_reason,
+                'non_chart_reused': False,
+                'chart_symbol': '',
+                'fetch_ticker_signature': list(self._fetch_ticker_signature()),
+                'non_chart_cache_age_seconds': 0.0,
+                'worker_timings_ms': {
+                    'news': round(news_ms, 1),
+                    'chart': 0.0,
+                    'total': round((time.perf_counter() - total_started) * 1000.0, 1),
+                },
+            },
+        }
+        return attach_market_data_result(
+            payload,
+            meta=make_market_data_meta(
+                source='yfinance, keyless news feeds',
+                freshness='fresh',
+            ),
+            errors=[],
+        )
 
     def _normalize_chart_frame(self, symbol: str, df: Any) -> Any:
         if df is None or df.empty:
@@ -875,6 +959,8 @@ class DataWorker(QObject):
         """Return the dashboard payload synchronously without emitting Qt signals."""
         logger.info('Worker starting. Tickers: %s, Charts: %s', self.tickers, self.chart_configs)
         total_started = time.perf_counter()
+        if self.refresh_reason == NEWS_PAGE_REFRESH_REASON:
+            return self._fetch_news_page_refresh(total_started)
         dashboard_chart_configs = self._normalize_chart_configs()
         dashboard_chart_config = dashboard_chart_configs[0] if dashboard_chart_configs else None
         fetch_ticker_signature = self._fetch_ticker_signature()

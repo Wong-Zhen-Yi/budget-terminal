@@ -610,16 +610,17 @@ class CalendarPageMixin:
         self.p7_earnings_range_combo = QComboBox()
         self.p7_earnings_range_combo.addItem('Current + next 12 months', 'rolling')
         self.p7_earnings_range_combo.addItem('Selected year', 'year')
+        self.p7_earnings_range_combo.setCurrentIndex(1)
         self.p7_earnings_range_combo.setMinimumWidth(180)
         self.p7_earnings_range_combo.currentIndexChanged.connect(self._p7_on_earnings_range_changed)
         toolbar_layout.addWidget(self.p7_earnings_range_combo)
 
         toolbar_layout.addWidget(QLabel('Year'))
         self.p7_earnings_year_spin = QSpinBox()
-        current_year = datetime.date.today().year
+        current_year = self._p7_get_reference_today().year
         self.p7_earnings_year_spin.setRange(1990, current_year + 10)
         self.p7_earnings_year_spin.setValue(current_year)
-        self.p7_earnings_year_spin.setEnabled(False)
+        self.p7_earnings_year_spin.setEnabled(True)
         self.p7_earnings_year_spin.valueChanged.connect(self._p7_on_earnings_range_changed)
         toolbar_layout.addWidget(self.p7_earnings_year_spin)
 

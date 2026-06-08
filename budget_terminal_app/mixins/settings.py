@@ -1286,6 +1286,7 @@ class SettingsMixin:
         """Flush shared worker-level memory caches that survive until app restart."""
         with DataWorker._details_cache_lock:
             DataWorker._stock_details_cache.clear()
+            DataWorker._portfolio_news_cache.clear()
             DataWorker._macro_news_cache.clear()
             DataWorker._other_news_cache = None
             DataWorker._non_chart_snapshot_cache.clear()

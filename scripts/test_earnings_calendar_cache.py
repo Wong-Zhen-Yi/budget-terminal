@@ -256,7 +256,8 @@ def test_calendar_earnings_tab_smoke() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         original_path = _use_temp_user_data(Path(tmp))
         try:
-            start, end = EarningsCalendarService.default_date_range()
+            current_year = datetime.date.today().year
+            start, end = EarningsCalendarService.year_date_range(current_year)
             fixture_date = start if start.weekday() < 5 else start + datetime.timedelta(days=7 - start.weekday())
             fixture_week_start = fixture_date - datetime.timedelta(days=fixture_date.weekday())
             weekend_fixture_date = fixture_week_start + datetime.timedelta(days=5)
@@ -280,7 +281,7 @@ def test_calendar_earnings_tab_smoke() -> None:
                     ],
                     "symbol_universe": {"count": 4},
                 },
-                cache_key=EARNINGS_DEFAULT_RANGE_KEY,
+                cache_key=f"year_{current_year}",
             )
 
             from budget_terminal_app.app import BudgetTerminalApp
@@ -308,6 +309,11 @@ def test_calendar_earnings_tab_smoke() -> None:
                 _assert(window.p7_tabs.tabText(1) == "Earnings", "second Calendar subtab should be Earnings")
                 window.p7_tabs.setCurrentWidget(window.p7_earnings_tab)
                 app.processEvents()
+                _assert(
+                    window.p7_earnings_range_combo.currentData() == "year",
+                    "earnings range should default to selected year",
+                )
+                _assert(window.p7_earnings_year_spin.isEnabled(), "selected-year default should enable the year input")
                 window._p7_earnings_week_start = window._p7_start_of_week(fixture_date)
                 window._p7_render_earnings_rows()
                 app.processEvents()

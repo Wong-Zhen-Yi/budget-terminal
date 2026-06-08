@@ -247,6 +247,9 @@ class GlobalMarketMapWidget(QWidget):
             country = item["country"]
             label = item["label"]
             pct = item["pct"]
+            status_text = item["status_text"]
+            status_color = item["status_color"]
+            show_status = item["show_status"]
             country_font = item["country_font"]
             title_font = item["title_font"]
             detail_font = item["detail_font"]
@@ -270,8 +273,17 @@ class GlobalMarketMapWidget(QWidget):
             painter.setPen(QColor(self._colors["text"]))
             painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, title_metrics.elidedText(label, Qt.TextElideMode.ElideRight, int(text_width)))
             painter.setFont(detail_font)
+            if show_status:
+                dot_color = QColor(status_color)
+                painter.setBrush(dot_color)
+                painter.setPen(QPen(dot_color, 1))
+                dot_y = pct_rect.top() + max(5.0, detail_metrics.height() / 2.0)
+                painter.drawEllipse(QPointF(pct_rect.left() + 4, dot_y), 3.5, 3.5)
+                text_rect = QRectF(pct_rect.left() + 13, pct_rect.top(), max(1.0, pct_rect.width() - 13), pct_rect.height())
+            else:
+                text_rect = pct_rect
             painter.setPen(QColor(change_color))
-            painter.drawText(pct_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, detail_metrics.elidedText(pct, Qt.TextElideMode.ElideRight, int(text_width)))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, detail_metrics.elidedText(status_text, Qt.TextElideMode.ElideRight, int(text_rect.width())))
             self._label_rects.append((rect, item["row"]))
         for item in layout:
             painter.setBrush(QColor(item["change_color"]))
@@ -315,11 +327,13 @@ class GlobalMarketMapWidget(QWidget):
             country = str(row.get("country") or "--")
             label = str(row.get("short_name") or row.get("index") or row.get("symbol") or "--")
             pct = self._pct_text(row)
+            status_text = self._status_line_text(row, pct)
+            show_status = self._has_market_status(row)
             line_height = country_metrics.height() + title_metrics.height() + detail_metrics.height() + 12
             text_width = max(
                 country_metrics.horizontalAdvance(country),
                 title_metrics.horizontalAdvance(label),
-                detail_metrics.horizontalAdvance(pct),
+                detail_metrics.horizontalAdvance(status_text) + (13 if show_status else 0),
             )
             width = min(max(text_width + 16, 70), 150)
             rect = self._place_label(point, width, line_height, row, map_rect, occupied, leader_segments, protected_pins)
@@ -339,6 +353,9 @@ class GlobalMarketMapWidget(QWidget):
                     "country": country,
                     "label": label,
                     "pct": pct,
+                    "status_text": status_text,
+                    "status_color": self._market_status_color(row),
+                    "show_status": show_status,
                     "change_color": change_color,
                     "country_font": country_font,
                     "title_font": title_font,
@@ -629,13 +646,41 @@ class GlobalMarketMapWidget(QWidget):
         sign = "+" if value > 0 else ""
         return f"{self._interval_label} {sign}{value:.2f}%"
 
+    def _market_status_payload(self, row: dict[str, Any]) -> dict[str, Any]:
+        payload = row.get("market_status", {})
+        return payload if isinstance(payload, dict) else {}
+
+    def _has_market_status(self, row: dict[str, Any]) -> bool:
+        payload = self._market_status_payload(row)
+        return bool(str(payload.get("market") or "").strip())
+
+    def _status_line_text(self, row: dict[str, Any], pct_text: str) -> str:
+        payload = self._market_status_payload(row)
+        market = str(payload.get("market") or "").strip()
+        if not market:
+            return pct_text
+        return f"{market} | {pct_text}"
+
+    def _market_status_color(self, row: dict[str, Any]) -> str:
+        state = str(self._market_status_payload(row).get("state") or "unknown").lower().strip()
+        if state == "open":
+            return self._colors["positive"]
+        if state == "closed":
+            return self._colors["negative"]
+        return self._colors["muted"]
+
     def _tooltip(self, row: dict[str, Any]) -> str:
         payload = self._interval_payload(row)
+        market_status = self._market_status_payload(row)
         parts = [
             f"{row.get('index', row.get('symbol', '--'))}",
             f"{row.get('country', '--')} | {row.get('symbol', '--')}",
             self._pct_text(row),
         ]
+        if market_status:
+            parts.append(str(market_status.get("session") or "Timing unavailable"))
+            parts.append(f"Clock timezone: {market_status.get('clock_timezone') or '--'}")
+            parts.append(f"Exchange timezone: {market_status.get('exchange_timezone') or '--'}")
         if payload.get("available"):
             parts.append(f"{payload.get('start_date', '--')} -> {payload.get('end_date', '--')}")
         return "\n".join(str(part) for part in parts)

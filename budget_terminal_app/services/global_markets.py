@@ -59,6 +59,154 @@ def _coerce_date(value: Any) -> str:
     return parsed.strftime("%Y-%m-%d")
 
 
+def _coerce_epoch_seconds(value: Any) -> int | None:
+    if value in (None, "", "N/A"):
+        return None
+    if isinstance(value, _dt.datetime):
+        parsed = value if value.tzinfo is not None else value.replace(tzinfo=_dt.timezone.utc)
+        return int(parsed.timestamp())
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = math.nan
+    if math.isfinite(number) and number > 0:
+        return int(number)
+    try:
+        parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return int(pd.Timestamp(parsed).timestamp())
+
+
+def _datetime_from_epoch(epoch_seconds: Any, tzinfo: Any) -> _dt.datetime | None:
+    epoch = _coerce_epoch_seconds(epoch_seconds)
+    if epoch is None:
+        return None
+    try:
+        return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc).astimezone(tzinfo)
+    except Exception:
+        return None
+
+
+def _format_market_time(target: _dt.datetime, now: _dt.datetime, *, use_12h: bool = False) -> str:
+    if target.date() == now.date():
+        return target.strftime("%I:%M %p" if use_12h else "%H:%M")
+    return target.strftime("%b %d, %I:%M %p" if use_12h else "%b %d, %H:%M")
+
+
+def _last_tick_epoch_from_frame(frame: Any, exchange_timezone: Any = None) -> int | None:
+    if frame is None or getattr(frame, "empty", True):
+        return None
+    try:
+        last_index = frame.index[-1]
+        timestamp = pd.Timestamp(last_index)
+    except Exception:
+        return None
+    try:
+        if timestamp.tzinfo is None:
+            zone_name = str(exchange_timezone or "").strip()
+            timestamp = timestamp.tz_localize(zone_name or "UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
+        return int(timestamp.timestamp())
+    except Exception:
+        return None
+
+
+def build_market_timing_payload(symbol: Any, metadata: Any = None, intraday_frame: Any = None) -> dict[str, Any]:
+    """Normalize yfinance timing metadata into a small JSON-safe payload."""
+    meta = metadata if isinstance(metadata, dict) else {}
+    period = meta.get("currentTradingPeriod") if isinstance(meta.get("currentTradingPeriod"), dict) else {}
+    regular = period.get("regular") if isinstance(period.get("regular"), dict) else {}
+    exchange_timezone = str(meta.get("exchangeTimezoneName") or "").strip()
+    regular_market_time = _coerce_epoch_seconds(meta.get("regularMarketTime"))
+    last_tick_time = _last_tick_epoch_from_frame(intraday_frame, exchange_timezone) or regular_market_time
+    payload = {
+        "symbol": _normalize_symbol(symbol),
+        "exchange_name": str(meta.get("fullExchangeName") or meta.get("exchangeName") or "").strip(),
+        "exchange_timezone": exchange_timezone,
+        "regular_start": _coerce_epoch_seconds(regular.get("start")),
+        "regular_end": _coerce_epoch_seconds(regular.get("end")),
+        "regular_market_time": regular_market_time,
+        "last_tick_time": last_tick_time,
+    }
+    if not any(payload.get(key) for key in ("regular_start", "regular_end", "regular_market_time", "last_tick_time")):
+        payload["source"] = "unavailable"
+    else:
+        payload["source"] = "yfinance metadata"
+    return payload
+
+
+def format_global_market_timing(
+    market_timing: Any,
+    clock_tzinfo: Any,
+    *,
+    now: _dt.datetime | None = None,
+    use_12h: bool = False,
+) -> dict[str, Any]:
+    """Return a display-ready market session status in the selected clock timezone."""
+    timing = market_timing if isinstance(market_timing, dict) else {}
+    tzinfo = clock_tzinfo or _dt.datetime.now().astimezone().tzinfo or _dt.timezone.utc
+    current = now or _dt.datetime.now(tzinfo)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=tzinfo)
+    else:
+        current = current.astimezone(tzinfo)
+    start_dt = _datetime_from_epoch(timing.get("regular_start"), tzinfo)
+    end_dt = _datetime_from_epoch(timing.get("regular_end"), tzinfo)
+    last_tick_dt = _datetime_from_epoch(timing.get("last_tick_time") or timing.get("regular_market_time"), tzinfo)
+    exchange_timezone = str(timing.get("exchange_timezone") or "").strip()
+    clock_timezone = current.tzname() or str(tzinfo)
+    base = {
+        "state": "unknown",
+        "market": "Unknown",
+        "session": "Timing unavailable",
+        "exchange_timezone": exchange_timezone or "--",
+        "clock_timezone": clock_timezone,
+    }
+    if start_dt is not None and end_dt is not None:
+        if start_dt <= current < end_dt:
+            base.update(
+                {
+                    "state": "open",
+                    "market": "Open",
+                    "session": f"Open until {_format_market_time(end_dt, current, use_12h=use_12h)}",
+                    "regular_start": start_dt.isoformat(),
+                    "regular_end": end_dt.isoformat(),
+                }
+            )
+        elif current < start_dt:
+            base.update(
+                {
+                    "state": "closed",
+                    "market": "Closed",
+                    "session": f"Closed, opens {_format_market_time(start_dt, current, use_12h=use_12h)}",
+                    "regular_start": start_dt.isoformat(),
+                    "regular_end": end_dt.isoformat(),
+                }
+            )
+        else:
+            base.update(
+                {
+                    "state": "closed",
+                    "market": "Closed",
+                    "session": f"Closed since {_format_market_time(end_dt, current, use_12h=use_12h)}",
+                    "regular_start": start_dt.isoformat(),
+                    "regular_end": end_dt.isoformat(),
+                }
+            )
+    elif last_tick_dt is not None:
+        base.update(
+            {
+                "session": f"Unknown, last tick {_format_market_time(last_tick_dt, current, use_12h=use_12h)}",
+                "last_tick_time": last_tick_dt.isoformat(),
+            }
+        )
+    return base
+
+
 def _extract_close_series(symbol: Any, raw_frame: Any) -> Any:
     """Extract a clean adjusted-close-or-close series for one yfinance symbol."""
     symbol_text = _normalize_symbol(symbol)
@@ -142,7 +290,7 @@ def calculate_interval_performance(close_series: Any, interval_label: Any) -> di
     }
 
 
-def build_global_market_row(config: GlobalIndexConfig, close_series: Any) -> dict[str, Any]:
+def build_global_market_row(config: GlobalIndexConfig, close_series: Any, market_timing: Any = None) -> dict[str, Any]:
     series = pd.Series(close_series).dropna().sort_index()
     intervals = {label: calculate_interval_performance(series, label) for label in GLOBAL_INTERVALS}
     last_close = None
@@ -163,6 +311,7 @@ def build_global_market_row(config: GlobalIndexConfig, close_series: Any) -> dic
         "last_close": last_close,
         "last_date": last_date,
         "intervals": intervals,
+        "market_timing": dict(market_timing or {}),
     }
 
 
@@ -171,6 +320,22 @@ class GlobalMarketsDataService:
 
     def __init__(self, indexes: tuple[GlobalIndexConfig, ...] = GLOBAL_MARKET_INDEXES) -> None:
         self.indexes = indexes
+
+    def _fetch_market_timing(self, symbol: Any) -> dict[str, Any]:
+        symbol_text = _normalize_symbol(symbol)
+        intraday = pd.DataFrame()
+        metadata: dict[str, Any] = {}
+        try:
+            with YF_LOCK:
+                ticker = yf.Ticker(symbol_text)
+                intraday = ticker.history(period="1d", interval="1m", prepost=True, auto_adjust=False)
+                try:
+                    metadata = ticker.get_history_metadata() or {}
+                except Exception:
+                    metadata = {}
+        except Exception as exc:
+            logger.warning("Global market timing fetch failed for %s: %s", symbol_text, exc)
+        return build_market_timing_payload(symbol_text, metadata, intraday)
 
     def fetch(self) -> dict[str, Any]:
         symbols = [item.symbol for item in self.indexes]
@@ -194,7 +359,7 @@ class GlobalMarketsDataService:
             series = _extract_close_series(config.symbol, raw)
             if series.empty:
                 missing.append(config.symbol)
-            rows.append(build_global_market_row(config, series))
+            rows.append(build_global_market_row(config, series, self._fetch_market_timing(config.symbol)))
         return {
             "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
             "source": "yfinance",

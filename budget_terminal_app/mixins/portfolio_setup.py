@@ -1212,6 +1212,7 @@ class PortfolioSetupMixin:
         self.p4_table.verticalHeader().setDefaultSectionSize(52)
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
         self.p4_table.itemSelectionChanged.connect(self._p4_update_remove_stock_button_state)
+        self.p4_table.currentCellChanged.connect(self._p4_on_stock_current_cell_changed)
         hh.setSortIndicator(P4_PORTFOLIO_COL_MARKET_VALUE, Qt.SortOrder.DescendingOrder)
         self.p4_table.setSortingEnabled(True)
         self._p4_apply_table_width_preferences('stock')
@@ -1337,27 +1338,22 @@ class PortfolioSetupMixin:
             ticker = ticker.upper().strip()
             tickers = self._p4_active_tickers() if hasattr(self, '_p4_active_tickers') else self.active_tickers
             tracker_data = self._p4_active_tracker_data() if hasattr(self, '_p4_active_tracker_data') else self.active_tracker_data
-            if ticker and ticker not in tickers:
+            if not ticker:
+                return
+            if ticker not in tickers:
                 tickers.append(ticker)
-                if ticker not in tracker_data:
-                    tracker_data[ticker] = {'shares': 0, 'avg_price': 0}
-                if hasattr(self, '_p4_invalidate_returns_cache'):
-                    self._p4_invalidate_returns_cache(self.active_portfolio_id)
-                if hasattr(self, '_p4_invalidate_momentum_cache'):
-                    self._p4_invalidate_momentum_cache(self.active_portfolio_id)
-                if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
-                    self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
-                self._persist_all_portfolios()
-                self.update_page4(self.last_data or {'portfolio': {}})
-                if (
-                    self.active_portfolio_id == self.main_portfolio_id
-                    or getattr(self, '_dashboard_showing_all', False)
-                ) and hasattr(self, '_dashboard_apply_local_portfolio_membership'):
-                    self._dashboard_apply_local_portfolio_membership(self.last_data)
-                if self.last_data:
-                    self.refresh_data(reason='portfolio_membership_change')
-                else:
-                    self.refresh_data()
+            if ticker not in tracker_data:
+                tracker_data[ticker] = {'shares': 0, 'avg_price': 0}
+            if hasattr(self, '_p4_begin_position_entry'):
+                self._p4_begin_position_entry(ticker, P4_PORTFOLIO_COL_SHARES)
+            self._persist_all_portfolios()
+            self.update_page4(
+                self.last_data or {'portfolio': {}},
+                preserve_visible_order=True,
+                defer_expensive_refresh=True,
+            )
+            if hasattr(self, '_p4_focus_stock_entry_cell'):
+                self._p4_focus_stock_entry_cell(ticker, P4_PORTFOLIO_COL_SHARES)
 
     def _p4_selected_stock_ticker(self) -> str:
         """Return the ticker from the currently selected stock row."""

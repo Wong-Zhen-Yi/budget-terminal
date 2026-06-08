@@ -5,6 +5,7 @@ from html import escape
 from typing import Any
 
 from ..compat import *
+from ..workers.data import DataWorker, NEWS_PAGE_REFRESH_REASON
 from ..workers.news_preview import build_news_preview_text
 
 
@@ -66,6 +67,7 @@ class NewsMixin:
         self._p3_loaded_news = {'portfolio': [], 'macro': [], 'other': []}
         self._p3_highlighted_news: dict[str, Any] | None = None
         self._p3_preview_request_id = 0
+        self._p3_news_refresh_request_id = 0
         self._p3_syncing_news_selection = False
         self._p3_preview_signals = _NewsPreviewSignals()
         self._p3_preview_signals.preview_ready.connect(self._p3_on_preview_ready)
@@ -451,6 +453,99 @@ class NewsMixin:
             if max_height > 0:
                 height = min(max_height, height)
             table.setRowHeight(row, height)
+
+    def _p3_fetch_tickers(self) -> list[str]:
+        """Return the current portfolio universe for a News-only refresh."""
+        get_fetch_tickers = getattr(self, '_get_fetch_tickers', None)
+        if callable(get_fetch_tickers):
+            return list(get_fetch_tickers())
+        return list(getattr(self, 'tickers', []) or [])
+
+    def _p3_emit_main(self, fn: Any) -> None:
+        """Run one callback on the main thread when the app signal is available."""
+        signal = getattr(self, '_invoke_main', None)
+        if signal is not None and hasattr(signal, 'emit'):
+            signal.emit(fn)
+        else:
+            fn()
+
+    def _p3_request_news_refresh(self) -> None:
+        """Refresh the News page without reloading Dashboard chart/options data."""
+        self._p3_news_refresh_request_id = int(getattr(self, '_p3_news_refresh_request_id', 0) or 0) + 1
+        request_id = self._p3_news_refresh_request_id
+        tickers = self._p3_fetch_tickers()
+        self._p3_set_status('Refreshing news...', 'info')
+        executor_factory = getattr(self, '_ensure_dashboard_fetch_executor', None)
+        if not callable(executor_factory):
+            self._p3_handle_news_refresh_error(request_id, 'News refresh executor is unavailable.')
+            return
+        self._p3_news_refresh_future = executor_factory().submit(self._p3_run_news_refresh, request_id, tickers)
+
+    def _p3_run_news_refresh(self, request_id: int, tickers: list[str]) -> None:
+        """Run a News-only worker and hand the result back to the UI thread."""
+        try:
+            data = None
+            client = getattr(self, '_data_service_client', None)
+            if client is None:
+                wait_for_client = getattr(self, '_dashboard_wait_for_data_service_client', None)
+                if callable(wait_for_client):
+                    client = wait_for_client()
+            if client is not None:
+                try:
+                    data = client.fetch_dashboard(
+                        tickers,
+                        [],
+                        request_id=request_id,
+                        refresh_reason=NEWS_PAGE_REFRESH_REASON,
+                        allow_non_chart_reuse=False,
+                    )
+                except Exception as exc:
+                    logger.warning('Embedded data service News refresh failed; falling back to direct worker: %s', exc)
+            if data is None:
+                cache_manager_factory = getattr(self, '_get_cache_manager', None)
+                worker = DataWorker(
+                    tickers,
+                    [],
+                    request_id=request_id,
+                    cancel_check=lambda req=request_id: req != getattr(self, '_p3_news_refresh_request_id', 0),
+                    cache_manager=cache_manager_factory() if callable(cache_manager_factory) else None,
+                    refresh_reason=NEWS_PAGE_REFRESH_REASON,
+                    allow_non_chart_reuse=False,
+                )
+                data = worker.fetch()
+            if data is not None:
+                self._p3_emit_main(lambda payload=data, req=request_id: self._p3_apply_news_refresh_result(req, payload))
+        except Exception as exc:
+            logger.error('News refresh failed: %s', exc)
+            self._p3_emit_main(lambda msg=str(exc), req=request_id: self._p3_handle_news_refresh_error(req, msg))
+
+    def _p3_merge_news_refresh_data(self, data: Any) -> list[dict[str, Any]]:
+        """Replace only the loaded news slice while preserving existing dashboard data."""
+        news = [dict(article) for article in (data.get('news', []) if isinstance(data, dict) else [])]
+        current = getattr(self, 'last_data', None)
+        if isinstance(current, dict):
+            merged = dict(current)
+            merged['news'] = [dict(article) for article in news]
+            self.last_data = merged
+        elif isinstance(data, dict):
+            self.last_data = dict(data)
+        return news
+
+    def _p3_apply_news_refresh_result(self, request_id: int, data: Any) -> None:
+        """Apply a News-only refresh if it is still the newest request."""
+        if request_id != int(getattr(self, '_p3_news_refresh_request_id', 0) or 0):
+            return
+        news = self._p3_merge_news_refresh_data(data)
+        self.update_page3({'news': news})
+        status = 'positive' if news else 'warning'
+        self._p3_set_status(f'News refreshed: {len(news)} article(s).', status)
+
+    def _p3_handle_news_refresh_error(self, request_id: int, message: Any) -> None:
+        """Show a News refresh failure unless a newer refresh superseded it."""
+        if request_id != int(getattr(self, '_p3_news_refresh_request_id', 0) or 0):
+            return
+        text = str(message or 'Unknown error')
+        self._p3_set_status(f'News refresh failed: {text}', 'negative')
 
     def update_page3(self, data: Any) -> None:
         """Update the News page tables."""

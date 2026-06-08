@@ -6,12 +6,29 @@ from ..compat import *
 from budget_terminal_app.services.global_markets import (
     GLOBAL_INTERVALS,
     GlobalMarketsDataService,
+    format_global_market_timing,
 )
 from budget_terminal_app.widgets.global_market_map import GlobalMarketMapWidget
 
 
 P26_MAX_WORKERS = 1
-P26_TABLE_COLUMNS = ("Region", "Country", "Index", "Symbol", "Last Close", "Start Close", "End Close", "Performance %", "Last Date")
+P26_TABLE_COLUMNS = (
+    "Region",
+    "Country",
+    "Index",
+    "Symbol",
+    "Market",
+    "Session (Clock TZ)",
+    "Last Close",
+    "Start Close",
+    "End Close",
+    "Performance %",
+    "Last Date",
+)
+P26_COL_SYMBOL = 3
+P26_COL_MARKET = 4
+P26_COL_SESSION = 5
+P26_NUMERIC_COLUMNS = (6, 7, 8, 9)
 
 
 class GlobalPageMixin:
@@ -31,6 +48,7 @@ class GlobalPageMixin:
         self._p26_request_seq = 0
         self._p26_active_request = 0
         self._p26_payload: dict[str, Any] = {}
+        self._p26_market_status_key = None
         self._p26_interval_buttons = {}
         self._p26_interval_group = QButtonGroup(self)
         self._p26_interval_group.setExclusive(True)
@@ -177,6 +195,41 @@ class GlobalPageMixin:
         rows = payload.get("rows", []) if isinstance(payload, dict) else []
         return [dict(row) for row in rows if isinstance(row, dict)]
 
+    def _p26_market_status_now(self) -> Any:
+        override = getattr(self, "_p26_market_status_now_override", None)
+        if override is not None:
+            return override
+        if hasattr(self, "_now_for_clock_country"):
+            return self._now_for_clock_country()
+        return datetime.datetime.now().astimezone()
+
+    def _p26_market_status_for_row(self, row: dict[str, Any], *, now: Any = None) -> dict[str, Any]:
+        tzinfo = self._get_clock_tzinfo() if hasattr(self, "_get_clock_tzinfo") else datetime.datetime.now().astimezone().tzinfo
+        try:
+            return format_global_market_timing(
+                row.get("market_timing"),
+                tzinfo,
+                now=now or self._p26_market_status_now(),
+                use_12h=bool(getattr(self, "_time_12h", False)),
+            )
+        except Exception:
+            return {
+                "state": "unknown",
+                "market": "Unknown",
+                "session": "Timing unavailable",
+                "exchange_timezone": "--",
+                "clock_timezone": "--",
+            }
+
+    def _p26_rows_with_market_status(self, *, now: Any = None) -> list[dict[str, Any]]:
+        status_now = now or self._p26_market_status_now()
+        rows = []
+        for row in self._p26_rows():
+            item = dict(row)
+            item["market_status"] = self._p26_market_status_for_row(item, now=status_now)
+            rows.append(item)
+        return rows
+
     def _p26_interval_payload(self, row: dict[str, Any], interval_label: Any = None) -> dict[str, Any]:
         label = str(interval_label or getattr(self, "p26_interval_label", "1D")).upper().strip()
         intervals = row.get("intervals", {})
@@ -184,22 +237,26 @@ class GlobalPageMixin:
         return payload if isinstance(payload, dict) else {}
 
     def _p26_render_payload(self) -> None:
-        rows = self._p26_rows()
+        rows = self._p26_rows_with_market_status()
         if hasattr(self, "p26_map"):
             self.p26_map.set_data(rows, getattr(self, "p26_interval_label", "1D"))
         if not hasattr(self, "p26_table"):
             return
+        self._p26_market_status_key = self._p26_market_status_refresh_key()
         self.p26_table.setSortingEnabled(False)
         self.p26_table.setRowCount(0)
         for row in rows:
             row_index = self.p26_table.rowCount()
             self.p26_table.insertRow(row_index)
             payload = self._p26_interval_payload(row)
+            market_status = row.get("market_status") if isinstance(row.get("market_status"), dict) else {}
             values = (
                 row.get("region", "--"),
                 row.get("country", "--"),
                 row.get("index", "--"),
                 row.get("symbol", "--"),
+                market_status.get("market", "Unknown"),
+                market_status.get("session", "Timing unavailable"),
                 self._p26_close(row.get("last_close")),
                 self._p26_close(payload.get("start_close")),
                 self._p26_close(payload.get("end_close")),
@@ -208,12 +265,78 @@ class GlobalPageMixin:
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column in (4, 5, 6, 7):
+                if column in P26_NUMERIC_COLUMNS:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (3, 8):
+                elif column in (P26_COL_SYMBOL, P26_COL_MARKET, len(P26_TABLE_COLUMNS) - 1):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column in (P26_COL_MARKET, P26_COL_SESSION):
+                    self._p26_style_market_status_item(item, market_status)
                 self.p26_table.setItem(row_index, column, item)
         self.p26_table.setSortingEnabled(True)
+
+    def _p26_market_status_refresh_key(self, now: Any = None) -> tuple[Any, ...]:
+        current = now or self._p26_market_status_now()
+        try:
+            minute = current.astimezone(self._get_clock_tzinfo()).strftime("%Y-%m-%d %H:%M %z")
+        except Exception:
+            minute = str(current)
+        return (self._current_clock_country_code() if hasattr(self, "_current_clock_country_code") else "", bool(getattr(self, "_time_12h", False)), minute)
+
+    def _p26_market_status_tooltip(self, market_status: Any) -> str:
+        status = market_status if isinstance(market_status, dict) else {}
+        parts = [
+            str(status.get("session") or "Timing unavailable"),
+            f"Clock timezone: {status.get('clock_timezone') or '--'}",
+            f"Exchange timezone: {status.get('exchange_timezone') or '--'}",
+        ]
+        return "\n".join(parts)
+
+    def _p26_style_market_status_item(self, item: QTableWidgetItem, market_status: Any) -> None:
+        status = market_status if isinstance(market_status, dict) else {}
+        state = str(status.get("state") or "unknown").lower().strip()
+        if state == "open":
+            item.setForeground(QColor(self.theme_color("accent_positive")))
+        elif state == "closed":
+            item.setForeground(QColor(self.theme_color("accent_negative")))
+        else:
+            item.setForeground(QColor(self.theme_color("text_muted")))
+        item.setToolTip(self._p26_market_status_tooltip(status))
+
+    def _p26_refresh_market_status_display(self, *, force: bool = False, now: Any = None) -> None:
+        if not self._p26_rows():
+            return
+        status_now = now or self._p26_market_status_now()
+        refresh_key = self._p26_market_status_refresh_key(status_now)
+        if not force and refresh_key == getattr(self, "_p26_market_status_key", None):
+            return
+        self._p26_market_status_key = refresh_key
+        rows = self._p26_rows_with_market_status(now=status_now)
+        if hasattr(self, "p26_map"):
+            self.p26_map.set_data(rows, getattr(self, "p26_interval_label", "1D"))
+        if not hasattr(self, "p26_table"):
+            return
+        status_by_symbol = {
+            str(row.get("symbol") or "").upper().strip(): row.get("market_status", {})
+            for row in rows
+            if str(row.get("symbol") or "").strip()
+        }
+        for symbol, market_status in status_by_symbol.items():
+            for row_index in range(self.p26_table.rowCount()):
+                symbol_item = self.p26_table.item(row_index, P26_COL_SYMBOL)
+                if symbol_item is None or symbol_item.text().upper().strip() != symbol:
+                    continue
+                market_item = self.p26_table.item(row_index, P26_COL_MARKET)
+                session_item = self.p26_table.item(row_index, P26_COL_SESSION)
+                if market_item is not None:
+                    market_item.setText(str(market_status.get("market") or "Unknown"))
+                    self._p26_style_market_status_item(market_item, market_status)
+                if session_item is not None:
+                    session_item.setText(str(market_status.get("session") or "Timing unavailable"))
+                    self._p26_style_market_status_item(session_item, market_status)
+                break
+
+    def _p26_maybe_refresh_market_status_display(self) -> None:
+        self._p26_refresh_market_status_display(force=False)
 
     def _p26_close(self, value: Any) -> str:
         try:
@@ -257,14 +380,16 @@ class GlobalPageMixin:
             f"Source: {source}",
             "Coverage: major global market indexes mapped by country/region.",
             "Intervals: 1D, 5D, 30D, YTD, 1Y, 5Y. Performance is percent change from start close to latest close.",
+            "Market status is inferred from yfinance timing metadata and displayed in the Settings clock timezone.",
             "",
-            "| Region | Country | Index | Symbol | Last Date | Last Close | 1D | 5D | 30D | YTD | 1Y | 5Y |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Region | Country | Index | Symbol | Market | Session (Clock TZ) | Last Date | Last Close | 1D | 5D | 30D | YTD | 1Y | 5Y |",
+            "|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
-        for row in self._p26_rows():
+        for row in self._p26_rows_with_market_status():
             interval_values = []
             for label in GLOBAL_INTERVALS:
                 interval_values.append(self._p26_pct(self._p26_interval_payload(row, label).get("change_pct")) if self._p26_interval_payload(row, label).get("available") else "--")
+            market_status = row.get("market_status") if isinstance(row.get("market_status"), dict) else {}
             lines.append(
                 "| "
                 + " | ".join(
@@ -273,6 +398,8 @@ class GlobalPageMixin:
                         self._p26_export_cell(row.get("country", "--")),
                         self._p26_export_cell(row.get("index", "--")),
                         self._p26_export_cell(row.get("symbol", "--")),
+                        self._p26_export_cell(market_status.get("market", "Unknown")),
+                        self._p26_export_cell(market_status.get("session", "Timing unavailable")),
                         self._p26_export_cell(row.get("last_date") or "--"),
                         self._p26_export_cell(self._p26_close(row.get("last_close"))),
                         *[self._p26_export_cell(value) for value in interval_values],
@@ -288,7 +415,7 @@ class GlobalPageMixin:
                 "| Country | Index | Symbol | Start Date | Start Close | End Date | End Close | Performance |",
                 "|---|---|---:|---:|---:|---:|---:|---:|",
             ])
-            for row in self._p26_rows():
+            for row in self._p26_rows_with_market_status():
                 item = self._p26_interval_payload(row, label)
                 lines.append(
                     "| "

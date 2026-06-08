@@ -19,6 +19,8 @@ from budget_terminal_app.workers.market_metrics import MarketCapWorker, MonthRet
 _P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
 _P4_MOMENTUM_REFRESH_DEBOUNCE_MS = 250
 _P4_METRICS_REFRESH_DEBOUNCE_MS = 350
+_P4_POSITION_ENTRY_REFRESH_DEBOUNCE_MS = 300
+_P4_ENTRY_EDITABLE_COLUMNS = (P4_PORTFOLIO_COL_SHARES, P4_PORTFOLIO_COL_AVG_PRICE)
 
 
 _P4_METRICS_CARD_SPECS = (
@@ -71,6 +73,288 @@ _P4_METRICS_LOOKBACK_OPTIONS = (
 
 
 class PortfolioMetricsMixin:
+    def _p4_normalize_stock_symbol(self, ticker: Any) -> str:
+        """Return a normalized stock ticker for page-4 table operations."""
+        return str(ticker or '').strip().upper()
+
+    def _p4_find_stock_row(self, ticker: Any) -> int:
+        """Return the visible stock-table row for a ticker, or -1."""
+        table = getattr(self, 'p4_table', None)
+        symbol = self._p4_normalize_stock_symbol(ticker)
+        if table is None or not symbol:
+            return -1
+        for row in range(table.rowCount()):
+            item = table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+            if self._p4_normalize_stock_symbol(item.text() if item else '') == symbol:
+                return row
+        return -1
+
+    def _p4_visible_stock_order(self) -> list[str]:
+        """Return stock tickers in their current visible table order."""
+        table = getattr(self, 'p4_table', None)
+        if table is None:
+            return []
+        order = []
+        for row in range(table.rowCount()):
+            item = table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+            symbol = self._p4_normalize_stock_symbol(item.text() if item else '')
+            if symbol and symbol not in order:
+                order.append(symbol)
+        return order
+
+    def _p4_stock_order_for_render(self, tickers: Any, metrics_map: dict[str, Any], *, preserve_visible_order: bool=False) -> list[Any]:
+        """Return stock tickers in either stable visible order or market-value order."""
+        ticker_list = list(tickers or [])
+        if not preserve_visible_order:
+            return sorted(
+                ticker_list,
+                key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0),
+                reverse=True,
+            )
+        by_symbol = {self._p4_normalize_stock_symbol(ticker): ticker for ticker in ticker_list}
+        ordered = []
+        seen = set()
+        for symbol in self._p4_visible_stock_order():
+            ticker = by_symbol.get(symbol)
+            if ticker is not None and symbol not in seen:
+                ordered.append(ticker)
+                seen.add(symbol)
+        for ticker in ticker_list:
+            symbol = self._p4_normalize_stock_symbol(ticker)
+            if symbol and symbol not in seen:
+                ordered.append(ticker)
+                seen.add(symbol)
+        return ordered
+
+    def _p4_active_position_entry(self) -> dict[str, Any] | None:
+        """Return the active position-entry guard payload, if any."""
+        payload = getattr(self, '_p4_active_position_entry_guard', None)
+        return payload if isinstance(payload, dict) and payload.get('ticker') else None
+
+    def _p4_position_entry_is_active(self) -> bool:
+        """Return whether a stock position row is currently protected from movement."""
+        return self._p4_active_position_entry() is not None
+
+    def _p4_begin_position_entry(self, ticker: Any, column: int=P4_PORTFOLIO_COL_SHARES) -> None:
+        """Protect one stock row from sorting while the user enters the position."""
+        symbol = self._p4_normalize_stock_symbol(ticker)
+        if not symbol:
+            return
+        table = getattr(self, 'p4_table', None)
+        active = self._p4_active_position_entry()
+        if active and active.get('ticker') != symbol:
+            self._p4_end_position_entry(schedule_refresh=False)
+        if table is not None and not self._p4_position_entry_is_active():
+            self._p4_stock_table_sorting_was_enabled = bool(table.isSortingEnabled())
+        if table is not None and table.isSortingEnabled():
+            table.setSortingEnabled(False)
+        try:
+            column_value = int(column)
+        except (TypeError, ValueError):
+            column_value = P4_PORTFOLIO_COL_SHARES
+        self._p4_active_position_entry_guard = {
+            'ticker': symbol,
+            'column': column_value if column_value in _P4_ENTRY_EDITABLE_COLUMNS else P4_PORTFOLIO_COL_SHARES,
+        }
+        dirty = set(getattr(self, '_p4_position_entry_dirty_tickers', set()))
+        dirty.add(symbol)
+        self._p4_position_entry_dirty_tickers = dirty
+
+    def _p4_end_position_entry(self, *, schedule_refresh: bool=True) -> None:
+        """Release the active position-entry guard and optionally queue a full refresh."""
+        active = self._p4_active_position_entry()
+        symbol = self._p4_normalize_stock_symbol(active.get('ticker') if active else '')
+        complete = self._p4_position_entry_is_complete(symbol)
+        self._p4_active_position_entry_guard = None
+        table = getattr(self, 'p4_table', None)
+        if table is not None and bool(getattr(self, '_p4_stock_table_sorting_was_enabled', False)):
+            table.setSortingEnabled(True)
+        self._p4_stock_table_sorting_was_enabled = False
+        if schedule_refresh and symbol and complete:
+            self._p4_schedule_position_entry_refresh(symbol, allow_heavy=True)
+        elif symbol and not complete:
+            self._p4_cancel_position_entry_refresh(symbol)
+
+    def _p4_is_currently_editing_position_entry(self) -> bool:
+        """Return whether focus is still on the protected ticker's editable cells."""
+        active = self._p4_active_position_entry()
+        table = getattr(self, 'p4_table', None)
+        if not active or table is None:
+            return False
+        row = table.currentRow()
+        column = table.currentColumn()
+        item = table.item(row, P4_PORTFOLIO_COL_SYMBOL) if row >= 0 else None
+        return (
+            self._p4_normalize_stock_symbol(item.text() if item else '') == active.get('ticker')
+            and column in _P4_ENTRY_EDITABLE_COLUMNS
+        )
+
+    def _p4_position_entry_has_positive_shares(self, ticker: Any=None) -> bool:
+        """Return whether the guarded ticker has a positive share quantity."""
+        entry = self._p4_position_entry_tracker_entry(ticker)
+        return self._p4_position_entry_positive_value((entry or {}).get('shares', 0))
+
+    def _p4_position_entry_positive_value(self, value: Any) -> bool:
+        """Return whether a position-entry numeric field is positive."""
+        try:
+            if isinstance(value, str):
+                value = value.replace('$', '').replace(',', '').strip()
+            return float(value or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _p4_position_entry_tracker_entry(self, ticker: Any=None) -> dict[str, Any]:
+        """Return the tracker entry for a normalized ticker, if present."""
+        active = self._p4_active_position_entry()
+        symbol = self._p4_normalize_stock_symbol(ticker or (active or {}).get('ticker'))
+        if not symbol:
+            return {}
+        tracker_data = self._p4_active_tracker_data()
+        if not isinstance(tracker_data, dict):
+            return {}
+        if symbol in tracker_data and isinstance(tracker_data.get(symbol), dict):
+            return tracker_data.get(symbol) or {}
+        for saved_ticker, entry in tracker_data.items():
+            if self._p4_normalize_stock_symbol(saved_ticker) == symbol and isinstance(entry, dict):
+                return entry or {}
+        return {}
+
+    def _p4_position_entry_is_complete(self, ticker: Any=None) -> bool:
+        """Return whether a stock position has both shares and average price entered."""
+        entry = self._p4_position_entry_tracker_entry(ticker)
+        return (
+            self._p4_position_entry_positive_value((entry or {}).get('shares', 0))
+            and self._p4_position_entry_positive_value((entry or {}).get('avg_price', 0))
+        )
+
+    def _p4_cancel_position_entry_refresh(self, ticker: Any=None) -> None:
+        """Drop pending position-entry refresh work for an incomplete row."""
+        symbol = self._p4_normalize_stock_symbol(ticker)
+        dirty = set(getattr(self, '_p4_position_entry_dirty_tickers', set()))
+        if symbol:
+            dirty = {item for item in dirty if self._p4_normalize_stock_symbol(item) != symbol}
+        else:
+            dirty.clear()
+        self._p4_position_entry_dirty_tickers = dirty
+        if not dirty:
+            self._p4_position_entry_allow_heavy = False
+            timer = getattr(self, '_p4_position_entry_refresh_timer', None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+
+    def _p4_position_entry_refresh_pending(self) -> bool:
+        """Return whether the completed-entry refresh debounce is still waiting."""
+        timer = getattr(self, '_p4_position_entry_refresh_timer', None)
+        return bool(timer is not None and timer.isActive())
+
+    def _p4_restore_position_entry_cell(self) -> None:
+        """Restore focus to the guarded ticker's editable cell after a table rebuild."""
+        active = self._p4_active_position_entry()
+        table = getattr(self, 'p4_table', None)
+        if not active or table is None:
+            return
+        row = self._p4_find_stock_row(active.get('ticker'))
+        if row < 0:
+            return
+        column = int(active.get('column', P4_PORTFOLIO_COL_SHARES))
+        if column not in _P4_ENTRY_EDITABLE_COLUMNS:
+            column = P4_PORTFOLIO_COL_SHARES
+        self._p4_restoring_position_entry_cell = True
+        try:
+            table.selectRow(row)
+            table.setCurrentCell(row, column)
+            item = table.item(row, column)
+            if item is not None:
+                table.scrollToItem(item)
+        finally:
+            self._p4_restoring_position_entry_cell = False
+
+    def _p4_focus_stock_entry_cell(self, ticker: Any, column: int=P4_PORTFOLIO_COL_SHARES) -> None:
+        """Focus one stock row's editable cell."""
+        self._p4_begin_position_entry(ticker, column)
+        self._p4_restore_position_entry_cell()
+
+    def _p4_on_stock_current_cell_changed(self, current_row: int, current_column: int, previous_row: int, previous_column: int) -> None:
+        """Release the entry guard once focus leaves the protected row."""
+        if getattr(self, '_p4_restoring_position_entry_cell', False):
+            return
+        active = self._p4_active_position_entry()
+        if not active:
+            return
+        table = getattr(self, 'p4_table', None)
+        item = table.item(current_row, P4_PORTFOLIO_COL_SYMBOL) if table is not None and current_row >= 0 else None
+        symbol = self._p4_normalize_stock_symbol(item.text() if item else '')
+        if symbol == active.get('ticker') and current_column in _P4_ENTRY_EDITABLE_COLUMNS:
+            active['column'] = current_column
+            return
+        self._p4_end_position_entry(schedule_refresh=True)
+
+    def _p4_schedule_position_entry_refresh(self, ticker: Any=None, *, allow_heavy: bool=False) -> None:
+        """Debounce refresh work triggered by stock-position entry."""
+        symbol = self._p4_normalize_stock_symbol(ticker)
+        if symbol and not self._p4_position_entry_is_complete(symbol):
+            self._p4_cancel_position_entry_refresh(symbol)
+            return
+        dirty = set(getattr(self, '_p4_position_entry_dirty_tickers', set()))
+        if symbol:
+            dirty.add(symbol)
+        self._p4_position_entry_dirty_tickers = dirty
+        self._p4_position_entry_allow_heavy = bool(getattr(self, '_p4_position_entry_allow_heavy', False) or allow_heavy)
+        timer = getattr(self, '_p4_position_entry_refresh_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._p4_flush_position_entry_refresh)
+            self._p4_position_entry_refresh_timer = timer
+        timer.start(_P4_POSITION_ENTRY_REFRESH_DEBOUNCE_MS)
+
+    def _p4_flush_position_entry_refresh(self) -> None:
+        """Run deferred quote and analytics refresh work after entry settles."""
+        timer = getattr(self, '_p4_position_entry_refresh_timer', None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        dirty = set(getattr(self, '_p4_position_entry_dirty_tickers', set()))
+        active = self._p4_active_position_entry()
+        if active:
+            dirty.add(active.get('ticker'))
+        dirty = {self._p4_normalize_stock_symbol(ticker) for ticker in dirty if self._p4_normalize_stock_symbol(ticker)}
+        if active and not self._p4_position_entry_is_complete(active.get('ticker')):
+            self._p4_cancel_position_entry_refresh(active.get('ticker'))
+            return
+        dirty = {ticker for ticker in dirty if self._p4_position_entry_is_complete(ticker)}
+        if not dirty:
+            self._p4_position_entry_dirty_tickers = set()
+            self._p4_position_entry_allow_heavy = False
+            return
+        self._p4_position_entry_dirty_tickers = set()
+        allow_heavy = bool(getattr(self, '_p4_position_entry_allow_heavy', False))
+        self._p4_position_entry_allow_heavy = False
+        if active and self._p4_position_entry_is_complete(active.get('ticker')):
+            allow_heavy = True
+        if active and not self._p4_is_currently_editing_position_entry():
+            allow_heavy = True
+
+        if (
+            (getattr(self, '_dashboard_showing_all', False) or getattr(self, 'active_portfolio_id', None) == getattr(self, 'main_portfolio_id', None))
+            and hasattr(self, '_dashboard_apply_local_portfolio_membership')
+        ):
+            self._dashboard_apply_local_portfolio_membership(getattr(self, 'last_data', None))
+        if hasattr(self, 'refresh_data'):
+            if getattr(self, 'last_data', None):
+                self.refresh_data(reason='portfolio_membership_change')
+            else:
+                self.refresh_data()
+        if dirty:
+            self._fetch_market_caps(sorted(dirty))
+        if not allow_heavy:
+            return
+        self._p4_invalidate_returns_cache()
+        self._p4_invalidate_momentum_cache()
+        self._p4_invalidate_portfolio_analytics_cache()
+        self._fetch_returns_for_timeframe(self._active_return_timeframe)
+        self._p4_refresh_active_momentum_view()
+        self._p4_schedule_portfolio_metrics_refresh()
+
     def _p4_returns_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
         """Build the cache key for one portfolio/timeframe pair."""
         return (str(portfolio_id or self.active_portfolio_id), str(timeframe_key))
@@ -933,17 +1217,18 @@ class PortfolioMetricsMixin:
             val = float(item.text().replace('$', '').replace(',', ''))
         except ValueError:
             return
+        if hasattr(self, '_p4_begin_position_entry'):
+            self._p4_begin_position_entry(ticker, col)
         tracker_data = self._p4_active_tracker_data()
         tracker_entry = tracker_data.setdefault(ticker, {})
         tracker_entry['shares' if col == P4_PORTFOLIO_COL_SHARES else 'avg_price'] = val
         self._persist_all_portfolios()
         if self.last_data:
             self._recalc_tracker_row(row, ticker, self.last_data.get('portfolio', {}))
-        if col == P4_PORTFOLIO_COL_SHARES:
-            self._p4_invalidate_momentum_cache()
-            self._p4_invalidate_portfolio_analytics_cache()
-            self._p4_schedule_momentum_refresh()
-            self._p4_schedule_portfolio_metrics_refresh()
+        if hasattr(self, '_p4_schedule_position_entry_refresh') and self._p4_position_entry_is_complete(ticker):
+            self._p4_schedule_position_entry_refresh(ticker, allow_heavy=(col == P4_PORTFOLIO_COL_SHARES and val > 0))
+        elif hasattr(self, '_p4_cancel_position_entry_refresh'):
+            self._p4_cancel_position_entry_refresh(ticker)
 
     def _p4_schedule_momentum_refresh(self) -> None:
         """Debounce expensive momentum refreshes while tracker cells are being edited."""
@@ -999,6 +1284,7 @@ class PortfolioMetricsMixin:
         metrics = metrics_map.get(ticker)
         if metrics is None:
             return
+        keep_sorting_disabled = self._p4_position_entry_is_active()
         sorting_enabled = self.p4_table.isSortingEnabled()
         self.p4_table.blockSignals(True)
         self.p4_table.setSortingEnabled(False)
@@ -1017,13 +1303,17 @@ class PortfolioMetricsMixin:
                 metrics['growth'],
             )
         finally:
-            self.p4_table.setSortingEnabled(sorting_enabled)
+            if sorting_enabled and not keep_sorting_disabled:
+                self.p4_table.setSortingEnabled(True)
             self.p4_table.blockSignals(False)
+        self._p4_restore_position_entry_cell()
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
         weights = {symbol: item['weight'] for symbol, item in metrics_map.items()}
         cash_balance = self._p4_active_cash_balance()
         if cash_balance > 0.0 and total_market_value > 0.0:
             weights['CASH'] = cash_balance / total_market_value * 100.0
+        if self._p4_position_entry_is_active():
+            return
         self._update_weight_chart(weights)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
@@ -1602,6 +1892,7 @@ class PortfolioMetricsMixin:
                 normalized_results[symbol] = mc
                 self._mktcap_cache[symbol] = mc
                 self._mktcap_cache_ts[symbol] = fetched_at
+        keep_sorting_disabled = self._p4_position_entry_is_active()
         sorting_enabled = self.p4_table.isSortingEnabled()
         self.p4_table.setSortingEnabled(False)
         try:
@@ -1611,22 +1902,38 @@ class PortfolioMetricsMixin:
                 if symbol and symbol in normalized_results:
                     self._update_mktcap_item(row, symbol, normalized_results[symbol])
         finally:
-            self.p4_table.setSortingEnabled(sorting_enabled)
+            if sorting_enabled and not keep_sorting_disabled:
+                self.p4_table.setSortingEnabled(True)
+        self._p4_restore_position_entry_cell()
         queued = list(getattr(self, '_mktcap_queued_tickers', set()))
         self._mktcap_queued_tickers = set()
         if queued:
             remaining = [ticker for ticker in queued if str(ticker or '').strip().upper() not in request_tickers]
             self._fetch_market_caps(remaining)
 
-    def update_page4(self, data: Any) -> None:
+    def update_page4(
+        self,
+        data: Any,
+        *,
+        preserve_visible_order: bool | None = None,
+        defer_expensive_refresh: bool=False,
+    ) -> None:
         """Update page4."""
         portfolio = data.get('portfolio', {})
         tickers = self._p4_active_tickers()
         metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
-        sorted_tickers = sorted(
+        active_entry = self._p4_position_entry_is_active()
+        active_payload = self._p4_active_position_entry()
+        active_incomplete_entry = bool(
+            active_payload and not self._p4_position_entry_is_complete(active_payload.get('ticker'))
+        )
+        entry_refresh_pending = self._p4_position_entry_refresh_pending()
+        preserve_order = active_entry if preserve_visible_order is None else bool(preserve_visible_order)
+        defer_refresh = bool(defer_expensive_refresh or active_incomplete_entry or entry_refresh_pending)
+        sorted_tickers = self._p4_stock_order_for_render(
             tickers,
-            key=lambda ticker: metrics_map.get(ticker, {}).get('market_value', 0),
-            reverse=True,
+            metrics_map,
+            preserve_visible_order=preserve_order,
         )
         weights = {}
         rows = []
@@ -1641,7 +1948,10 @@ class PortfolioMetricsMixin:
                     market_cap=self._mktcap_cache.get(cache_symbol) if cache_symbol in self._mktcap_cache else None,
                 )
             )
+        if preserve_order and self.p4_table.isSortingEnabled():
+            self.p4_table.setSortingEnabled(False)
         render_table_rows(self.p4_table, rows)
+        self._p4_restore_position_entry_cell()
 
         cash_balance = self._p4_active_cash_balance()
         if cash_balance > 0.0 and total_market_value > 0.0:
@@ -1652,6 +1962,8 @@ class PortfolioMetricsMixin:
             self._p4_apply_table_width_preferences('stock')
         self._p4_update_stock_positions_label(len(tickers))
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
+        if defer_refresh:
+            return
         self._update_weight_chart(weights)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
