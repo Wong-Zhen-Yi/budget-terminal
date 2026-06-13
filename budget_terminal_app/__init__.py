@@ -1,3 +1,3 @@
 """Budget Terminal package metadata."""
 
-__version__ = "0.907"
+__version__ = "0.908"
