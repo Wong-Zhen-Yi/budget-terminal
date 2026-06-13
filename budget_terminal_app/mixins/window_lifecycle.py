@@ -997,11 +997,13 @@ class WindowLifecycleMixin:
         logger.info('Page shown: %s (index %s).', target_label, numeric_index)
 
     def _refresh_main_tab_picker_items(self) -> None:
-        """Sync the top-bar tab picker with the registered main navigation pages."""
+        """Sync the top-bar picker with visible pages and known first-level subtabs."""
         if not hasattr(self, '_tab_picker_list'):
             return
         items = []
+        entries = []
         item_map = {}
+        subpage_specs = self._tab_picker_subpage_specs()
         for button in self._ordered_nav_buttons(visible_only=True):
             page_index = self._page_index_for_button(button)
             if page_index is None:
@@ -1009,11 +1011,111 @@ class WindowLifecycleMixin:
             label = button.text().strip()
             if not label:
                 continue
-            items.append(label)
-            item_map[label.casefold()] = page_index
+            main_entry = self._make_tab_picker_entry(label, page_index, aliases=(self._page_label(page_index),))
+            entries.append(main_entry)
+            items.append(main_entry['label'])
+            for search_value in main_entry['search_values']:
+                item_map.setdefault(search_value.casefold(), main_entry)
+            for spec in subpage_specs.get(int(page_index), ()):
+                tab_text = str(spec.get('tab_text', '') or '').strip()
+                if not tab_text:
+                    continue
+                entry = self._make_tab_picker_entry(
+                    f'{label} > {tab_text}',
+                    page_index,
+                    tab_widget_attr=spec.get('tab_widget_attr'),
+                    tab_text=tab_text,
+                    aliases=spec.get('aliases', ()),
+                )
+                entries.append(entry)
+                items.append(entry['label'])
+                for search_value in entry['search_values']:
+                    item_map.setdefault(search_value.casefold(), entry)
         self._tab_picker_items = items
+        self._tab_picker_entries = entries
         self._tab_picker_map = item_map
         self._filter_tab_picker_items(getattr(self, '_tab_picker_input', None).text() if hasattr(self, '_tab_picker_input') else '')
+
+    def _tab_picker_subpage_specs(self) -> dict[int, tuple[dict[str, Any], ...]]:
+        """Return static first-level subpages exposed through the page picker."""
+        return {
+            1: (
+                {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Positions'},
+                {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Portfolio Heatmap'},
+                {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Momentum Tracker', 'aliases': ('Momentum',)},
+                {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Portfolio Metrics', 'aliases': ('Metrics',)},
+            ),
+            3: (
+                {'tab_widget_attr': 'p7_tabs', 'tab_text': 'Calendar'},
+                {'tab_widget_attr': 'p7_tabs', 'tab_text': 'Earnings'},
+            ),
+            9: (
+                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Main'},
+                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Multi Charts', 'aliases': ('Multiple Charts',)},
+                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Compare', 'aliases': ('Comparison',)},
+            ),
+            11: (
+                {'tab_widget_attr': 'p5_tabs', 'tab_text': 'Chain', 'aliases': ('Options Chain',)},
+                {
+                    'tab_widget_attr': 'p5_tabs',
+                    'tab_text': getattr(self, '_P5_TOP_VOLUME_TAB_LABEL', 'Options by Top Volume'),
+                    'aliases': ('Top Volume',),
+                },
+                {
+                    'tab_widget_attr': 'p5_tabs',
+                    'tab_text': getattr(self, '_P5_STRIKE_TAB_LABEL', 'Options by Strike'),
+                    'aliases': ('Strike',),
+                },
+            ),
+            12: (
+                {'tab_widget_attr': 'p13_tabs', 'tab_text': 'Holdings', 'aliases': ('ETF Holdings',)},
+                {'tab_widget_attr': 'p13_tabs', 'tab_text': 'Arbitrage', 'aliases': ('ETF Arbitrage',)},
+            ),
+            21: (
+                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Overview'},
+                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Ticker Lookup', 'aliases': ('Ticker',)},
+                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Manager Lookup', 'aliases': ('Manager',)},
+                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Insider', 'aliases': ('Insiders',)},
+            ),
+            22: (
+                {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Main'},
+                {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Scenarios'},
+                {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Peers'},
+                {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Risk'},
+                {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Trends'},
+            ),
+        }
+
+    def _make_tab_picker_entry(
+        self,
+        label: str,
+        page_index: Any,
+        *,
+        tab_widget_attr: Any=None,
+        tab_text: Any=None,
+        aliases: Any=(),
+    ) -> dict[str, Any]:
+        """Build a searchable picker entry for one page or subpage target."""
+        clean_label = str(label or '').strip()
+        try:
+            numeric_index = int(page_index)
+        except (TypeError, ValueError):
+            numeric_index = -1
+        clean_tab_text = str(tab_text or '').strip()
+        search_values = []
+        for value in (clean_label, clean_label.replace('>', ' '), self._page_label(numeric_index), clean_tab_text, *tuple(aliases or ())):
+            clean_value = str(value or '').strip()
+            if clean_value and clean_value not in search_values:
+                search_values.append(clean_value)
+        return {
+            'label': clean_label,
+            'page_index': numeric_index,
+            'tab_widget_attr': str(tab_widget_attr or '').strip(),
+            'tab_text': clean_tab_text,
+            'aliases': tuple(str(value).strip() for value in aliases or () if str(value).strip()),
+            'search_values': tuple(search_values),
+            'search_text': ' '.join(search_values).casefold(),
+        }
 
     def _page_index_for_button(self, button: Any) -> Any:
         """Return the registered page index for a nav button."""
@@ -1022,8 +1124,8 @@ class WindowLifecycleMixin:
                 return index
         return None
 
-    def _find_main_tab_match(self, text: Any) -> Any:
-        """Resolve user-entered tab text into a main page index."""
+    def _find_tab_picker_match(self, text: Any) -> Any:
+        """Resolve user-entered picker text into a structured entry."""
         query = str(text or '').strip()
         if not query:
             return None
@@ -1031,10 +1133,17 @@ class WindowLifecycleMixin:
         exact = self._tab_picker_map.get(lowered)
         if exact is not None:
             return exact
-        for label in self._tab_picker_items:
-            if lowered in label.casefold():
-                return self._tab_picker_map.get(label.casefold())
+        for entry in getattr(self, '_tab_picker_entries', []):
+            if lowered in str(entry.get('search_text', '')):
+                return entry
         return None
+
+    def _find_main_tab_match(self, text: Any) -> Any:
+        """Resolve user-entered picker text into a main page index."""
+        entry = self._find_tab_picker_match(text)
+        if not entry:
+            return None
+        return entry.get('page_index')
 
     def _filter_tab_picker_items(self, text: Any) -> None:
         """Filter popup picker rows from the current query text."""
@@ -1042,33 +1151,83 @@ class WindowLifecycleMixin:
             return
         query = str(text or '').strip().casefold()
         self._tab_picker_list.clear()
-        for label in self._tab_picker_items:
-            if not query or query in label.casefold():
-                self._tab_picker_list.addItem(label)
+        matches = []
+        for order, entry in enumerate(getattr(self, '_tab_picker_entries', [])):
+            if not query:
+                matches.append((order, order, entry))
+                continue
+            search_text = str(entry.get('search_text', ''))
+            if query not in search_text:
+                continue
+            search_values = [str(value or '').casefold() for value in entry.get('search_values', ())]
+            if query in search_values:
+                rank = 0
+            elif any(value.startswith(query) for value in search_values):
+                rank = 1
+            else:
+                rank = 2
+            matches.append((rank, order, entry))
+        for _rank, _order, entry in sorted(matches, key=lambda item: (item[0], item[1])):
+            item = QListWidgetItem(str(entry.get('label', '') or ''))
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self._tab_picker_list.addItem(item)
         if self._tab_picker_list.count() > 0:
             self._tab_picker_list.setCurrentRow(0)
 
     def _activate_tab_picker_item(self, item: Any) -> None:
-        """Open a page from a popup list selection."""
+        """Open a page or subpage from a popup list selection."""
         label = item.text() if hasattr(item, 'text') else str(item or '')
-        page_index = self._find_main_tab_match(label)
+        entry = item.data(Qt.ItemDataRole.UserRole) if hasattr(item, 'data') else None
+        if not isinstance(entry, dict):
+            entry = self._find_tab_picker_match(label)
+        if not isinstance(entry, dict):
+            return
+        page_index = entry.get('page_index')
         if page_index is None:
             return
         logger.info('Tab picker activated: %s -> %s page.', self._safe_log_text(label), self._page_label(page_index))
         self.switch_page(page_index)
+        if entry.get('tab_widget_attr') and entry.get('tab_text'):
+            self._select_tab_picker_subpage(entry)
         self._hide_tab_picker()
 
-    def _show_tab_picker(self) -> None:
+    def _select_tab_picker_subpage(self, entry: dict[str, Any]) -> bool:
+        """Select the configured subtab for a structured picker entry."""
+        tab_widget_attr = str(entry.get('tab_widget_attr', '') or '').strip()
+        tab_text = str(entry.get('tab_text', '') or '').strip()
+        tab_widget = getattr(self, tab_widget_attr, None)
+        if not tab_widget_attr or not tab_text or tab_widget is None or not hasattr(tab_widget, 'count'):
+            logger.warning(
+                'Tab picker subpage target missing: %s (%s).',
+                self._safe_log_text(entry.get('label')),
+                self._safe_log_text(tab_widget_attr, fallback='unknown widget'),
+            )
+            return False
+        target = tab_text.casefold()
+        for index in range(int(tab_widget.count())):
+            if str(tab_widget.tabText(index) or '').strip().casefold() == target:
+                tab_widget.setCurrentIndex(index)
+                return True
+        logger.warning(
+            'Tab picker subpage tab missing: %s (%s).',
+            self._safe_log_text(entry.get('label')),
+            self._safe_log_text(tab_text, fallback='unknown tab'),
+        )
+        return False
+
+    def _show_tab_picker(self, *, preserve_query: bool=False) -> None:
         """Reveal the top-bar picker and focus it for typed navigation."""
         if not hasattr(self, '_tab_picker_popup'):
             return
+        query = self._tab_picker_input.text() if preserve_query and hasattr(self, '_tab_picker_input') else ''
         self._refresh_main_tab_picker_items()
         popup_margin = 16
         popup_x = max(self.width() - self._tab_picker_popup.width() - popup_margin, popup_margin)
         popup_pos = self.mapToGlobal(QPoint(popup_x, 52))
         self._tab_picker_popup.move(popup_pos)
-        self._tab_picker_input.clear()
-        self._filter_tab_picker_items('')
+        if hasattr(self, '_tab_picker_input'):
+            self._tab_picker_input.setText(query)
+        self._filter_tab_picker_items(query)
         self._tab_picker_popup.show()
         self._tab_picker_popup.raise_()
         self._tab_picker_popup.activateWindow()
@@ -1154,18 +1313,34 @@ class WindowLifecycleMixin:
                 current_button.setFocus()
         return True
 
+    def _is_main_window_event_target(self, obj: Any) -> bool:
+        """Return whether a global event target belongs to this main window."""
+        target = obj if isinstance(obj, QWidget) else QApplication.focusWidget()
+        if target is None:
+            return False
+        if target is self:
+            return True
+        if not isinstance(target, QWidget):
+            return False
+        return target.window() is self
+
     def _handle_global_input_exit_event(self, obj: Any, event: Any) -> bool:
         """Handle app-wide Escape/backtick behavior for text entry widgets."""
         if hasattr(self, '_tab_picker_popup') and obj in (self._tab_picker_popup, self._tab_picker_input, self._tab_picker_list):
-            if self._is_plain_escape_key(event) or self._is_plain_backtick_key(event):
+            if self._is_plain_escape_key(event):
                 self._hide_tab_picker()
+                event.accept()
+                return True
+            if self._is_plain_backtick_key(event):
+                self._show_tab_picker(preserve_query=True)
                 event.accept()
                 return True
             return False
         if self._is_plain_escape_key(event) and self._dismiss_main_window_text_input(obj):
             event.accept()
             return True
-        if self._is_plain_backtick_key(event) and self._dismiss_main_window_text_input(obj, focus_current_button=False):
+        if self._is_plain_backtick_key(event) and self._is_main_window_event_target(obj):
+            self._dismiss_main_window_text_input(obj, focus_current_button=False)
             self._show_tab_picker()
             event.accept()
             return True
@@ -1367,18 +1542,21 @@ class WindowLifecycleMixin:
             return
 
     def _handle_tab_picker_shortcut(self) -> None:
-        """Open or close the popup tab picker from the global shortcut."""
+        """Open or refocus the popup tab picker from the global shortcut."""
         if hasattr(self, '_tab_picker_popup') and self._tab_picker_popup.isVisible():
-            self._hide_tab_picker()
+            self._show_tab_picker(preserve_query=True)
             return
-        if self._should_handle_main_tab_navigation_keys():
-            self._show_tab_picker()
+        self._show_tab_picker()
 
     def eventFilter(self, obj: Any, event: Any) -> bool:
         """Handle picker-specific keyboard and focus behavior before other filters."""
         if hasattr(self, '_tab_picker_popup') and hasattr(self, '_tab_picker_list') and obj in (self._tab_picker_popup, self._tab_picker_input, self._tab_picker_list):
-            if self._is_plain_escape_key(event) or self._is_plain_backtick_key(event):
+            if self._is_plain_escape_key(event):
                 self._hide_tab_picker()
+                event.accept()
+                return True
+            if self._is_plain_backtick_key(event):
+                self._show_tab_picker(preserve_query=True)
                 event.accept()
                 return True
             if obj is self._tab_picker_input and event.type() == QEvent.Type.KeyPress:

@@ -22,12 +22,30 @@ class _AumTableWidgetItem(QTableWidgetItem):
             return super().__lt__(other)
 
 
+class _NumericTableWidgetItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by a numeric UserRole value."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        try:
+            left = float(self.data(Qt.ItemDataRole.UserRole))
+            right = float(other.data(Qt.ItemDataRole.UserRole))
+            return left < right
+        except Exception:
+            return super().__lt__(other)
+
+
 class EtfAnalyserMixin:
     def _p13_build_service(self) -> Any:
         """Import and construct the ETF holdings service only when the page is initialized."""
         from budget_terminal_app.etf_holdings import EtfHoldingsService
 
         return EtfHoldingsService()
+
+    def _p13_build_arbitrage_service(self) -> Any:
+        """Import and construct the ETF arbitrage data service lazily."""
+        from budget_terminal_app.services.etf_arbitrage import EtfArbitrageDataService
+
+        return EtfArbitrageDataService()
 
     def init_page13(self) -> None:
         """Build the ETF analyser page UI."""
@@ -41,6 +59,11 @@ class EtfAnalyserMixin:
         self._p13_aum_fetch_in_progress: bool = False
         self._p13_aum_missing_count: int = 0
         self._p13_aum_total_count: int = 0
+        self._p13_arbitrage_request_seq = 0
+        self._p13_arbitrage_active_request_id = 0
+        self._p13_arbitrage_fetch_in_progress = False
+        self._p13_arbitrage_payload: dict[str, Any] = {}
+        self._p13_arbitrage_service = self._p13_build_arbitrage_service()
 
         outer_layout = QHBoxLayout(self.page13)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -128,6 +151,13 @@ class EtfAnalyserMixin:
         self.set_theme_role(self.p13_status_lbl, 'status_muted')
         layout.addWidget(self.p13_status_lbl)
 
+        self.p13_tabs = QTabWidget()
+        self.p13_tabs.setDocumentMode(True)
+        self.p13_holdings_tab = QWidget()
+        holdings_layout = QVBoxLayout(self.p13_holdings_tab)
+        holdings_layout.setContentsMargins(0, 0, 0, 0)
+        holdings_layout.setSpacing(8)
+
         self.p13_chart_frame = QFrame()
         chart_layout = QVBoxLayout(self.p13_chart_frame)
         chart_layout.setContentsMargins(12, 10, 12, 10)
@@ -162,12 +192,98 @@ class EtfAnalyserMixin:
         self.p13_holdings_row.setSpacing(10)
         self.p13_holdings_row.addWidget(self.p13_table, 3)
         self.p13_holdings_row.addWidget(self.p13_chart_frame, 2)
-        layout.addLayout(self.p13_holdings_row, 1)
+        holdings_layout.addLayout(self.p13_holdings_row, 1)
+
+        self.p13_tabs.addTab(self.p13_holdings_tab, 'Holdings')
+        self.p13_arbitrage_tab = self._p13_build_arbitrage_tab()
+        self.p13_tabs.addTab(self.p13_arbitrage_tab, 'Arbitrage')
+        self.p13_tabs.currentChanged.connect(self._p13_on_subtab_changed)
+        layout.addWidget(self.p13_tabs, 1)
 
         self._apply_etf_theme()
         self._p13_show_holdings_chart_placeholder()
+        self._p13_render_arbitrage_payload()
 
         self._p13_fetch_aum_universe()
+
+    def _p13_build_arbitrage_tab(self) -> QWidget:
+        """Build the ETF-vs-basket arbitrage subtab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.p13_arbitrage_controls_frame = QFrame()
+        controls_layout = QHBoxLayout(self.p13_arbitrage_controls_frame)
+        controls_layout.setContentsMargins(12, 8, 12, 8)
+        controls_layout.setSpacing(10)
+        self.p13_arbitrage_title_lbl = QLabel('<b>ETF vs Basket</b>')
+        controls_layout.addWidget(self.p13_arbitrage_title_lbl)
+        controls_layout.addStretch()
+        self.p13_arbitrage_refresh_btn = QPushButton('Refresh Arbitrage')
+        self.set_theme_variant(self.p13_arbitrage_refresh_btn, 'accent')
+        self.p13_arbitrage_refresh_btn.clicked.connect(lambda: self._p13_request_arbitrage_refresh(force=True))
+        controls_layout.addWidget(self.p13_arbitrage_refresh_btn)
+        layout.addWidget(self.p13_arbitrage_controls_frame)
+
+        self.p13_arbitrage_summary_frame = QFrame()
+        summary_layout = QHBoxLayout(self.p13_arbitrage_summary_frame)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setSpacing(0)
+        self.p13_arbitrage_metric_labels: dict[str, QLabel] = {}
+        metrics = (
+            ('etf_price', 'ETF Price'),
+            ('etf_move', 'ETF Move'),
+            ('basket_move', 'Basket Move'),
+            ('gap_bps', 'Gap'),
+            ('coverage', 'Quote Coverage'),
+            ('signal', 'Signal'),
+        )
+        for index, (key, title) in enumerate(metrics):
+            if index:
+                sep = QFrame()
+                sep.setFixedWidth(1)
+                summary_layout.addWidget(sep)
+                self.p13_arbitrage_metric_labels[f'{key}_sep'] = sep
+            cell = QVBoxLayout()
+            cell.setContentsMargins(8, 1, 8, 1)
+            cell.setSpacing(2)
+            header = QLabel(title)
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value = QLabel('--')
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value.setMinimumWidth(86)
+            cell.addWidget(header)
+            cell.addWidget(value)
+            summary_layout.addLayout(cell, 1)
+            self.p13_arbitrage_metric_labels[f'{key}_header'] = header
+            self.p13_arbitrage_metric_labels[key] = value
+        layout.addWidget(self.p13_arbitrage_summary_frame)
+
+        self.p13_arbitrage_status_lbl = QLabel('Load ETF holdings, then refresh arbitrage.')
+        self.p13_arbitrage_status_lbl.setWordWrap(True)
+        self.set_theme_role(self.p13_arbitrage_status_lbl, 'status_muted')
+        layout.addWidget(self.p13_arbitrage_status_lbl)
+
+        self.p13_arbitrage_table = QTableWidget(0, 6)
+        self.p13_arbitrage_table.setHorizontalHeaderLabels(['Ticker', 'Name', 'Weight', 'Price', 'Move', 'Contribution'])
+        hh = self.p13_arbitrage_table.horizontalHeader()
+        hh.setMinimumHeight(28)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 6):
+            hh.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionsMovable(True)
+        self.p13_arbitrage_table.verticalHeader().setVisible(False)
+        self.p13_arbitrage_table.verticalHeader().setDefaultSectionSize(28)
+        self.p13_arbitrage_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.p13_arbitrage_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.p13_arbitrage_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.p13_arbitrage_table.setAlternatingRowColors(True)
+        self.p13_arbitrage_table.setSortingEnabled(True)
+        self.p13_arbitrage_table.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+        layout.addWidget(self.p13_arbitrage_table, 1)
+        return tab
 
     def _p13_result_to_snapshot(self, result: Any) -> dict[str, Any] | None:
         """Convert one ETF result into a JSON-safe session snapshot."""
@@ -277,6 +393,7 @@ class EtfAnalyserMixin:
             'update_collection_info': bool(update_collection_info),
         }
         self._p13_show_holdings_chart_placeholder('Loading', 'Breakdown')
+        self._p13_clear_arbitrage_payload('Arbitrage refresh will be available after holdings load.')
         self.set_status_text(self.p13_status_lbl, f'Loading ETF holdings for {ticker} from official issuer sources...', status='warning')
         self.p13_load_btn.setEnabled(False)
 
@@ -372,6 +489,13 @@ class EtfAnalyserMixin:
         if update_collection_info:
             self._set_data_collection_info([result.issuer or 'official issuer source'])
         self.p13_load_btn.setEnabled(True)
+        self._p13_clear_arbitrage_payload(
+            f'Refresh arbitrage to compare {result.ticker} against the loaded basket.'
+            if rows
+            else 'Load ETF holdings before refreshing arbitrage.'
+        )
+        if rows and self._p13_arbitrage_tab_active():
+            self._p13_request_arbitrage_refresh(force=False)
         self._p13_save_session_snapshot()
 
     def _p13_export_clipboard(self) -> None:
@@ -387,12 +511,215 @@ class EtfAnalyserMixin:
         QApplication.clipboard().setText('\n'.join(lines))
         self.set_status_text(self.p13_status_lbl, f'Copied {len(self._p13_rows)} holdings to clipboard.', status='positive')
 
+    def _p13_arbitrage_tab_active(self) -> bool:
+        """Return whether the ETF Arbitrage subtab is visible."""
+        return (
+            hasattr(self, 'p13_tabs')
+            and hasattr(self, 'p13_arbitrage_tab')
+            and self.p13_tabs.currentWidget() is self.p13_arbitrage_tab
+        )
+
+    def _p13_on_subtab_changed(self, _index: int) -> None:
+        """Refresh arbitrage data when its subtab becomes visible."""
+        if not self._p13_arbitrage_tab_active():
+            return
+        result = getattr(self, '_p13_last_result', None)
+        if result is None or not list(getattr(result, 'holdings', []) or []):
+            self._p13_set_arbitrage_status('Load ETF holdings before refreshing arbitrage.', 'warning')
+            return
+        ticker = str(getattr(result, 'ticker', '') or '').upper().strip()
+        cached_ticker = str(getattr(self, '_p13_arbitrage_payload', {}).get('ticker', '') or '').upper().strip()
+        if ticker and ticker != cached_ticker and not getattr(self, '_p13_arbitrage_fetch_in_progress', False):
+            self._p13_request_arbitrage_refresh(force=False)
+
+    def _p13_clear_arbitrage_payload(self, status_text: str='Load ETF holdings, then refresh arbitrage.') -> None:
+        """Clear stale arbitrage output without touching the loaded holdings."""
+        self._p13_arbitrage_active_request_id += 1
+        self._p13_arbitrage_fetch_in_progress = False
+        if hasattr(self, 'p13_arbitrage_refresh_btn'):
+            self.p13_arbitrage_refresh_btn.setEnabled(True)
+        self._p13_arbitrage_payload = {}
+        self._p13_render_arbitrage_payload()
+        self._p13_set_arbitrage_status(status_text, 'muted')
+
+    def _p13_request_arbitrage_refresh(self, *_: Any, force: bool=True) -> bool:
+        """Fetch ETF and component quotes for the arbitrage subtab."""
+        result = getattr(self, '_p13_last_result', None)
+        if result is None or not list(getattr(result, 'holdings', []) or []):
+            self._p13_set_arbitrage_status('Load ETF holdings before refreshing arbitrage.', 'warning')
+            return False
+        if getattr(self, '_p13_arbitrage_fetch_in_progress', False):
+            return False
+        ticker = str(getattr(result, 'ticker', '') or '').upper().strip()
+        cached_ticker = str(getattr(self, '_p13_arbitrage_payload', {}).get('ticker', '') or '').upper().strip()
+        if not force and cached_ticker == ticker and getattr(self, '_p13_arbitrage_payload', {}).get('rows'):
+            self._p13_render_arbitrage_payload()
+            return False
+
+        self._p13_arbitrage_request_seq += 1
+        request_id = self._p13_arbitrage_request_seq
+        self._p13_arbitrage_active_request_id = request_id
+        self._p13_arbitrage_fetch_in_progress = True
+        if hasattr(self, 'p13_arbitrage_refresh_btn'):
+            self.p13_arbitrage_refresh_btn.setEnabled(False)
+        self._p13_set_arbitrage_status(f'Fetching {ticker} and basket quotes...', 'warning')
+
+        def _run() -> None:
+            try:
+                payload = self._p13_arbitrage_service.fetch(result)
+                self._invoke_main.emit(lambda data=payload, rid=request_id: self._p13_apply_arbitrage_result(rid, data))
+            except Exception as exc:
+                logger.error('ETF arbitrage refresh failed for %s: %s', ticker, exc)
+                self._invoke_main.emit(lambda err=str(exc), rid=request_id: self._p13_handle_arbitrage_error(rid, err))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+
+    def _p13_apply_arbitrage_result(self, request_id: int, payload: Any) -> None:
+        """Render the latest arbitrage payload if it matches the active request."""
+        if request_id != getattr(self, '_p13_arbitrage_active_request_id', 0):
+            return
+        self._p13_arbitrage_fetch_in_progress = False
+        if hasattr(self, 'p13_arbitrage_refresh_btn'):
+            self.p13_arbitrage_refresh_btn.setEnabled(True)
+        self._p13_arbitrage_payload = payload if isinstance(payload, dict) else {}
+        self._p13_render_arbitrage_payload()
+        coverage = int(self._p13_arbitrage_payload.get('quote_coverage', 0) or 0)
+        total = int(self._p13_arbitrage_payload.get('total_holdings', 0) or 0)
+        gap_text = self._p13_format_signed_bps(self._p13_arbitrage_payload.get('gap_bps'))
+        signal = str(self._p13_arbitrage_payload.get('signal') or '--')
+        if self._p13_arbitrage_payload.get('gap_bps') is None:
+            self._p13_set_arbitrage_status(
+                f'Arbitrage quotes incomplete for {self._p13_arbitrage_payload.get("ticker", "ETF")}: {coverage}/{total} holdings covered.',
+                'warning',
+            )
+        elif total and coverage < total:
+            self._p13_set_arbitrage_status(f'Raw return gap {gap_text} ({signal}); {coverage}/{total} holdings covered.', 'warning')
+        else:
+            self._p13_set_arbitrage_status(f'Raw return gap {gap_text} ({signal}).', 'positive')
+
+    def _p13_handle_arbitrage_error(self, request_id: int, message: Any) -> None:
+        """Show a user-facing error when arbitrage quote loading fails."""
+        if request_id != getattr(self, '_p13_arbitrage_active_request_id', 0):
+            return
+        self._p13_arbitrage_fetch_in_progress = False
+        if hasattr(self, 'p13_arbitrage_refresh_btn'):
+            self.p13_arbitrage_refresh_btn.setEnabled(True)
+        self._p13_set_arbitrage_status(f'Arbitrage refresh failed: {message}', 'negative')
+
+    def _p13_render_arbitrage_payload(self) -> None:
+        """Render ETF arbitrage metrics and basket rows."""
+        if not hasattr(self, 'p13_arbitrage_table'):
+            return
+        payload = getattr(self, '_p13_arbitrage_payload', {})
+        if not isinstance(payload, dict) or not payload:
+            for key in ('etf_price', 'etf_move', 'basket_move', 'gap_bps', 'coverage', 'signal'):
+                label = getattr(self, 'p13_arbitrage_metric_labels', {}).get(key)
+                if label is not None:
+                    label.setText('--')
+                    self._p13_style_arbitrage_metric_label(label, 'text_muted')
+            self.p13_arbitrage_table.setRowCount(0)
+            return
+
+        self._p13_set_arbitrage_metric('etf_price', self._p13_format_money(payload.get('etf_price')), 'text_primary')
+        self._p13_set_arbitrage_metric('etf_move', self._p13_format_signed_pct(payload.get('etf_move_pct')), self._p13_value_color_token(payload.get('etf_move_pct')))
+        self._p13_set_arbitrage_metric('basket_move', self._p13_format_signed_pct(payload.get('basket_move_pct')), self._p13_value_color_token(payload.get('basket_move_pct')))
+        self._p13_set_arbitrage_metric('gap_bps', self._p13_format_signed_bps(payload.get('gap_bps')), self._p13_value_color_token(payload.get('gap_bps')))
+        coverage = int(payload.get('quote_coverage', 0) or 0)
+        total = int(payload.get('total_holdings', 0) or 0)
+        self._p13_set_arbitrage_metric('coverage', f'{coverage}/{total}' if total else '--', 'text_primary' if coverage == total and total else 'warning')
+        self._p13_set_arbitrage_metric('signal', str(payload.get('signal') or '--'), 'text_primary')
+
+        rows = [dict(row) for row in list(payload.get('rows') or []) if isinstance(row, dict)]
+        self.p13_arbitrage_table.setSortingEnabled(False)
+        self.p13_arbitrage_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            symbol_item = QTableWidgetItem(str(row.get('symbol') or ''))
+            symbol_item.setForeground(self.theme_qcolor('text_primary'))
+            name_item = QTableWidgetItem(str(row.get('name') or ''))
+            name_item.setForeground(self.theme_qcolor('text_secondary'))
+            weight_item = self._p13_numeric_table_item(self._p13_format_weight(row.get('weight')), row.get('weight'), 'accent_positive')
+            price_item = self._p13_numeric_table_item(self._p13_format_money(row.get('price')), row.get('price'), 'text_primary')
+            move_item = self._p13_numeric_table_item(self._p13_format_signed_pct(row.get('move_pct')), row.get('move_pct'), self._p13_value_color_token(row.get('move_pct')))
+            contribution_item = self._p13_numeric_table_item(
+                self._p13_format_signed_pct(row.get('contribution_pct')),
+                row.get('contribution_pct'),
+                self._p13_value_color_token(row.get('contribution_pct')),
+            )
+            self.p13_arbitrage_table.setItem(row_index, 0, symbol_item)
+            self.p13_arbitrage_table.setItem(row_index, 1, name_item)
+            self.p13_arbitrage_table.setItem(row_index, 2, weight_item)
+            self.p13_arbitrage_table.setItem(row_index, 3, price_item)
+            self.p13_arbitrage_table.setItem(row_index, 4, move_item)
+            self.p13_arbitrage_table.setItem(row_index, 5, contribution_item)
+        self.p13_arbitrage_table.setSortingEnabled(True)
+        self.p13_arbitrage_table.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+
+    def _p13_set_arbitrage_metric(self, key: str, text: str, color_token: str) -> None:
+        label = getattr(self, 'p13_arbitrage_metric_labels', {}).get(key)
+        if label is None:
+            return
+        label.setText(text)
+        self._p13_style_arbitrage_metric_label(label, color_token)
+
+    def _p13_style_arbitrage_metric_label(self, label: QLabel, color_token: str) -> None:
+        label.setStyleSheet(f'color: {self.theme_color(color_token)}; font-size: 14px; font-weight: bold; border: none;')
+
+    def _p13_set_arbitrage_status(self, text: Any, status: str='muted') -> None:
+        if hasattr(self, 'p13_arbitrage_status_lbl'):
+            self.set_status_text(self.p13_arbitrage_status_lbl, str(text or ''), status=status)
+
+    def _p13_numeric_table_item(self, text: str, value: Any, color_token: str) -> QTableWidgetItem:
+        item = _NumericTableWidgetItem(text)
+        numeric_value = self._p13_float_or_none(value)
+        item.setData(Qt.ItemDataRole.UserRole, numeric_value if numeric_value is not None else -10_000_000.0)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        item.setForeground(self.theme_qcolor(color_token))
+        return item
+
+    @staticmethod
+    def _p13_float_or_none(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def _p13_value_color_token(self, value: Any) -> str:
+        number = self._p13_float_or_none(value)
+        if number is None or abs(number) < 1e-12:
+            return 'text_muted'
+        return 'accent_positive' if number > 0 else 'accent_negative'
+
+    def _p13_format_money(self, value: Any) -> str:
+        number = self._p13_float_or_none(value)
+        return f'${number:,.2f}' if number is not None else '--'
+
+    def _p13_format_signed_pct(self, value: Any) -> str:
+        number = self._p13_float_or_none(value)
+        if number is None:
+            return '--'
+        sign = '+' if number > 0 else ''
+        return f'{sign}{number:.2f}%'
+
+    def _p13_format_signed_bps(self, value: Any) -> str:
+        number = self._p13_float_or_none(value)
+        if number is None:
+            return '--'
+        sign = '+' if number > 0 else ''
+        return f'{sign}{number:.1f} bps'
+
+    def _p13_format_weight(self, value: Any) -> str:
+        number = self._p13_float_or_none(value)
+        return f'{number * 100.0:.2f}%' if number is not None else '--'
+
     def _p13_handle_error(self, request_id: int, ticker: str, exc: Any) -> None:
         """Show a user-facing error for ETF loads."""
         self._p13_request_contexts.pop(request_id, None)
         if request_id != getattr(self, '_p13_active_request_id', 0):
             return
         self._p13_show_holdings_chart_placeholder('Load ETF', 'Breakdown')
+        self._p13_clear_arbitrage_payload('Load ETF holdings before refreshing arbitrage.')
         self.p13_load_btn.setEnabled(True)
         self.set_status_text(self.p13_status_lbl, f'Failed to load {ticker}: {exc}', status='negative')
         if hasattr(self, '_record_data_health_exception'):
@@ -672,6 +999,8 @@ class EtfAnalyserMixin:
         self.p13_controls_frame.setStyleSheet(panel_style)
         self.p13_summary_frame.setStyleSheet(panel_style)
         self.p13_chart_frame.setStyleSheet(panel_style)
+        self.p13_arbitrage_controls_frame.setStyleSheet(panel_style)
+        self.p13_arbitrage_summary_frame.setStyleSheet(panel_style)
         self.p13_symbol_lbl.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
         self.p13_etf_input.setStyleSheet(input_style)
         for label in (
@@ -682,8 +1011,14 @@ class EtfAnalyserMixin:
             self.p13_assets_lbl,
             self.p13_count_lbl,
             self._p13_aum_title_lbl,
+            self.p13_arbitrage_title_lbl,
         ):
             label.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
+        for key, label in getattr(self, 'p13_arbitrage_metric_labels', {}).items():
+            if key.endswith('_header'):
+                label.setStyleSheet(f'color: {self.theme_color("text_secondary")}; border: none; font-size: 11px;')
+            elif key.endswith('_sep'):
+                label.setStyleSheet(f'background: {self.theme_color("panel_border")}; border: none;')
         self._p13_aum_status_lbl.setStyleSheet(
             f'color: {self.theme_color("text_secondary")}; border: none; font-size: 11px;'
         )
@@ -701,8 +1036,15 @@ class EtfAnalyserMixin:
             self.p13_status_lbl.text(),
             status=self.p13_status_lbl.property('bt_status') or 'muted',
         )
+        self.set_status_text(
+            self.p13_arbitrage_status_lbl,
+            self.p13_arbitrage_status_lbl.text(),
+            status=self.p13_arbitrage_status_lbl.property('bt_status') or 'muted',
+        )
         self.p13_table.setStyleSheet(table_style)
+        self.p13_arbitrage_table.setStyleSheet(table_style)
         self._p13_aum_table.setStyleSheet(table_style)
+        self._p13_render_arbitrage_payload()
         for row_index in range(self.p13_table.rowCount()):
             ticker_item = self.p13_table.item(row_index, 0)
             name_item = self.p13_table.item(row_index, 1)

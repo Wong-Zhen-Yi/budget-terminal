@@ -267,6 +267,7 @@ class WindowSetupMixin:
         self.top_bar.addWidget(self._nav_scroll_area, 1)
         self.top_bar.addWidget(nav_scroll_right)
         self._tab_picker_items = []
+        self._tab_picker_entries = []
         self._tab_picker_map = {}
         self._tab_picker_popup = QDialog(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self._tab_picker_popup.setModal(False)
@@ -276,7 +277,7 @@ class WindowSetupMixin:
         popup_layout.setContentsMargins(10, 10, 10, 10)
         popup_layout.setSpacing(8)
         self._tab_picker_input = QLineEdit()
-        self._tab_picker_input.setPlaceholderText('Type a tab name')
+        self._tab_picker_input.setPlaceholderText('Search pages or subpages')
         self._tab_picker_input.textChanged.connect(self._filter_tab_picker_items)
         self._tab_picker_input.installEventFilter(self)
         popup_layout.addWidget(self._tab_picker_input)

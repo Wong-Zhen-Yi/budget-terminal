@@ -25,7 +25,7 @@ class SettingsMixin:
     SETTINGS_SHORTCUT_ROWS = (
         ('Ctrl+Tab', 'Switch to the next visible main tab and wrap through the current navigation order.'),
         ('F5', 'Refresh the page that is currently open in the main workspace.'),
-        ('`', 'Open or close the tab picker. If a main-window text input is focused, exit it first and then open the picker.'),
+        ('`', 'Open or refocus the page and subpage search. If a main-window text input is focused, exit it first and then open search.'),
         ('Esc', 'Close the tab picker or exit the active main-window text input without changing pages.'),
     )
 
