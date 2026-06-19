@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-USER_DATA_SCHEMA_VERSION = 13
+USER_DATA_SCHEMA_VERSION = 15
 TAB_SESSION_CACHE_SCHEMA_VERSION = 1
 
 

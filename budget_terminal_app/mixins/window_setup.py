@@ -124,6 +124,7 @@ class WindowSetupMixin:
         self._register_lazy_pages()
         self._initialize_startup_pages()
         self._register_navigation_pages()
+        self._apply_privacy_page_effects()
         self._start_clock_timer()
 
     def _prepare_main_page_widget(self, page: Any) -> Any:
@@ -228,9 +229,19 @@ class WindowSetupMixin:
             self.btn_page9,
             self.btn_page22,
         ]
-        self.top_refresh_btn = QPushButton('Reload (F5)')
+        self._top_refresh_default_text = 'Reload (F5)'
+        self.top_refresh_btn = QPushButton(self._top_refresh_default_text)
         self.top_refresh_btn.setToolTip('Reload the current page (F5)')
         self.top_refresh_btn.clicked.connect(self._refresh_current_page)
+        self._privacy_obscured = True
+        self.privacy_btn = QPushButton('Reveal')
+        self.privacy_btn.setCheckable(True)
+        self.privacy_btn.setChecked(True)
+        self.privacy_btn.setMinimumWidth(82)
+        self.privacy_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.privacy_btn.setToolTip('Obscure the pages selected in Settings (Ctrl+Shift+H)')
+        self.privacy_btn.setAccessibleName('Reveal configured pages')
+        self.privacy_btn.toggled.connect(self._set_pages_obscured)
         nav_scroll_left = QPushButton('<')
         nav_scroll_left.setFixedWidth(24)
         nav_scroll_left.setFixedHeight(38)
@@ -310,12 +321,16 @@ class WindowSetupMixin:
         self._tab_picker_shortcut = QShortcut(QKeySequence('`'), self)
         self._tab_picker_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._tab_picker_shortcut.activated.connect(self._handle_tab_picker_shortcut)
+        self._privacy_toggle_shortcut = QShortcut(QKeySequence('Ctrl+Shift+H'), self)
+        self._privacy_toggle_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._privacy_toggle_shortcut.activated.connect(self.privacy_btn.toggle)
         self._tz_choices = TIMEZONE_CHOICES
         self._clock_country_choices = CLOCK_COUNTRY_CHOICES
         self._clock_country_code = load_clock_country_code()
         self._time_12h = load_time_format()
         self.top_bar.addWidget(self.time_label)
         self.top_bar.addSpacing(8)
+        self.top_bar.addWidget(self.privacy_btn)
         self.top_bar.addWidget(self.top_refresh_btn)
         root_layout.addLayout(self.top_bar)
         self.stacked_widget = _CurrentPageStackedWidget()
@@ -340,6 +355,68 @@ class WindowSetupMixin:
         root_layout.addLayout(footer_row)
         self._bind_shell_interaction_logging()
         self._startup_progress_complete('window_shell', 'Window shell')
+
+    def _privacy_target_page_indexes(self) -> list[int]:
+        """Return the normalized page indexes controlled by the Obscure button."""
+        state = normalize_privacy_settings(getattr(self, 'privacy_state', DEFAULT_PRIVACY_SETTINGS))
+        self.privacy_state = state
+        return list(state.get('obscured_pages', []))
+
+    def _apply_privacy_page_effects(self) -> None:
+        """Apply the current Obscure state to configured main pages."""
+        if not hasattr(self, 'stacked_widget'):
+            return
+        hidden_indexes = set(self._privacy_target_page_indexes()) if getattr(self, '_privacy_obscured', False) else set()
+        effects = getattr(self, '_privacy_page_effects', {})
+        for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
+            if page_index == SETTINGS_PAGE_INDEX:
+                continue
+            page = self.stacked_widget.widget(page_index)
+            if page is None:
+                continue
+            effect = effects.get(page_index)
+            if page_index in hidden_indexes and effect is None:
+                effect = QGraphicsBlurEffect(page)
+                effect.setBlurRadius(18.0)
+                effect.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
+                page.setGraphicsEffect(effect)
+                effects[page_index] = effect
+            if effect is not None:
+                effect.setEnabled(page_index in hidden_indexes)
+            page.setEnabled(page_index not in hidden_indexes)
+        self._privacy_page_effects = effects
+
+    def _set_pages_obscured(self, obscured: Any) -> None:
+        """Blur and lock configured pages until the user reveals them."""
+        hidden = bool(obscured)
+        self._privacy_obscured = hidden
+        button = getattr(self, 'privacy_btn', None)
+        if button is not None:
+            button.setText('Reveal' if hidden else 'Obscure')
+            button.setAccessibleName('Reveal configured pages' if hidden else 'Obscure configured pages')
+            self.set_theme_variant(button, 'accent' if hidden else None)
+        self._apply_privacy_page_effects()
+        if hasattr(self, 'status_bar'):
+            target_count = len(self._privacy_target_page_indexes())
+            if hidden and target_count == 0:
+                message = 'Obscure is active, but no pages are selected in Settings.'
+            elif hidden:
+                suffix = 'page is' if target_count == 1 else 'pages are'
+                message = f'{target_count} configured {suffix} obscured.'
+            else:
+                message = 'Configured pages are visible.'
+            self.status_bar.setText(message)
+
+    def _set_shell_refresh_busy(self, busy: Any, text: Any=None) -> None:
+        """Reflect active refresh work in the shell reload control."""
+        button = getattr(self, 'top_refresh_btn', None)
+        if button is None:
+            return
+        default_text = str(getattr(self, '_top_refresh_default_text', 'Reload (F5)') or 'Reload (F5)')
+        is_busy = bool(busy)
+        button.setEnabled(not is_busy)
+        button.setText(str(text or 'Refreshing...') if is_busy else default_text)
+        self.set_theme_variant(button, 'accent' if is_busy else None)
 
     def _safe_log_text(self, value: Any, *, max_length: int=80, fallback: str='unnamed') -> str:
         """Return a compact single-line label for session log messages."""
@@ -977,6 +1054,9 @@ class WindowSetupMixin:
         if placeholder is not None:
             self.stacked_widget.removeWidget(placeholder)
             placeholder.deleteLater()
+        privacy_effects = getattr(self, '_privacy_page_effects', None)
+        if isinstance(privacy_effects, dict):
+            privacy_effects.pop(page_index, None)
         entry['widget'] = page
         entry['initialized'] = True
         theme_hook = getattr(self, str(entry.get('theme_hook', '') or ''), None)
@@ -990,6 +1070,8 @@ class WindowSetupMixin:
             session_restore_hook(page_index)
         if hasattr(self, '_lazy_warmup_queue') and int(entry['index']) in getattr(self, '_lazy_warmup_queue', []):
             self._lazy_warmup_queue = [value for value in self._lazy_warmup_queue if int(value) != int(entry['index'])]
+        if hasattr(self, '_apply_privacy_page_effects'):
+            self._apply_privacy_page_effects()
         self._bind_page_interaction_logging(page, page_index)
         logger.info('Page load complete: %s (index %s, reason=%s) in %.3fs.', page_label, page_index, reason, time.perf_counter() - started_at)
         self._startup_progress_complete_page(page_index, page_label)

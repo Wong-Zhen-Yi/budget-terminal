@@ -15,6 +15,12 @@ from budget_terminal_app.workers.youtube import YOUTUBE_CACHE_DIR
 class SettingsMixin:
     SETTINGS_NAVIGATION_ROW_HEIGHT = 30
     SETTINGS_NAVIGATION_VISIBLE_ROWS = 12
+    SETTINGS_SUBTABS = (
+        ('general', 'General'),
+        ('workspace', 'Workspace'),
+        ('data', 'Data'),
+        ('diagnostics', 'Diagnostics'),
+    )
     SETTINGS_CACHE_DIR_NAMES = (
         calendar_worker._ECONOMIC_EVENTS_CACHE_DIR,
         calendar_worker._MARKET_HOLIDAY_CACHE_DIR,
@@ -26,6 +32,7 @@ class SettingsMixin:
         ('Ctrl+Tab', 'Switch to the next visible main tab and wrap through the current navigation order.'),
         ('F5', 'Refresh the page that is currently open in the main workspace.'),
         ('`', 'Open or refocus the page and subpage search. If a main-window text input is focused, exit it first and then open search.'),
+        ('Ctrl+Shift+H', 'Obscure or reveal the pages selected in Privacy settings.'),
         ('Esc', 'Close the tab picker or exit the active main-window text input without changing pages.'),
     )
 
@@ -33,31 +40,23 @@ class SettingsMixin:
         """Build the Settings page UI."""
         logger.info('Settings page initialization started.')
         page_layout = QVBoxLayout(self.page9)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.setSpacing(0)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        page_layout.addWidget(scroll_area)
-        content_widget = QWidget()
-        scroll_area.setWidget(content_widget)
-        layout = QVBoxLayout(content_widget)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(3)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        page_layout.setContentsMargins(12, 10, 12, 10)
+        page_layout.setSpacing(6)
         self.settings_separator_lines = []
+        self.settings_page_state = load_settings_page_settings()
 
         header_frame = self._build_settings_header()
         preferences_box = self._build_settings_preferences_box()
+        privacy_box = self._build_settings_privacy_box()
         navigation_box = self._build_settings_navigation_box()
         actions_box = self._build_settings_user_data_box()
         data_health_box = self._build_settings_data_health_box()
         logs_box = self._build_settings_logs_box()
         shortcuts_box = self._build_settings_shortcuts_box()
         startup_box = self._build_settings_startup_performance_box()
-        content_grid = self._build_settings_content_grid(
+        self.settings_tabs = self._build_settings_tabs(
             preferences_box,
+            privacy_box,
             navigation_box,
             actions_box,
             shortcuts_box,
@@ -69,9 +68,9 @@ class SettingsMixin:
         self.settings_status_label = QLabel('Ready')
         self.set_theme_role(self.settings_status_label, 'status_muted')
         self.settings_status_label.setMinimumHeight(18)
-        layout.addWidget(header_frame)
-        layout.addLayout(content_grid)
-        layout.addWidget(self.settings_status_label)
+        page_layout.addWidget(header_frame)
+        page_layout.addWidget(self.settings_tabs, 1)
+        page_layout.addWidget(self.settings_status_label)
         self._style_settings_log_output()
         self._style_settings_data_health_report()
         self._style_settings_startup_history_output()
@@ -130,6 +129,74 @@ class SettingsMixin:
         preferences_layout.addWidget(self.settings_startup_checkbox)
         preferences_layout.addWidget(self.settings_startup_hint)
         return preferences_box
+
+    def _build_settings_privacy_box(self) -> QGroupBox:
+        """Build controls for selecting pages affected by the Obscure button."""
+        privacy_box = QGroupBox('Privacy')
+        self.set_theme_role(privacy_box, 'panel')
+        privacy_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        privacy_layout = QVBoxLayout(privacy_box)
+        privacy_layout.setContentsMargins(12, 12, 12, 10)
+        privacy_layout.setSpacing(6)
+        privacy_layout.addWidget(self._settings_section_header(
+            'Obscured Pages',
+            'Choose which main pages the top-bar Obscure button blurs and locks. An empty selection is allowed.',
+        ))
+        self.settings_privacy_list = QListWidget()
+        self.settings_privacy_list.setSpacing(2)
+        self.settings_privacy_list.setUniformItemSizes(True)
+        self.settings_privacy_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        visible_rows = 8
+        list_height = visible_rows * (self.SETTINGS_NAVIGATION_ROW_HEIGHT + 2) + 2 * self.settings_privacy_list.frameWidth()
+        self.settings_privacy_list.setMinimumHeight(list_height)
+        self.settings_privacy_list.setMaximumHeight(list_height)
+        self.settings_privacy_list.itemChanged.connect(self._on_settings_privacy_item_changed)
+        privacy_layout.addWidget(self.settings_privacy_list)
+        self._refresh_settings_privacy_list()
+        return privacy_box
+
+    def _settings_privacy_payload_from_list(self) -> dict[str, list[int]]:
+        """Build normalized privacy settings from the checked page rows."""
+        if not hasattr(self, 'settings_privacy_list'):
+            return normalize_privacy_settings(getattr(self, 'privacy_state', DEFAULT_PRIVACY_SETTINGS))
+        obscured_pages = []
+        for row in range(self.settings_privacy_list.count()):
+            item = self.settings_privacy_list.item(row)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            try:
+                obscured_pages.append(int(item.data(Qt.ItemDataRole.UserRole)))
+            except (TypeError, ValueError):
+                continue
+        return normalize_privacy_settings({'obscured_pages': obscured_pages})
+
+    def _refresh_settings_privacy_list(self) -> None:
+        """Refresh the Obscure target list from current persisted state."""
+        if not hasattr(self, 'settings_privacy_list'):
+            return
+        state = normalize_privacy_settings(getattr(self, 'privacy_state', DEFAULT_PRIVACY_SETTINGS))
+        self.privacy_state = state
+        selected_pages = set(state.get('obscured_pages', []))
+        page_order = self._navigation_page_order() if hasattr(self, '_navigation_page_order') else list(DEFAULT_NAVIGATION_PAGE_ORDER)
+        self.settings_privacy_list.blockSignals(True)
+        self.settings_privacy_list.clear()
+        for page_index in page_order:
+            if page_index == SETTINGS_PAGE_INDEX:
+                continue
+            item = QListWidgetItem(self._PAGE_LABELS.get(page_index, f'Page {page_index}'))
+            item.setSizeHint(QSize(0, self.SETTINGS_NAVIGATION_ROW_HEIGHT))
+            item.setData(Qt.ItemDataRole.UserRole, page_index)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Checked if page_index in selected_pages else Qt.CheckState.Unchecked)
+            self.settings_privacy_list.addItem(item)
+        self.settings_privacy_list.blockSignals(False)
+
+    def _on_settings_privacy_item_changed(self, _item: Any) -> None:
+        """Persist Obscure targets and reapply an active privacy state."""
+        self.privacy_state = save_privacy_settings(self._settings_privacy_payload_from_list())
+        if hasattr(self, '_apply_privacy_page_effects'):
+            self._apply_privacy_page_effects()
+        self._set_settings_status('Privacy settings updated.', 'positive')
 
     def _settings_action_button(self, text: str, variant: str, slot: Any) -> QPushButton:
         """Create a Settings action button with the standard height and variant."""
@@ -346,28 +413,86 @@ class SettingsMixin:
         startup_layout.addWidget(self.settings_startup_history_output)
         return startup_box
 
-    def _build_settings_content_grid(
+    def _build_settings_tabs(
         self,
         preferences_box: QGroupBox,
+        privacy_box: QGroupBox,
         navigation_box: QGroupBox,
         actions_box: QGroupBox,
         shortcuts_box: QGroupBox,
         data_health_box: QGroupBox,
         logs_box: QGroupBox,
         startup_box: QGroupBox,
-    ) -> QVBoxLayout:
-        """Arrange the Settings page panels in one vertical stack."""
-        content_layout = QVBoxLayout()
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(4)
-        content_layout.addWidget(preferences_box)
-        content_layout.addWidget(navigation_box)
-        content_layout.addWidget(actions_box)
-        content_layout.addWidget(shortcuts_box)
-        content_layout.addWidget(data_health_box)
-        content_layout.addWidget(logs_box)
-        content_layout.addWidget(startup_box)
-        return content_layout
+    ) -> QTabWidget:
+        """Arrange Settings panels into compact, independently scrolling subtabs."""
+        tabs = QTabWidget()
+        tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        tab_panels = (
+            (preferences_box, shortcuts_box),
+            (navigation_box, privacy_box),
+            (actions_box, data_health_box),
+            (logs_box, startup_box),
+        )
+        for (_tab_key, tab_label), panels in zip(self.SETTINGS_SUBTABS, tab_panels):
+            tabs.addTab(self._build_settings_scroll_tab(*panels), tab_label)
+        active_key = normalize_settings_page_settings(self.settings_page_state).get('active_tab', 'general')
+        active_index = next(
+            (index for index, (tab_key, _label) in enumerate(self.SETTINGS_SUBTABS) if tab_key == active_key),
+            0,
+        )
+        tabs.setCurrentIndex(active_index)
+        tabs.currentChanged.connect(self._on_settings_subtab_changed)
+        return tabs
+
+    def _build_settings_scroll_tab(self, *panels: QWidget) -> QWidget:
+        """Build one Settings subtab with vertical scrolling and no horizontal bar."""
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(6, 6, 6, 6)
+        content_layout.setSpacing(6)
+        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        for panel in panels:
+            content_layout.addWidget(panel)
+        content_layout.addStretch(1)
+        scroll_area.setWidget(content)
+        tab_layout.addWidget(scroll_area)
+        return tab
+
+    def _settings_subtab_key(self, index: Any) -> str:
+        """Return the stable persistence key for a Settings subtab index."""
+        try:
+            numeric_index = int(index)
+        except (TypeError, ValueError):
+            numeric_index = 0
+        if 0 <= numeric_index < len(self.SETTINGS_SUBTABS):
+            return self.SETTINGS_SUBTABS[numeric_index][0]
+        return DEFAULT_SETTINGS_PAGE_SETTINGS['active_tab']
+
+    def _on_settings_subtab_changed(self, index: Any) -> None:
+        """Persist the selected Settings subtab."""
+        self.settings_page_state = save_settings_page_settings({'active_tab': self._settings_subtab_key(index)})
+
+    def _apply_settings_subtab_state(self, settings: Any) -> None:
+        """Apply normalized Settings-subtab state to an initialized page."""
+        self.settings_page_state = normalize_settings_page_settings(settings)
+        if not hasattr(self, 'settings_tabs'):
+            return
+        active_key = self.settings_page_state.get('active_tab', DEFAULT_SETTINGS_PAGE_SETTINGS['active_tab'])
+        active_index = next(
+            (index for index, (tab_key, _label) in enumerate(self.SETTINGS_SUBTABS) if tab_key == active_key),
+            0,
+        )
+        self.settings_tabs.blockSignals(True)
+        self.settings_tabs.setCurrentIndex(active_index)
+        self.settings_tabs.blockSignals(False)
 
     def _settings_navigation_item_index(self, item: Any) -> int | None:
         """Return the page index stored on one Settings navigation row."""
@@ -1049,6 +1174,17 @@ class SettingsMixin:
             self._apply_navigation_settings_to_shell()
         if hasattr(self, '_refresh_settings_navigation_list'):
             self._refresh_settings_navigation_list()
+        self.privacy_state = save_privacy_settings(
+            payload.get('privacy', DEFAULT_PRIVACY_SETTINGS)
+        ) if isinstance(payload, dict) else save_privacy_settings(DEFAULT_PRIVACY_SETTINGS)
+        if hasattr(self, '_refresh_settings_privacy_list'):
+            self._refresh_settings_privacy_list()
+        if hasattr(self, '_apply_privacy_page_effects'):
+            self._apply_privacy_page_effects()
+        self.settings_page_state = save_settings_page_settings(
+            payload.get('settings_page', DEFAULT_SETTINGS_PAGE_SETTINGS)
+        ) if isinstance(payload, dict) else save_settings_page_settings(DEFAULT_SETTINGS_PAGE_SETTINGS)
+        self._apply_settings_subtab_state(self.settings_page_state)
         self.dashboard_symbol = str(dashboard_chart_state.get('symbol', 'SPY') or 'SPY').upper()
         self.dashboard_timeframe_label = str(dashboard_chart_state.get('timeframe_label', '1 Day') or '1 Day')
         self.dashboard_active_indicators = list(dashboard_chart_state.get('indicators', ['Volume', '200 MA']))

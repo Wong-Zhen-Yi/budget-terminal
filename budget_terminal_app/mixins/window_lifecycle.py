@@ -971,6 +971,19 @@ class WindowLifecycleMixin:
         if self.height() > height:
             self.resize(self.width(), height)
 
+    def _run_page_show_callback(self, index: int, sequence: int) -> None:
+        """Run a deferred page-show callback only if the page is still current."""
+        if not hasattr(self, 'stacked_widget'):
+            return
+        if int(self.stacked_widget.currentIndex()) != int(index):
+            return
+        if int(getattr(self, '_page_switch_sequence', 0) or 0) != int(sequence):
+            return
+        page = getattr(self, '_pages', {}).get(index, {})
+        callback = page.get('on_show') if isinstance(page, dict) else None
+        if callable(callback):
+            callback()
+
     def switch_page(self, index: Any, *_: Any) -> None:
         """Switch page."""
         try:
@@ -985,13 +998,17 @@ class WindowLifecycleMixin:
         target_label = self._page_label(numeric_index)
         logger.info('Page navigation requested: %s (index %s) -> %s (index %s).', previous_label, previous_index, target_label, numeric_index)
         self._ensure_page_initialized(numeric_index)
+        previous_page = self._pages.get(previous_index, {}) if hasattr(self, '_pages') else {}
+        hide_callback = previous_page.get('on_hide') if isinstance(previous_page, dict) else None
+        if previous_index != numeric_index and callable(hide_callback):
+            hide_callback()
         self.stacked_widget.setCurrentIndex(numeric_index)
         self._restore_window_height_after_page_switch(preserve_height)
         for i, page in self._pages.items():
             page['btn'].setChecked(i == numeric_index)
-            cb = page['on_show'] if i == numeric_index else page['on_hide']
-            if cb:
-                cb()
+        self._page_switch_sequence = int(getattr(self, '_page_switch_sequence', 0) or 0) + 1
+        switch_sequence = int(self._page_switch_sequence)
+        QTimer.singleShot(0, lambda idx=numeric_index, seq=switch_sequence: self._run_page_show_callback(idx, seq))
         if preserve_height:
             QTimer.singleShot(0, lambda height=preserve_height: self._restore_window_height_after_page_switch(height))
         logger.info('Page shown: %s (index %s).', target_label, numeric_index)

@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from budget_terminal_app.constants import (
+    P4_PORTFOLIO_COL_ANALYST_PT,
     P4_PORTFOLIO_COL_AVG_PRICE,
     P4_PORTFOLIO_COL_COST,
     P4_PORTFOLIO_COL_DAY_CHANGE,
@@ -55,6 +56,9 @@ def test_stock_row_formatting_and_sort_values() -> None:
         change_color="#00ff00",
         market_cap=250_000_000_000,
         market_cap_color="#ffaa00",
+        analyst_target=132.6,
+        analyst_positive_color="#00ff00",
+        analyst_negative_color="#ff0000",
     )
 
     _assert(len(row) == len(P4_PORTFOLIO_COLUMNS), "stock row should keep Portfolio column count")
@@ -69,6 +73,9 @@ def test_stock_row_formatting_and_sort_values() -> None:
     _assert(row[P4_PORTFOLIO_COL_DOLLAR_GAIN].text == "+$35.88", "dollar gain should show positive sign")
     _assert(row[P4_PORTFOLIO_COL_GROWTH].text == "+10.2%", "growth should show positive sign")
     _assert(row[P4_PORTFOLIO_COL_MARKET_CAP].text == "Mega $250.00B", "market cap should include bucket")
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].text == "$132.60 (+20%)", "analyst target should include expected upside")
+    _assert(abs(row[P4_PORTFOLIO_COL_ANALYST_PT].sort_value - 20.0) < 0.0001, "analyst target should sort by upside")
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].foreground == "#00ff00", "positive analyst upside should use positive color")
 
     _assert(row[P4_PORTFOLIO_COL_SHARES].editable, "shares should remain editable")
     _assert(row[P4_PORTFOLIO_COL_AVG_PRICE].editable, "average price should remain editable")
@@ -81,6 +88,7 @@ def test_stock_row_formatting_and_sort_values() -> None:
         P4_PORTFOLIO_COL_DOLLAR_GAIN,
         P4_PORTFOLIO_COL_GROWTH,
         P4_PORTFOLIO_COL_MARKET_CAP,
+        P4_PORTFOLIO_COL_ANALYST_PT,
     ):
         _assert(not row[column].editable, f"column {column} should remain read-only")
         _assert(row[column].sort_value is not None, f"column {column} should carry numeric sort data")
@@ -99,6 +107,41 @@ def test_empty_stock_row_defaults() -> None:
     _assert(row[P4_PORTFOLIO_COL_AVG_PRICE].text == "0.00", "missing average price should render as zero")
     _assert(row[P4_PORTFOLIO_COL_MARKET_CAP].text == "--", "missing market cap should render as muted placeholder")
     _assert(row[P4_PORTFOLIO_COL_MARKET_CAP].sort_value == P4_MISSING_NUMERIC_SORT_VALUE, "missing market cap should use the missing sort sentinel")
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].text == "--", "missing analyst target should render as muted placeholder")
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].sort_value == P4_MISSING_NUMERIC_SORT_VALUE, "missing analyst target should use the missing sort sentinel")
+
+
+def test_excluded_stock_row_hides_weight() -> None:
+    row = build_portfolio_stock_row(
+        "XYZ",
+        {"weight": 62.5},
+        default_color="#dddddd",
+        gain_color="#00ff00",
+        change_color="#00ff00",
+        weight_included=False,
+    )
+    _assert(row[P4_PORTFOLIO_COL_WEIGHT].text == "--", "excluded stock weight should use a placeholder")
+    _assert(
+        row[P4_PORTFOLIO_COL_WEIGHT].sort_value == P4_MISSING_NUMERIC_SORT_VALUE,
+        "excluded stock weight should sort as missing",
+    )
+
+
+def test_analyst_target_negative_upside() -> None:
+    row = build_portfolio_stock_row(
+        "XYZ",
+        {"price": 100.0},
+        default_color="#dddddd",
+        gain_color="#00ff00",
+        change_color="#00ff00",
+        analyst_target=91.6,
+        analyst_positive_color="#00ff00",
+        analyst_negative_color="#ff0000",
+    )
+
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].text == "$91.60 (-8.4%)", "negative analyst target should show downside")
+    _assert(abs(row[P4_PORTFOLIO_COL_ANALYST_PT].sort_value - -8.4) < 0.0001, "negative target should sort by downside")
+    _assert(row[P4_PORTFOLIO_COL_ANALYST_PT].foreground == "#ff0000", "negative analyst upside should use negative color")
 
 
 def test_market_cap_helpers() -> None:
@@ -121,6 +164,8 @@ def test_option_row_id_preservation() -> None:
 def main() -> None:
     test_stock_row_formatting_and_sort_values()
     test_empty_stock_row_defaults()
+    test_excluded_stock_row_hides_weight()
+    test_analyst_target_negative_upside()
     test_market_cap_helpers()
     test_option_row_id_preservation()
     print("portfolio presenter smoke tests passed")

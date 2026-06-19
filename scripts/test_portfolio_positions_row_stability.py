@@ -15,6 +15,7 @@ from budget_terminal_app.constants import (
     P4_PORTFOLIO_COL_MARKET_VALUE,
     P4_PORTFOLIO_COL_SHARES,
     P4_PORTFOLIO_COL_SYMBOL,
+    P4_PORTFOLIO_COL_WEIGHT,
     P4_PORTFOLIO_COLUMNS,
 )
 from budget_terminal_app.dependencies import QApplication, QLabel, QObject, QTableWidget, Qt
@@ -76,6 +77,8 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
         self.metrics_refresh_count = 0
         self.weight_chart_count = 0
         self.heatmap_refresh_count = 0
+        self.cash_balance = 0.0
+        self.p4_weight_chart = object()
 
         self.p4_table = QTableWidget(0, len(P4_PORTFOLIO_COLUMNS))
         self.p4_table.setHorizontalHeaderLabels(P4_PORTFOLIO_COLUMNS)
@@ -110,10 +113,11 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
         return self.tracker_data
 
     def _p4_active_cash_balance(self, portfolio_id=None) -> float:
-        return 0.0
+        return self.cash_balance
 
-    def _persist_all_portfolios(self) -> None:
+    def _persist_all_portfolios(self, *, immediate: bool = False) -> None:
         self.persist_count += 1
+        self.persist_immediate = immediate
 
     def _update_weight_chart(self, weights) -> None:
         self.weight_chart_count += 1
@@ -197,7 +201,7 @@ def test_add_position_is_immediate_and_local_until_complete() -> None:
     _add_zzz_position(probe)
 
     _assert("ZZZ" in probe.tickers, "new ticker should be added to active tickers immediately")
-    _assert(probe.tracker_data["ZZZ"] == {"shares": 0, "avg_price": 0}, "new position should start empty")
+    _assert(probe.tracker_data["ZZZ"] == {"shares": 0, "avg_price": 0, "include_in_weight": True}, "new position should start empty and included")
     _assert(_symbols(probe)[-1] == "ZZZ", "new ticker should render immediately at the inserted row")
     _assert(probe.p4_table.currentColumn() == P4_PORTFOLIO_COL_SHARES, "focus should move to Shares")
     _assert(probe.p4_table.item(probe.p4_table.currentRow(), P4_PORTFOLIO_COL_SYMBOL).text() == "ZZZ", "focus should stay on new ticker")
@@ -217,7 +221,7 @@ def test_incomplete_position_entry_does_not_fetch_or_move() -> None:
     shares_item.setText("5")
     probe._on_tracker_cell_changed(shares_item)
     probe._p4_active_position_entry_guard["column"] = P4_PORTFOLIO_COL_AVG_PRICE
-    _assert(probe.tracker_data["ZZZ"] == {"shares": 5.0, "avg_price": 0}, "shares-only entry should remain incomplete")
+    _assert(probe.tracker_data["ZZZ"] == {"shares": 5.0, "avg_price": 0, "include_in_weight": True}, "shares-only entry should remain incomplete")
     _assert_no_refresh_work(probe, "shares-only incomplete ticker")
 
     probe.last_data = {
@@ -268,7 +272,7 @@ def test_complete_position_entry_fetches_once_and_sorting_resumes() -> None:
     avg_item = probe.p4_table.item(original_row, P4_PORTFOLIO_COL_AVG_PRICE)
     avg_item.setText("25")
     probe._on_tracker_cell_changed(avg_item)
-    _assert(probe.tracker_data["ZZZ"] == {"shares": 5.0, "avg_price": 25.0}, "shares and average price should complete the entry")
+    _assert(probe.tracker_data["ZZZ"] == {"shares": 5.0, "avg_price": 25.0, "include_in_weight": True}, "shares and average price should complete the entry")
     _assert_no_refresh_work(probe, "completed ticker before debounce flush")
 
     probe.update_page4(probe.last_data)
@@ -290,10 +294,74 @@ def test_complete_position_entry_fetches_once_and_sorting_resumes() -> None:
     _assert(_symbols(probe)[0] == "ZZZ", "normal market-value sorting should resume after entry guard releases")
 
 
+def test_weight_checkbox_filters_only_requested_views() -> None:
+    _qt_app()
+    probe = _PortfolioProbe()
+    probe.cash_balance = 10.0
+    probe.update_page4(probe.last_data)
+    probe.weight_chart_count = 0
+    probe.heatmap_refresh_count = 0
+    probe.returns_fetch_count = 0
+    probe.momentum_fetch_count = 0
+    probe.metrics_refresh_count = 0
+    probe.refresh_count = 0
+    probe.dashboard_membership_count = 0
+    probe.market_cap_fetch_count = 0
+
+    bbb_row = _row_for(probe, "BBB")
+    bbb_symbol = probe.p4_table.item(bbb_row, P4_PORTFOLIO_COL_SYMBOL)
+    _assert(bbb_symbol.checkState() == Qt.CheckState.Checked, "existing positions should default to checked")
+    bbb_symbol.setCheckState(Qt.CheckState.Unchecked)
+    probe._p4_on_weight_inclusion_changed(bbb_symbol)
+
+    _assert(probe.tracker_data["BBB"]["include_in_weight"] is False, "unchecked state should persist in tracker data")
+    _assert(probe.persist_immediate is True, "checkbox changes should persist immediately")
+    _assert(probe._p4_weight_included_tickers() == ["AAA"], "Dip Finder and Heatmap ticker selection should exclude BBB")
+    _assert(abs(probe.last_weights["AAA"] - 50.0) < 0.001, "AAA should rebase against included stocks plus cash")
+    _assert(abs(probe.last_weights["CASH"] - 50.0) < 0.001, "cash should remain in the filtered denominator")
+    _assert("BBB" not in probe.last_weights, "unchecked BBB should not appear in the weight chart payload")
+    _assert(
+        probe.p4_table.item(_row_for(probe, "BBB"), P4_PORTFOLIO_COL_WEIGHT).text() == "--",
+        "unchecked positions should show no table weight",
+    )
+    _assert(probe.p4_total_label.text() == "Total:  $40.00  USD", "full portfolio total should remain unchanged")
+    _assert(probe.weight_chart_count == 1, "weight chart should refresh once")
+    _assert(probe.heatmap_refresh_count == 1, "heatmap should refresh once")
+    _assert(probe.returns_fetch_count == 1, "Dip Finder should refetch once for the new ticker selection")
+    _assert(probe.momentum_fetch_count == 0, "momentum should not refresh")
+    _assert(probe.metrics_refresh_count == 0, "portfolio analytics should not refresh")
+    _assert(probe.refresh_count == 0, "quotes should not refresh")
+    _assert(probe.dashboard_membership_count == 0, "dashboard membership should not change")
+    _assert(probe.market_cap_fetch_count == 0, "market caps should not refresh")
+
+    heatmap_rows = probe._p4_portfolio_heatmap_rows(probe.last_data["portfolio"], "live", {})
+    _assert([row["symbol"] for row in heatmap_rows] == ["AAA"], "heatmap rows should exclude BBB")
+    _assert(abs(heatmap_rows[0]["weight"] - 0.5) < 0.001, "heatmap weight should include cash in its denominator")
+    cache_key = probe._p4_returns_cache_key("dip_finder")
+    _assert(cache_key[2] == ("AAA",), "Dip Finder cache key should include the enabled ticker signature")
+
+
+def test_all_positions_unchecked_leaves_cash_at_full_weight() -> None:
+    _qt_app()
+    probe = _PortfolioProbe()
+    probe.cash_balance = 25.0
+    probe.tracker_data["AAA"]["include_in_weight"] = False
+    probe.tracker_data["BBB"]["include_in_weight"] = False
+    metrics_map, total_value = probe._p4_build_tracker_metrics_map(probe.last_data["portfolio"])
+    weights, filtered_total = probe._p4_filtered_weight_map(metrics_map)
+
+    _assert(total_value == 55.0, "full total should retain all stock positions")
+    _assert(filtered_total == 25.0, "filtered total should contain only cash")
+    _assert(weights == {"CASH": 100.0}, "cash should become 100% when every stock is unchecked")
+    _assert(probe._p4_weight_included_tickers() == [], "no stock should remain in Dip Finder or Heatmap")
+
+
 def main() -> None:
     test_add_position_is_immediate_and_local_until_complete()
     test_incomplete_position_entry_does_not_fetch_or_move()
     test_complete_position_entry_fetches_once_and_sorting_resumes()
+    test_weight_checkbox_filters_only_requested_views()
+    test_all_positions_unchecked_leaves_cash_at_full_weight()
     print("portfolio position row stability smoke tests passed")
 
 

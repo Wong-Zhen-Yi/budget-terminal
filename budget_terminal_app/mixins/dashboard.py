@@ -1121,6 +1121,7 @@ class DashboardMixin:
         """Perform the dashboard refresh immediately."""
         refresh_reason = str(getattr(self, '_dashboard_pending_refresh_reason', 'full') or 'full')
         allow_non_chart_reuse = refresh_reason in {
+            'full',
             'portfolio_row_click',
             'startup_blocking',
             'startup_visible_refresh',
@@ -1153,6 +1154,8 @@ class DashboardMixin:
         self.dashboard_pending_x_range = self._dashboard_get_current_x_range() if self.dashboard_auto_follow else (self._dashboard_get_current_x_range() or self.dashboard_manual_x_range)
         chart_configs_snapshot = list(self.chart_configs)
         self.dashboard_load_btn.setEnabled(False)
+        if hasattr(self, '_set_shell_refresh_busy'):
+            self._set_shell_refresh_busy(True, 'Refreshing...')
         if membership_only_refresh:
             self._dashboard_set_status('Refreshing portfolio holdings...', 'info')
         else:
@@ -1256,6 +1259,8 @@ class DashboardMixin:
         if hasattr(self, '_record_data_health_exception'):
             self._record_data_health_exception('Dashboard', error_msg, symbols=self._get_fetch_tickers())
         self.dashboard_load_btn.setEnabled(True)
+        if hasattr(self, '_set_shell_refresh_busy'):
+            self._set_shell_refresh_busy(False)
         self._dashboard_set_status(f'Refresh failed: {error_msg}', 'negative')
         self._complete_startup_dashboard_data('Dashboard Data failed', succeeded=False)
 
@@ -1601,6 +1606,8 @@ class DashboardMixin:
             logger.info('Skipping non-chart UI apply for dashboard request %s (reason=%s).', request_id, refresh_reason)
         if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
             self.dashboard_load_btn.setEnabled(True)
+            if hasattr(self, '_set_shell_refresh_busy'):
+                self._set_shell_refresh_busy(False)
             self.dashboard_pending_x_range = None
             self._dashboard_set_status('Portfolio holdings refreshed.', 'positive')
             logger.info(
@@ -1612,6 +1619,8 @@ class DashboardMixin:
         chart_started = time.perf_counter()
         chart_loaded = self._dashboard_apply_chart_data(symbol, data)
         ui_chart_ms = (time.perf_counter() - chart_started) * 1000.0
+        if hasattr(self, '_set_shell_refresh_busy'):
+            self._set_shell_refresh_busy(False)
         logger.info(
             'Dashboard UI apply finished for %s (reason=%s, non_chart_reused=%s, chart_loaded=%s, ui_non_chart_ms=%.1f, ui_chart_ms=%.1f)',
             symbol,

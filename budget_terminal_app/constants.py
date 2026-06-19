@@ -21,7 +21,7 @@ CLOCK_COUNTRY_CHOICES = [
     {'code': 'NZ', 'name': 'New Zealand', 'zone': 'Pacific/Auckland'},
 ]
 CLOCK_DEFAULT_COUNTRY_CODE = 'US'
-P4_PORTFOLIO_COLUMNS = ['Symbol', 'Shares', 'Avg Price', 'Cost', 'Price', "Day's Change", 'Market Value', 'Weight', 'Dollar Gain', 'Growth', 'Market Cap']
+P4_PORTFOLIO_COLUMNS = ['Symbol', 'Shares', 'Avg Price', 'Cost', 'Price', "Day's Change", 'Market Value', 'Weight', 'Dollar Gain', 'Growth', 'Market Cap', 'Analyst PT']
 P4_PORTFOLIO_COL_SYMBOL = 0
 P4_PORTFOLIO_COL_SHARES = 1
 P4_PORTFOLIO_COL_AVG_PRICE = 2
@@ -33,6 +33,7 @@ P4_PORTFOLIO_COL_WEIGHT = 7
 P4_PORTFOLIO_COL_DOLLAR_GAIN = 8
 P4_PORTFOLIO_COL_GROWTH = 9
 P4_PORTFOLIO_COL_MARKET_CAP = 10
+P4_PORTFOLIO_COL_ANALYST_PT = 11
 SECTOR_DATA = {'Technology': ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'ORCL', 'ASML', 'ADBE', 'AMD', 'CRM', 'CSCO'], 'Financials': ['JPM', 'BAC', 'WFC', 'MS', 'GS', 'HSBC', 'RY', 'TD', 'C', 'UBS'], 'Healthcare': ['LLY', 'UNH', 'JNJ', 'ABBV', 'MRK', 'TMO', 'NVO', 'AZN', 'PFE', 'ABT'], 'Consumer Cyclical': ['AMZN', 'TSLA', 'HD', 'MCD', 'TM', 'NKE', 'LOW', 'SBUX', 'TJX', 'BKNG'], 'Energy': ['XOM', 'CVX', 'SHEL', 'TTE', 'COP', 'BP', 'PBR', 'EOG', 'SLB', 'MPC'], 'Communication Services': ['GOOGL', 'META', 'NFLX', 'DIS', 'TMUS', 'VZ', 'T', 'CMCSA', 'AMX', 'BTI'], 'Industrials': ['GE', 'UNP', 'HON', 'RTX', 'LMT', 'CAT', 'BA', 'UPS', 'DE', 'MMM'], 'Consumer Defensive': ['WMT', 'PG', 'KO', 'PEP', 'COST', 'PM', 'UL', 'EL', 'DEO', 'MO'], 'Utilities': ['NEE', 'DUK', 'SO', 'D', 'EXC', 'AEP', 'SRE', 'PEG', 'ED', 'XEL'], 'Real Estate': ['PLD', 'AMT', 'EQIX', 'CCI', 'WY', 'PSA', 'SBAC', 'VICI', 'O', 'WELL'], 'Basic Materials': ['LIN', 'BHP', 'RIO', 'FCX', 'VALE', 'APD', 'NEM', 'SHW', 'CTVA', 'SCCO'], 'Crypto': ['IBIT', 'ETHA', 'BMNR', 'MSTR', 'BITW', 'BSOL', 'CRCL', 'COIN', 'BITQ'], 'Metals': ['GLD', 'SLV', 'GDX', 'GDXJ', 'GLDM', 'SIVR', 'PAAS', 'WPM', 'FNV', 'SBSW']}
 P2_INCOME_ROWS = [('Total Revenue', 'total_revenue'), ('Gross Profit', 'gross_profit'), ('Operating Income', 'operating_income'), ('Net Income', 'net_income'), ('EPS (Diluted)', 'diluted_eps')]
 P2_INCOME_SEARCH = {'total_revenue': ['total revenue'], 'gross_profit': ['gross profit'], 'operating_income': ['operating income', 'ebit'], 'net_income': ['net income'], 'diluted_eps': ['diluted eps', 'basic eps']}

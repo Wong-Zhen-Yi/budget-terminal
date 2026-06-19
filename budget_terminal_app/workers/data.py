@@ -766,6 +766,21 @@ class DataWorker(QObject):
             return None
         return df
 
+    def _chart_cache_first_max_age_hours(self, interval: Any) -> float:
+        """Return the fresh-cache window for dashboard chart-first rendering."""
+        text = str(interval or '').strip().lower()
+        if text == '1d':
+            return 0.25
+        if text in {'1wk', '1mo'}:
+            return 24.0
+        return 0.0
+
+    def _should_try_cached_chart_first(self, interval: Any) -> bool:
+        """Use fresh chart cache for routine loads while preserving explicit reloads."""
+        if str(getattr(self, 'refresh_reason', '') or '').strip().lower() == 'manual_refresh':
+            return False
+        return self._chart_cache_first_max_age_hours(interval) > 0
+
     def _normalize_datetime_index_ns(self, values: Any) -> Any:
         """Normalize incoming timestamps to a tz-naive nanosecond index for stable merges."""
         index = pd.DatetimeIndex(pd.to_datetime(values))
@@ -866,13 +881,24 @@ class DataWorker(QObject):
         symbol, period, interval = config
         cache = self._cache_manager
         source_label = 'download'
-        df = self._download_symbol_frame(symbol, period, interval)
+        df = None
+        if self._should_try_cached_chart_first(interval):
+            df = self._load_cached_chart_frame(
+                symbol,
+                period,
+                interval,
+                max_age_hours=self._chart_cache_first_max_age_hours(interval),
+            )
+            if df is not None and not df.empty:
+                source_label = 'fresh-cache'
+        if df is None:
+            df = self._download_symbol_frame(symbol, period, interval)
         if df is not None and not df.empty and interval in ('1d', '1wk', '1mo') and not self._chart_cache_covers_period(df, period):
             max_df = self._download_symbol_frame(symbol, 'max', interval)
             if max_df is not None and not max_df.empty and self._chart_frame_coverage_days(max_df) > self._chart_frame_coverage_days(df):
                 df = max_df
                 source_label = 'download-max'
-        if df is not None and not df.empty and interval in ('1d', '1wk', '1mo'):
+        if df is not None and not df.empty and interval in ('1d', '1wk', '1mo') and source_label != 'fresh-cache':
             self._save_chart_frame(cache, symbol, interval, df)
         if df is None:
             source_label = 'cache'

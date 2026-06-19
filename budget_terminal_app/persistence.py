@@ -100,6 +100,9 @@ DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
 DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 2, 19, 4, 11, 7, 22, 8, 9, 13, 6, 5, 12, 14, 15, 3, 20, 23, 16, 18, 24, 17, 21]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': [21]}
+DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
+SETTINGS_PAGE_TAB_KEYS = ('general', 'workspace', 'data', 'diagnostics')
+DEFAULT_SETTINGS_PAGE_SETTINGS = {'active_tab': 'general'}
 MAX_PORTFOLIOS = 5
 MULTI_PORTFOLIO_VERSION = 3
 PORTFOLIO_IDS = [f'portfolio_{index}' for index in range(1, MAX_PORTFOLIOS + 1)]
@@ -691,6 +694,32 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
     return {'page_order': order, 'hidden_pages': hidden_pages}
 
 
+def normalize_privacy_settings(settings: Any) -> dict[str, list[int]]:
+    """Normalize the main-page targets controlled by the Obscure button."""
+    saved = settings if isinstance(settings, dict) else {}
+    valid_indexes = set(DEFAULT_NAVIGATION_PAGE_ORDER) - {SETTINGS_PAGE_INDEX}
+    raw_pages = saved.get('obscured_pages', DEFAULT_PRIVACY_SETTINGS['obscured_pages'])
+    obscured_pages = []
+    if isinstance(raw_pages, list):
+        for value in raw_pages:
+            try:
+                page_index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page_index in valid_indexes and page_index not in obscured_pages:
+                obscured_pages.append(page_index)
+    return {'obscured_pages': obscured_pages}
+
+
+def normalize_settings_page_settings(settings: Any) -> dict[str, str]:
+    """Normalize Settings-page presentation preferences."""
+    saved = settings if isinstance(settings, dict) else {}
+    active_tab = str(saved.get('active_tab', DEFAULT_SETTINGS_PAGE_SETTINGS['active_tab']) or '').strip().lower()
+    if active_tab not in SETTINGS_PAGE_TAB_KEYS:
+        active_tab = DEFAULT_SETTINGS_PAGE_SETTINGS['active_tab']
+    return {'active_tab': active_tab}
+
+
 def _clear_legacy_notes_storage() -> None:
     """Remove leftover note storage from versions that still shipped the Notes page."""
     legacy_path = Path(LEGACY_NOTES_IMAGES_DIR)
@@ -751,6 +780,8 @@ def _default_user_data_document() -> Any:
         'net_worth': default_networth_data(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
+        'privacy': normalize_privacy_settings(DEFAULT_PRIVACY_SETTINGS),
+        'settings_page': normalize_settings_page_settings(DEFAULT_SETTINGS_PAGE_SETTINGS),
         'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
     }
@@ -795,6 +826,8 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
         'navigation': normalize_navigation_settings(saved.get('navigation', default['navigation'])),
+        'privacy': normalize_privacy_settings(saved.get('privacy', default['privacy'])),
+        'settings_page': normalize_settings_page_settings(saved.get('settings_page', default['settings_page'])),
         'clock_country_code': normalize_clock_country_code(saved.get('clock_country_code', default['clock_country_code'])),
         'time_12h': bool(saved.get('time_12h', False)),
     }
@@ -1066,6 +1099,14 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
         '',
+        '## Privacy Settings',
+        '',
+        _json_block(payload.get('privacy', DEFAULT_PRIVACY_SETTINGS)),
+        '',
+        '## Settings Page Preferences',
+        '',
+        _json_block(payload.get('settings_page', DEFAULT_SETTINGS_PAGE_SETTINGS)),
+        '',
         '## Clock Settings',
         '',
         _json_block({
@@ -1140,6 +1181,8 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'net_worth': default_networth_data(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
+        'privacy': normalize_privacy_settings(DEFAULT_PRIVACY_SETTINGS),
+        'settings_page': normalize_settings_page_settings(DEFAULT_SETTINGS_PAGE_SETTINGS),
         'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
     }
@@ -1168,6 +1211,8 @@ def load_app_config() -> Any:
         'youtube': dict(document.get('youtube', DEFAULT_YOUTUBE_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
         'navigation': normalize_navigation_settings(document.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
+        'privacy': normalize_privacy_settings(document.get('privacy', DEFAULT_PRIVACY_SETTINGS)),
+        'settings_page': normalize_settings_page_settings(document.get('settings_page', DEFAULT_SETTINGS_PAGE_SETTINGS)),
         'clock_country_code': normalize_clock_country_code(document.get('clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE)),
         'time_12h': bool(document.get('time_12h', False)),
     }
@@ -1223,6 +1268,10 @@ def save_app_config(data: Any) -> None:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
     if 'navigation' in saved:
         current['navigation'] = normalize_navigation_settings(saved.get('navigation'))
+    if 'privacy' in saved:
+        current['privacy'] = normalize_privacy_settings(saved.get('privacy'))
+    if 'settings_page' in saved:
+        current['settings_page'] = normalize_settings_page_settings(saved.get('settings_page'))
     if 'clock_country_code' in saved:
         current['clock_country_code'] = normalize_clock_country_code(saved.get('clock_country_code'))
     if 'time_12h' in saved:
@@ -1831,6 +1880,36 @@ def save_navigation_settings(settings: Any) -> Any:
     current = load_app_config()
     state = normalize_navigation_settings(settings)
     current['navigation'] = state
+    save_app_config(current)
+    return state
+
+
+def load_privacy_settings() -> dict[str, list[int]]:
+    """Load persisted Obscure-button page targets."""
+    config = load_app_config()
+    return normalize_privacy_settings(config.get('privacy', DEFAULT_PRIVACY_SETTINGS))
+
+
+def save_privacy_settings(settings: Any) -> dict[str, list[int]]:
+    """Persist Obscure-button page targets in app config."""
+    current = load_app_config()
+    state = normalize_privacy_settings(settings)
+    current['privacy'] = state
+    save_app_config(current)
+    return state
+
+
+def load_settings_page_settings() -> dict[str, str]:
+    """Load persisted Settings-page presentation preferences."""
+    config = load_app_config()
+    return normalize_settings_page_settings(config.get('settings_page', DEFAULT_SETTINGS_PAGE_SETTINGS))
+
+
+def save_settings_page_settings(settings: Any) -> dict[str, str]:
+    """Persist Settings-page presentation preferences."""
+    current = load_app_config()
+    state = normalize_settings_page_settings(settings)
+    current['settings_page'] = state
     save_app_config(current)
     return state
 

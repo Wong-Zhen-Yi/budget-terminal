@@ -1390,7 +1390,7 @@ class StocksPageMixin:
                 'pct_held': self._stocks_format_holder_percentage(row.get(pct_held_column)) if pct_held_column else 'N/A',
                 'shares': self._stocks_format_shares(row.get(shares_column)) if shares_column else 'N/A',
                 'value': self._stocks_format_currency(row.get(value_column)) if value_column else 'N/A',
-                'pct_change': self._stocks_format_holder_percentage(row.get(pct_change_column), signed=True) if pct_change_column else 'N/A',
+                'pct_change': self._stocks_format_holder_change(row.get(pct_change_column)) if pct_change_column else 'N/A',
                 'reported': self._stocks_format_date(row.get(reported_column)) if reported_column else 'N/A',
             })
         return rows
@@ -1615,6 +1615,17 @@ class StocksPageMixin:
             return 'N/A'
         percentage = numeric if abs(numeric) > 1.0 else numeric * 100.0
         sign = '+' if signed and percentage > 0 else ''
+        return f'{sign}{percentage:.2f}%'
+
+    def _stocks_format_holder_change(self, value: Any) -> str:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 'N/A'
+        if not math.isfinite(numeric):
+            return 'N/A'
+        percentage = numeric * 100.0
+        sign = '+' if percentage > 0 else ''
         return f'{sign}{percentage:.2f}%'
 
     def _stocks_format_compact_value(self, value: Any) -> str:

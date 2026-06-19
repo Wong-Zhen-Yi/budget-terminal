@@ -610,6 +610,8 @@ class PortfolioSetupMixin:
             symbol = str(ticker or '').strip().upper()
             if not symbol or symbol == 'CASH' or symbol in seen:
                 continue
+            if hasattr(self, '_p4_position_included_in_weight') and not self._p4_position_included_in_weight(ticker):
+                continue
             try:
                 shares = float((tracker_data.get(ticker, {}) or tracker_data.get(symbol, {}) or {}).get('shares', 0) or 0)
             except (AttributeError, TypeError, ValueError):
@@ -723,7 +725,8 @@ class PortfolioSetupMixin:
         interval_key = str(interval_key or getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').strip().lower()
         interval_label = self._p4_heatmap_interval_label(interval_key)
         interval_returns = interval_returns if isinstance(interval_returns, dict) else {}
-        metrics_map, total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+        metrics_map, _full_total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+        _weights, total_market_value = self._p4_filtered_weight_map(metrics_map)
         if total_market_value <= 0:
             return []
         rows = []
@@ -733,6 +736,8 @@ class PortfolioSetupMixin:
             reverse=True,
         ):
             symbol = str(ticker or '').strip().upper()
+            if not self._p4_position_included_in_weight(ticker):
+                continue
             metrics = metrics_map.get(ticker, {})
             try:
                 shares = float(metrics.get('shares', 0.0) or 0.0)
@@ -1193,6 +1198,10 @@ class PortfolioSetupMixin:
         export_llm_btn.setMinimumHeight(24)
         self.set_theme_variant(export_llm_btn, 'positive')
         export_llm_btn.clicked.connect(self._p4_export_for_llm)
+        export_tickers_btn = QPushButton('Export Tickers')
+        export_tickers_btn.setMinimumHeight(24)
+        self.set_theme_variant(export_tickers_btn, 'positive')
+        export_tickers_btn.clicked.connect(self._p4_export_tickers)
         stock_header_layout.addWidget(stock_header)
         stock_header_layout.addSpacing(10)
         stock_header_layout.addWidget(add_stock_btn)
@@ -1200,6 +1209,8 @@ class PortfolioSetupMixin:
         stock_header_layout.addWidget(self.p4_remove_stock_btn)
         stock_header_layout.addSpacing(6)
         stock_header_layout.addWidget(export_llm_btn)
+        stock_header_layout.addSpacing(6)
+        stock_header_layout.addWidget(export_tickers_btn)
         stock_header_layout.addStretch()
         stock_layout.addLayout(stock_header_layout)
         self.p4_table = QTableWidget(0, len(P4_PORTFOLIO_COLUMNS))
@@ -1343,7 +1354,7 @@ class PortfolioSetupMixin:
             if ticker not in tickers:
                 tickers.append(ticker)
             if ticker not in tracker_data:
-                tracker_data[ticker] = {'shares': 0, 'avg_price': 0}
+                tracker_data[ticker] = {'shares': 0, 'avg_price': 0, 'include_in_weight': True}
             if hasattr(self, '_p4_begin_position_entry'):
                 self._p4_begin_position_entry(ticker, P4_PORTFOLIO_COL_SHARES)
             self._persist_all_portfolios()

@@ -356,8 +356,9 @@ class PortfolioMetricsMixin:
         self._p4_schedule_portfolio_metrics_refresh()
 
     def _p4_returns_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
-        """Build the cache key for one portfolio/timeframe pair."""
-        return (str(portfolio_id or self.active_portfolio_id), str(timeframe_key))
+        """Build the cache key for one portfolio/timeframe/inclusion selection."""
+        symbols = tuple(sorted(self._p4_normalize_stock_symbol(ticker) for ticker in self._p4_weight_included_tickers()))
+        return (str(portfolio_id or self.active_portfolio_id), str(timeframe_key), symbols)
 
     def _p4_invalidate_returns_cache(self, portfolio_id: Any = None) -> None:
         """Drop cached return metrics for one portfolio slot."""
@@ -365,12 +366,12 @@ class PortfolioMetricsMixin:
         self._return_metrics_cache = {
             key: value
             for key, value in self._return_metrics_cache.items()
-            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+            if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == pid)
         }
         self._return_metrics_fetching = {
             key: value
             for key, value in self._return_metrics_fetching.items()
-            if not (isinstance(key, tuple) and len(key) == 2 and key[0] == pid)
+            if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == pid)
         }
 
     def _p4_momentum_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
@@ -403,6 +404,79 @@ class PortfolioMetricsMixin:
             'active_tracker_data',
             self._get_portfolio_entry(self.active_portfolio_id).setdefault('portfolio_tracker', {}),
         )
+
+    def _p4_position_included_in_weight(self, ticker: Any) -> bool:
+        """Return whether one active stock position participates in filtered views."""
+        symbol = self._p4_normalize_stock_symbol(ticker)
+        tracker_data = self._p4_active_tracker_data()
+        if not isinstance(tracker_data, dict):
+            return True
+        entry = tracker_data.get(ticker)
+        if not isinstance(entry, dict):
+            entry = next(
+                (
+                    saved_entry
+                    for saved_ticker, saved_entry in tracker_data.items()
+                    if self._p4_normalize_stock_symbol(saved_ticker) == symbol and isinstance(saved_entry, dict)
+                ),
+                {},
+            )
+        return entry.get('include_in_weight') is not False
+
+    def _p4_weight_included_tickers(self) -> list[Any]:
+        """Return active tickers enabled for Weight, Dip Finder, and Heatmap views."""
+        return [ticker for ticker in self._p4_active_tickers() if self._p4_position_included_in_weight(ticker)]
+
+    def _p4_filtered_weight_map(self, metrics_map: Any) -> tuple[dict[Any, float], float]:
+        """Return weights rebased across enabled stocks plus brokerage cash."""
+        metrics_map = metrics_map if isinstance(metrics_map, dict) else {}
+        included = self._p4_weight_included_tickers()
+        cash_balance = self._p4_active_cash_balance()
+        included_stock_value = sum(
+            max(float((metrics_map.get(ticker, {}) or {}).get('market_value', 0.0) or 0.0), 0.0)
+            for ticker in included
+        )
+        denominator = included_stock_value + cash_balance
+        weights = {
+            ticker: (
+                max(float((metrics_map.get(ticker, {}) or {}).get('market_value', 0.0) or 0.0), 0.0)
+                / denominator * 100.0
+                if denominator > 0.0
+                else 0.0
+            )
+            for ticker in included
+        }
+        if cash_balance > 0.0 and denominator > 0.0:
+            weights['CASH'] = cash_balance / denominator * 100.0
+        return weights, denominator
+
+    def _p4_apply_symbol_checkbox(self, row: int, ticker: Any) -> None:
+        """Apply the persisted inclusion state to one visible Symbol item."""
+        table = getattr(self, 'p4_table', None)
+        item = table.item(int(row), P4_PORTFOLIO_COL_SYMBOL) if table is not None else None
+        if item is None:
+            return
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(
+            Qt.CheckState.Checked
+            if self._p4_position_included_in_weight(ticker)
+            else Qt.CheckState.Unchecked
+        )
+        item.setToolTip('Include this position in Portfolio Weight, Dip Finder, and Portfolio Heatmap')
+
+    def _p4_apply_visible_symbol_checkboxes(self) -> None:
+        """Restore checkboxes after a full table render or sort."""
+        table = getattr(self, 'p4_table', None)
+        if table is None:
+            return
+        previous = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                item = table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+                if item is not None:
+                    self._p4_apply_symbol_checkbox(row, item.text())
+        finally:
+            table.blockSignals(previous)
 
     def _p4_active_cash_balance(self, portfolio_id: Any = None) -> float:
         """Return the active portfolio's brokerage cash balance."""
@@ -464,10 +538,7 @@ class PortfolioMetricsMixin:
         """Refresh total and allocation displays when only cash changed."""
         portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
         metrics_map, total_value = self._p4_build_tracker_metrics_map(portfolio)
-        weights = {symbol: item.get('weight', 0.0) for symbol, item in metrics_map.items()}
-        cash_balance = self._p4_active_cash_balance()
-        if cash_balance > 0.0 and total_value > 0.0:
-            weights['CASH'] = cash_balance / total_value * 100.0
+        weights, _filtered_total = self._p4_filtered_weight_map(metrics_map)
         if hasattr(self, 'p4_total_label'):
             self.p4_total_label.setText(f'Total:  ${total_value:,.2f}  USD')
         if hasattr(self, 'p4_weight_chart'):
@@ -1104,8 +1175,56 @@ class PortfolioMetricsMixin:
         self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
         self._p4_refresh_portfolio_metrics_view(force=True)
 
+    def _p4_export_tickers(self) -> None:
+        """Copy the active portfolio's stock tickers to the clipboard."""
+        ordered_tickers = self._p4_stock_order_for_render(
+            self._p4_active_tickers(),
+            {},
+            preserve_visible_order=True,
+        )
+        symbols = []
+        seen = set()
+        for ticker in ordered_tickers:
+            symbol = self._p4_normalize_stock_symbol(ticker)
+            if symbol and symbol not in seen:
+                symbols.append(symbol)
+                seen.add(symbol)
+        if not symbols:
+            self.set_status_text(self.status_bar, 'No stock tickers to export', status='warning')
+            return
+        QApplication.clipboard().setText('\n'.join(symbols))
+        self.set_status_text(self.status_bar, f'Exported {len(symbols)} tickers to clipboard', status='positive')
+
     def _p4_export_for_llm(self) -> None:
         """Export the active portfolio's stock and options data to clipboard for LLM analysis."""
+        def _number(value: Any) -> float:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            if math.isnan(number) or math.isinf(number):
+                return 0.0
+            return number
+
+        def _plain(value: Any) -> str:
+            return str(value if value is not None else '').replace('|', '/').strip()
+
+        def _currency(value: Any, *, signed: bool=False) -> str:
+            number = _number(value)
+            prefix = '+' if signed and number >= 0 else ''
+            return f'{prefix}${number:,.2f}'
+
+        def _percent(value: Any, *, signed: bool=False, decimals: int=1) -> str:
+            number = _number(value)
+            prefix = '+' if signed and number >= 0 else ''
+            return f'{prefix}{number:.{decimals}f}%'
+
+        def _count(value: Any) -> str:
+            return f'{int(round(_number(value))):,}'
+
+        def _shares(value: Any) -> str:
+            return f'{_number(value):g}'
+
         portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
         tickers = self._p4_active_tickers()
         options_data = getattr(self, 'active_options_data', getattr(self, 'options_data', []))
@@ -1122,30 +1241,28 @@ class PortfolioMetricsMixin:
             lines.append('(no stock positions)')
             lines.append('')
         else:
+            lines.append('| Ticker | Sh | Avg | Price | Day% | MV | Wt% | PnL | Gain% | MCap |')
+            lines.append('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |')
             sorted_tickers = sorted(tickers, key=lambda t: metrics_map.get(t, {}).get('market_value', 0), reverse=True)
             for ticker in sorted_tickers:
                 m = metrics_map.get(ticker, {})
-                shares = m.get('shares', 0)
-                avg_price = m.get('avg_price', 0)
-                price = m.get('price', 0)
-                change = m.get('change', 0)
-                cost = m.get('cost', 0)
-                mv = m.get('market_value', 0)
-                weight = m.get('weight', 0)
-                gain = m.get('dollar_gain', 0)
-                growth = m.get('growth', 0)
                 mc = self._mktcap_cache.get(str(ticker or '').strip().upper())
                 mc_str = self._format_market_cap(mc)
-                sign = '+' if change >= 0 else ''
-                gain_sign = '+' if gain >= 0 else ''
-                growth_sign = '+' if growth >= 0 else ''
-                lines.append(f'{ticker}')
-                lines.append(f'  Shares: {shares:g} | Avg Price: ${avg_price:.2f} | Cost Basis: ${cost:,.2f}')
-                lines.append(f'  Current Price: ${price:.2f} | Day Change: {sign}{change:.2f}%')
-                lines.append(f'  Market Value: ${mv:,.2f} | Weight: {weight:.1f}%')
-                lines.append(f'  P&L: {gain_sign}${gain:,.2f} | Growth: {growth_sign}{growth:.1f}%')
-                lines.append(f'  Market Cap: {mc_str}')
-                lines.append('')
+                lines.append(
+                    '| {ticker} | {shares} | {avg_price} | {price} | {change} | {mv} | {weight} | {gain} | {growth} | {mc} |'.format(
+                        ticker=_plain(ticker),
+                        shares=_shares(m.get('shares', 0)),
+                        avg_price=_currency(m.get('avg_price', 0)),
+                        price=_currency(m.get('price', 0)),
+                        change=_percent(m.get('change', 0), signed=True, decimals=2),
+                        mv=_currency(m.get('market_value', 0)),
+                        weight=_percent(m.get('weight', 0)),
+                        gain=_currency(m.get('dollar_gain', 0), signed=True),
+                        growth=_percent(m.get('growth', 0), signed=True),
+                        mc=_plain(mc_str),
+                    )
+                )
+            lines.append('')
         lines.append('--- BROKERAGE CASH ---')
         lines.append('')
         lines.append(f'Cash Balance: ${cash_balance:,.2f}')
@@ -1157,36 +1274,40 @@ class PortfolioMetricsMixin:
             lines.append('(no options positions)')
             lines.append('')
         else:
+            lines.append('| Ticker | Strat | Exp | Strike | Ctr | Prem | Cur | Vol | OI | IV% | PnL |')
+            lines.append('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
             for pos in options_data:
-                ticker = pos.get('ticker', '?')
-                strategy = pos.get('strategy', 'Calls')
-                expiry = pos.get('expiry', 'N/A')
-                strike = pos.get('strike', 0)
-                contracts = pos.get('contracts', 1)
-                premium = pos.get('premium', 0)
-                current = pos.get('current_price', 0)
-                iv = pos.get('iv', 0)
-                volume = pos.get('volume', pos.get('vol', 0))
-                open_interest = pos.get('open_interest', pos.get('openInterest', 0))
-                try:
-                    volume = float(volume)
-                except (TypeError, ValueError):
-                    volume = 0.0
-                try:
-                    open_interest = float(open_interest)
-                except (TypeError, ValueError):
-                    open_interest = 0.0
+                ticker = _plain(pos.get('ticker', '?')) or '?'
+                strategy = _plain(pos.get('strategy', 'Calls')) or 'Calls'
+                expiry = _plain(pos.get('expiry', 'N/A')) or 'N/A'
+                strike = _number(pos.get('strike', 0))
+                contracts = _number(pos.get('contracts', 1))
+                premium = _number(pos.get('premium', 0))
+                current = _number(pos.get('current_price', 0))
+                iv = _number(pos.get('iv', 0))
+                volume = _number(pos.get('volume', pos.get('vol', 0)))
+                open_interest = _number(pos.get('open_interest', pos.get('openInterest', 0)))
                 is_seller = strategy in ('Covered Call', 'Cash Secured Put')
                 if is_seller:
                     pl = (premium - current) * contracts * 100
                 else:
                     pl = (current - premium) * contracts * 100
-                pl_sign = '+' if pl >= 0 else ''
-                lines.append(f'{ticker} | {strategy} | Strike: ${strike:.2f} | Expiry: {expiry}')
-                lines.append(f'  Contracts: {contracts} | Premium: ${premium:.2f} | Current: ${current:.2f}')
-                lines.append(f'  Vol: {volume:,.0f} | OI: {open_interest:,.0f} | IV: {iv * 100:.1f}%')
-                lines.append(f'  P&L: {pl_sign}${pl:,.2f}')
-                lines.append('')
+                lines.append(
+                    '| {ticker} | {strategy} | {expiry} | {strike} | {contracts} | {premium} | {current} | {volume} | {open_interest} | {iv} | {pl} |'.format(
+                        ticker=ticker,
+                        strategy=strategy,
+                        expiry=expiry,
+                        strike=_currency(strike),
+                        contracts=_shares(contracts),
+                        premium=_currency(premium),
+                        current=_currency(current),
+                        volume=_count(volume),
+                        open_interest=_count(open_interest),
+                        iv=_percent(iv * 100),
+                        pl=_currency(pl, signed=True),
+                    )
+                )
+            lines.append('')
         text = '\n'.join(lines)
         total_items = len(tickers) + len(options_data) + (1 if cash_balance > 0 else 0)
         QApplication.clipboard().setText(text)
@@ -1206,6 +1327,9 @@ class PortfolioMetricsMixin:
     def _on_tracker_cell_changed(self, item: Any) -> None:
         """Handle tracker cell changed."""
         col = item.column()
+        if col == P4_PORTFOLIO_COL_SYMBOL:
+            self._p4_on_weight_inclusion_changed(item)
+            return
         if col not in (P4_PORTFOLIO_COL_SHARES, P4_PORTFOLIO_COL_AVG_PRICE):
             return
         row = item.row()
@@ -1229,6 +1353,63 @@ class PortfolioMetricsMixin:
             self._p4_schedule_position_entry_refresh(ticker, allow_heavy=(col == P4_PORTFOLIO_COL_SHARES and val > 0))
         elif hasattr(self, '_p4_cancel_position_entry_refresh'):
             self._p4_cancel_position_entry_refresh(ticker)
+
+    def _p4_on_weight_inclusion_changed(self, item: Any) -> None:
+        """Persist one Symbol checkbox and refresh only its filtered views."""
+        ticker = self._p4_normalize_stock_symbol(item.text() if item is not None else '')
+        if not ticker:
+            return
+        included = item.checkState() == Qt.CheckState.Checked
+        tracker_data = self._p4_active_tracker_data()
+        saved_ticker = next(
+            (key for key in tracker_data if self._p4_normalize_stock_symbol(key) == ticker),
+            ticker,
+        )
+        tracker_data.setdefault(saved_ticker, {})['include_in_weight'] = included
+        self._persist_all_portfolios(immediate=True)
+        self._p4_invalidate_returns_cache()
+        self._p4_refresh_weight_filter_views()
+
+    def _p4_refresh_weight_filter_views(self) -> None:
+        """Refresh Weight, Dip Finder, and Heatmap after an inclusion toggle."""
+        data = getattr(self, 'last_data', None)
+        portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
+        metrics_map, _total_value = self._p4_build_tracker_metrics_map(portfolio)
+        weights, _filtered_total = self._p4_filtered_weight_map(metrics_map)
+        table = getattr(self, 'p4_table', None)
+        if table is not None:
+            previous = table.blockSignals(True)
+            sorting_enabled = table.isSortingEnabled()
+            if sorting_enabled:
+                table.setSortingEnabled(False)
+            try:
+                for row in range(table.rowCount()):
+                    symbol_item = table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+                    ticker = symbol_item.text() if symbol_item is not None else ''
+                    metrics = dict(metrics_map.get(ticker, {}))
+                    included = self._p4_position_included_in_weight(ticker)
+                    metrics['weight'] = weights.get(ticker, 0.0)
+                    weight_cell = self._p4_build_stock_table_row(
+                        ticker,
+                        metrics,
+                        weight_included=included,
+                    )[P4_PORTFOLIO_COL_WEIGHT]
+                    render_table_cell(table, row, P4_PORTFOLIO_COL_WEIGHT, weight_cell)
+                    self._p4_apply_symbol_checkbox(row, ticker)
+            finally:
+                if sorting_enabled:
+                    table.setSortingEnabled(True)
+                table.blockSignals(previous)
+        if hasattr(self, 'p4_weight_chart'):
+            self._update_weight_chart(weights)
+        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+        timeframe = getattr(self, '_active_return_timeframe', 'dip_finder')
+        included_tickers = self._p4_weight_included_tickers()
+        if not included_tickers:
+            self._update_returns_chart(timeframe, {})
+        else:
+            self._fetch_returns_for_timeframe(timeframe)
 
     def _p4_schedule_momentum_refresh(self) -> None:
         """Debounce expensive momentum refreshes while tracker cells are being edited."""
@@ -1284,6 +1465,7 @@ class PortfolioMetricsMixin:
         metrics = metrics_map.get(ticker)
         if metrics is None:
             return
+        weights, _filtered_total = self._p4_filtered_weight_map(metrics_map)
         keep_sorting_disabled = self._p4_position_entry_is_active()
         sorting_enabled = self.p4_table.isSortingEnabled()
         self.p4_table.blockSignals(True)
@@ -1298,7 +1480,7 @@ class PortfolioMetricsMixin:
                 metrics['change'],
                 metrics['cost'],
                 metrics['market_value'],
-                metrics['weight'],
+                weights.get(ticker, 0.0),
                 metrics['dollar_gain'],
                 metrics['growth'],
             )
@@ -1308,10 +1490,6 @@ class PortfolioMetricsMixin:
             self.p4_table.blockSignals(False)
         self._p4_restore_position_entry_cell()
         self.p4_total_label.setText(f'Total:  ${total_market_value:,.2f}  USD')
-        weights = {symbol: item['weight'] for symbol, item in metrics_map.items()}
-        cash_balance = self._p4_active_cash_balance()
-        if cash_balance > 0.0 and total_market_value > 0.0:
-            weights['CASH'] = cash_balance / total_market_value * 100.0
         if self._p4_position_entry_is_active():
             return
         self._update_weight_chart(weights)
@@ -1335,7 +1513,30 @@ class PortfolioMetricsMixin:
             sort_value=market_cap_sort_value(market_cap),
         )
 
-    def _p4_build_stock_table_row(self, ticker: Any, metrics: dict[str, Any], *, market_cap: Any = None) -> Any:
+    def _p4_analyst_target_map(self, data: Any = None) -> dict[str, Any]:
+        """Return analyst target prices keyed by normalized ticker."""
+        source = data if isinstance(data, dict) else getattr(self, 'last_data', {})
+        raw_targets = source.get('targets', []) if isinstance(source, dict) else []
+        targets: dict[str, Any] = {}
+        if not isinstance(raw_targets, list):
+            return targets
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get('ticker') or '').strip().upper()
+            if symbol:
+                targets[symbol] = item.get('target')
+        return targets
+
+    def _p4_build_stock_table_row(
+        self,
+        ticker: Any,
+        metrics: dict[str, Any],
+        *,
+        market_cap: Any = None,
+        analyst_target: Any = None,
+        weight_included: bool = True,
+    ) -> Any:
         """Return the presenter row for one Portfolio stock position."""
         return build_portfolio_stock_row(
             ticker,
@@ -1345,6 +1546,10 @@ class PortfolioMetricsMixin:
             change_color=self.theme_color('accent_positive' if float(metrics.get('change', 0) or 0) >= 0 else 'accent_negative'),
             market_cap=market_cap,
             market_cap_color=self._p4_market_cap_color_from_token(market_cap_color_token(market_cap)),
+            analyst_target=analyst_target,
+            analyst_positive_color=self.theme_color('accent_positive'),
+            analyst_negative_color=self.theme_color('accent_negative'),
+            weight_included=weight_included,
         )
 
     def _p4_clear_mktcap_item(self, row: Any) -> None:
@@ -1370,6 +1575,7 @@ class PortfolioMetricsMixin:
         cache_symbol = str(ticker or '').strip().upper()
         if cache_symbol in getattr(self, '_mktcap_cache', {}):
             market_cap = self._mktcap_cache[cache_symbol]
+        analyst_targets = self._p4_analyst_target_map()
         row_cells = self._p4_build_stock_table_row(
             ticker,
             {
@@ -1384,8 +1590,11 @@ class PortfolioMetricsMixin:
                 'growth': growth,
             },
             market_cap=market_cap,
+            analyst_target=analyst_targets.get(cache_symbol),
+            weight_included=self._p4_position_included_in_weight(ticker),
         )
         render_table_row(self.p4_table, int(row), row_cells)
+        self._p4_apply_symbol_checkbox(int(row), ticker)
 
     def _p4_remove_active_ticker(self, ticker: Any) -> None:
         """Remove a ticker from the currently selected page-4 portfolio."""
@@ -1437,7 +1646,7 @@ class PortfolioMetricsMixin:
         pw.clear()
         config = self._get_return_timeframe_config(timeframe_key)
         tickers = sorted(
-            [ticker for ticker in self._p4_active_tickers() if ticker in results],
+            [ticker for ticker in self._p4_weight_included_tickers() if ticker in results],
             key=lambda ticker: results[ticker],
             reverse=config.get('sort_reverse', True),
         )
@@ -1717,7 +1926,7 @@ class PortfolioMetricsMixin:
         cache_key = self._p4_returns_cache_key(timeframe_key, portfolio_id)
         if self._return_metrics_fetching.get(cache_key, False):
             return
-        tickers = list(self._p4_active_tickers())
+        tickers = list(self._p4_weight_included_tickers())
         if not tickers:
             self._return_metrics_cache[cache_key] = {}
             self._return_metrics_fetching[cache_key] = False
@@ -1755,20 +1964,31 @@ class PortfolioMetricsMixin:
                     start=config.get('start'),
                 ).fetch()
             self._invoke_main.emit(
-                lambda payload=results, key=timeframe_key, pid=portfolio_id: self._on_returns_ready(key, pid, payload)
+                lambda payload=results, key=timeframe_key, pid=portfolio_id, requested_cache_key=cache_key: self._on_returns_ready(
+                    key,
+                    pid,
+                    payload,
+                    requested_cache_key,
+                )
             )
 
         self._p4_submit_background_task(_run)
 
-    def _on_returns_ready(self, timeframe_key: Any, portfolio_id: Any, results: Any) -> None:
+    def _on_returns_ready(self, timeframe_key: Any, portfolio_id: Any, results: Any, cache_key: Any = None) -> None:
         """Handle return metrics ready."""
         if hasattr(self, '_record_data_health_payload'):
-            self._record_data_health_payload('Portfolio returns', results, symbols=self._p4_active_tickers())
+            requested_symbols = cache_key[2] if isinstance(cache_key, tuple) and len(cache_key) >= 3 else self._p4_weight_included_tickers()
+            self._record_data_health_payload('Portfolio returns', results, symbols=requested_symbols)
         results = strip_market_data_keys(results) if isinstance(results, dict) else results
-        cache_key = self._p4_returns_cache_key(timeframe_key, portfolio_id)
+        cache_key = cache_key or self._p4_returns_cache_key(timeframe_key, portfolio_id)
         self._return_metrics_fetching[cache_key] = False
         self._return_metrics_cache[cache_key] = results
-        if str(portfolio_id) == str(self.active_portfolio_id) and timeframe_key == self._active_return_timeframe:
+        current_cache_key = self._p4_returns_cache_key(timeframe_key, portfolio_id)
+        if (
+            cache_key == current_cache_key
+            and str(portfolio_id) == str(self.active_portfolio_id)
+            and timeframe_key == self._active_return_timeframe
+        ):
             self._update_returns_chart(timeframe_key, results)
 
     def _on_returns_timeframe_changed(self, index: int) -> None:
@@ -1935,27 +2155,30 @@ class PortfolioMetricsMixin:
             metrics_map,
             preserve_visible_order=preserve_order,
         )
-        weights = {}
+        analyst_targets = self._p4_analyst_target_map(data)
+        weights, _filtered_total = self._p4_filtered_weight_map(metrics_map)
         rows = []
         for ticker in sorted_tickers:
-            metrics = metrics_map.get(ticker, {})
-            weights[ticker] = metrics.get('weight', 0)
+            metrics = dict(metrics_map.get(ticker, {}))
+            included = self._p4_position_included_in_weight(ticker)
+            metrics['weight'] = weights.get(ticker, 0.0)
             cache_symbol = str(ticker or '').strip().upper()
             rows.append(
                 self._p4_build_stock_table_row(
                     ticker,
                     metrics,
                     market_cap=self._mktcap_cache.get(cache_symbol) if cache_symbol in self._mktcap_cache else None,
+                    analyst_target=analyst_targets.get(cache_symbol),
+                    weight_included=included,
                 )
             )
         if preserve_order and self.p4_table.isSortingEnabled():
             self.p4_table.setSortingEnabled(False)
         render_table_rows(self.p4_table, rows)
+        self._p4_apply_visible_symbol_checkboxes()
         self._p4_restore_position_entry_cell()
 
         cash_balance = self._p4_active_cash_balance()
-        if cash_balance > 0.0 and total_market_value > 0.0:
-            weights['CASH'] = cash_balance / total_market_value * 100.0
         if hasattr(self, '_p4_update_remove_stock_button_state'):
             self._p4_update_remove_stock_button_state()
         if hasattr(self, '_p4_apply_table_width_preferences'):
@@ -1969,7 +2192,8 @@ class PortfolioMetricsMixin:
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
-        if not tickers:
+        included_tickers = self._p4_weight_included_tickers()
+        if not included_tickers:
             self._return_metrics_cache[active_cache_key] = {}
             self._return_metrics_fetching[active_cache_key] = False
             self._update_returns_chart(self._active_return_timeframe, {})

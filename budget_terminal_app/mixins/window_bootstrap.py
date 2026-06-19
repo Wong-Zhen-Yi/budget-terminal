@@ -759,6 +759,7 @@ class WindowBootstrapMixin:
                 self.global_page_state = load_global_page_settings()
                 self.portfolio_metrics_state = load_portfolio_metrics_settings()
                 self.navigation_state = load_navigation_settings()
+                self.privacy_state = load_privacy_settings()
                 self.networth_data = load_networth_data()
                 self._tab_session_cache = load_tab_session_cache()
             self._rebuild_portfolio_slots()
