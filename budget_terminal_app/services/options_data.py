@@ -26,6 +26,32 @@ def _options_market_timezone() -> datetime.tzinfo:
 
 
 OPTIONS_MARKET_TIMEZONE = _options_market_timezone()
+OPTIONS_REGULAR_CLOSE_TIME = datetime.time(16, 0)
+
+
+def is_options_expiry_closed(expiry: Any, *, now: datetime.datetime | None = None) -> bool:
+    """Return whether an ISO option expiry is closed in the US options market timezone."""
+    try:
+        expiry_date = datetime.date.fromisoformat(str(expiry or "").strip())
+    except ValueError:
+        return False
+    market_now = now or datetime.datetime.now(OPTIONS_MARKET_TIMEZONE)
+    if market_now.tzinfo is None:
+        market_now = market_now.replace(tzinfo=OPTIONS_MARKET_TIMEZONE)
+    else:
+        market_now = market_now.astimezone(OPTIONS_MARKET_TIMEZONE)
+    if expiry_date != market_now.date():
+        return expiry_date < market_now.date()
+    return market_now.time().replace(tzinfo=None) >= OPTIONS_REGULAR_CLOSE_TIME
+
+
+def _is_unlisted_expiry_error(error: Any) -> bool:
+    """Return whether Yahoo explicitly rejected an unavailable expiration date."""
+    message = str(error or "").strip().lower()
+    return "expiration" in message and (
+        "cannot be found" in message
+        or "available expirations" in message
+    )
 
 
 class OptionsMarketDataService:
@@ -58,7 +84,10 @@ class OptionsMarketDataService:
         now = time.time()
         cached_memory = self.expiry_memory_cache.get(ticker_key)
         if cached_memory and (now - cached_memory[0]) < self.expiry_memory_ttl_seconds:
-            expiry_list = self._filter_live_expiries(cached_memory[1])
+            cached_expiries = list(cached_memory[1] or [])
+            expiry_list = self._filter_live_expiries(cached_expiries)
+            if expiry_list != cached_expiries:
+                self.cache_manager.save_options_expiries(ticker_key, expiry_list)
             if expiry_list:
                 self.expiry_memory_cache[ticker_key] = (cached_memory[0], list(expiry_list))
                 return attach_market_data_result(
@@ -69,7 +98,10 @@ class OptionsMarketDataService:
         cached = self.cache_manager.get_options_expiries(ticker_key, return_metadata=True)
         if cached:
             expiries, cache_meta = cached
-            expiry_list = self._filter_live_expiries(expiries)
+            cached_expiries = list(expiries or [])
+            expiry_list = self._filter_live_expiries(cached_expiries)
+            if expiry_list != cached_expiries:
+                self.cache_manager.save_options_expiries(ticker_key, expiry_list)
             if expiry_list:
                 self.expiry_memory_cache[ticker_key] = (now, list(expiry_list))
                 self.cache_manager.save_options_expiries(ticker_key, expiry_list)
@@ -82,7 +114,10 @@ class OptionsMarketDataService:
                     ),
                 )
         stale_cached = self.cache_manager.get_options_expiries(ticker_key, allow_stale=True, return_metadata=True)
-        stale_expiries = self._filter_live_expiries(stale_cached[0]) if stale_cached else []
+        stale_cached_expiries = list(stale_cached[0] or []) if stale_cached else []
+        stale_expiries = self._filter_live_expiries(stale_cached_expiries)
+        if stale_cached and stale_expiries != stale_cached_expiries:
+            self.cache_manager.save_options_expiries(ticker_key, stale_expiries)
         stale_meta = stale_cached[1] if stale_cached and isinstance(stale_cached[1], dict) else {}
 
         def fetch_expiries() -> list[str]:
@@ -119,7 +154,7 @@ class OptionsMarketDataService:
                 meta=make_market_data_meta(
                     source="input",
                     freshness="failed",
-                    failure_reason=f"Option expiry {expiry_key} has passed.",
+                    failure_reason=f"Option expiry {expiry_key} has closed.",
                 ),
             )
         now = time.time()
@@ -151,9 +186,17 @@ class OptionsMarketDataService:
         if stale_df is not None:
             self._normalize_chain_columns(stale_df, ticker_key, expiry_key)
 
+        unlisted_expiry_error = ""
+
         def fetch_chain() -> Any:
-            with YF_LOCK:
-                chain = yf.Ticker(ticker_key).option_chain(expiry_key)
+            nonlocal unlisted_expiry_error
+            try:
+                with YF_LOCK:
+                    chain = yf.Ticker(ticker_key).option_chain(expiry_key)
+            except Exception as exc:
+                if _is_unlisted_expiry_error(exc):
+                    unlisted_expiry_error = str(exc).strip()
+                raise
             calls = chain.calls.copy()
             puts = chain.puts.copy()
             calls["type"] = "Call"
@@ -170,11 +213,13 @@ class OptionsMarketDataService:
             f"options_chain:{ticker_key}:{expiry_key}",
             fetch_chain,
             source="yfinance",
-            cache_fallback=(lambda: stale_df) if stale_df is not None and not stale_df.empty else None,
+            cache_fallback=(lambda: None if unlisted_expiry_error else stale_df) if stale_df is not None and not stale_df.empty else None,
             cache_age_seconds=stale_meta.get("cache_age_seconds"),
             success_check=lambda frame: frame is not None and not getattr(frame, "empty", True),
             failure_reason=f"No option chain returned for {ticker_key} {expiry_key}.",
         )
+        if unlisted_expiry_error:
+            result.meta["failure_reason"] = unlisted_expiry_error
         chain = result.data if result.data is not None and not isinstance(result.data, dict) else pd.DataFrame()
         return attach_market_data_result({"chain": chain}, meta=result.meta, errors=result.errors)
 
@@ -200,7 +245,7 @@ class OptionsMarketDataService:
                 meta=make_market_data_meta(
                     source="input",
                     freshness="failed",
-                    failure_reason=f"Option expiry {expiry_key} has passed.",
+                    failure_reason=f"Option expiry {expiry_key} has closed.",
                 ),
             )
         chain_payload = self.fetch_chain_payload(ticker_key, expiry_key)
@@ -280,16 +325,11 @@ class OptionsMarketDataService:
             chain_df["type"] = ""
 
     def _is_past_expiry(self, expiry: Any) -> bool:
-        """Return True when an ISO option expiration date has passed in the US market timezone."""
-        try:
-            expiry_date = datetime.date.fromisoformat(str(expiry or "").strip())
-        except ValueError:
-            return False
-        market_today = datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
-        return expiry_date < market_today
+        """Return True when an ISO option expiration is no longer tradable."""
+        return is_options_expiry_closed(expiry)
 
     def _filter_live_expiries(self, expiries: Any) -> list[str]:
-        """Return unique non-expired expiry strings, preserving source order."""
+        """Return unique open or future expiry strings, preserving source order."""
         live_expiries: list[str] = []
         seen: set[str] = set()
         for expiry in list(expiries or []):

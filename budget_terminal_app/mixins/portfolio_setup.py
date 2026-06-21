@@ -391,6 +391,9 @@ class PortfolioSetupMixin:
         if widget is getattr(self, 'p4_positions_page', None):
             QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
             return
+        if widget is getattr(self, 'p4_pie_page', None) and hasattr(self, '_p4_refresh_pie_chart'):
+            QTimer.singleShot(0, self._p4_refresh_pie_chart)
+            return
         if widget is getattr(self, 'p4_heatmap_page', None) and hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             QTimer.singleShot(0, lambda: self._p4_refresh_portfolio_heatmap_view(reset_view=False))
             return
@@ -441,12 +444,75 @@ class PortfolioSetupMixin:
                 self._p4_refresh_active_momentum_view()
             if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
                 self._p4_refresh_portfolio_heatmap_view(reset_view=True)
+            if hasattr(self, '_p4_refresh_pie_chart'):
+                self._p4_refresh_pie_chart()
         if (
             hasattr(self, 'p4_content_tabs')
             and self.p4_content_tabs.currentWidget() is getattr(self, 'p4_metrics_page', None)
             and hasattr(self, '_p4_refresh_portfolio_metrics_view')
         ):
             self._p4_refresh_portfolio_metrics_view()
+
+    def _p4_build_pie_chart_page(self) -> Any:
+        """Build the checked-position portfolio allocation sub-tab."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        summary_frame = QFrame()
+        self.set_theme_role(summary_frame, 'panel')
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(12, 8, 12, 8)
+        summary_layout.setSpacing(10)
+
+        heading_layout = QVBoxLayout()
+        heading_layout.setContentsMargins(0, 0, 0, 0)
+        heading_layout.setSpacing(2)
+        title_label = QLabel('Included Portfolio Allocation')
+        self.set_theme_role(title_label, 'section_title')
+        subtitle_label = QLabel('Checked stock positions plus brokerage cash')
+        self.set_theme_role(subtitle_label, 'muted')
+        heading_layout.addWidget(title_label)
+        heading_layout.addWidget(subtitle_label)
+        summary_layout.addLayout(heading_layout)
+        summary_layout.addStretch()
+
+        self.p4_pie_total_label = QLabel('Filtered Total:  $0.00  USD')
+        self.p4_pie_total_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.set_theme_role(self.p4_pie_total_label, 'metric')
+        summary_layout.addWidget(self.p4_pie_total_label)
+        layout.addWidget(summary_frame)
+
+        chart_frame = QFrame()
+        self.set_theme_role(chart_frame, 'panel')
+        chart_layout = QVBoxLayout(chart_frame)
+        chart_layout.setContentsMargins(12, 12, 12, 12)
+        chart_layout.setSpacing(0)
+
+        self.p4_pie_chart = PieChartWidget()
+        self.p4_pie_chart.setMinimumHeight(320)
+        self.p4_pie_chart.set_donut(True, hole_ratio=0.50)
+        self.p4_pie_chart.set_callout_labels(True)
+        self.p4_pie_chart.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
+        self.p4_pie_chart.setVisible(False)
+        self.p4_pie_scroll_area = QScrollArea()
+        self.p4_pie_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.p4_pie_scroll_area.setWidgetResizable(True)
+        self.p4_pie_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.p4_pie_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.p4_pie_scroll_area.viewport().setAutoFillBackground(False)
+        self.p4_pie_scroll_area.setWidget(self.p4_pie_chart)
+        self.p4_pie_scroll_area.setVisible(False)
+        chart_layout.addWidget(self.p4_pie_scroll_area, 1)
+
+        self.p4_pie_empty_label = QLabel('No included portfolio value.')
+        self.p4_pie_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(self.p4_pie_empty_label, 'muted')
+        self.p4_pie_empty_label.setVisible(True)
+        chart_layout.addWidget(self.p4_pie_empty_label, 1)
+        layout.addWidget(chart_frame, 1)
+        return page
 
     def _p4_build_portfolio_heatmap_page(self) -> Any:
         """Build the active portfolio heatmap sub-tab."""
@@ -1332,8 +1398,10 @@ class PortfolioSetupMixin:
         momentum_page_layout.setSpacing(0)
         momentum_page_layout.addWidget(momentum_container)
         self.p4_heatmap_page = self._p4_build_portfolio_heatmap_page()
+        self.p4_pie_page = self._p4_build_pie_chart_page()
         self.p4_metrics_page = self._build_portfolio_metrics_page() if hasattr(self, '_build_portfolio_metrics_page') else QWidget()
         self.p4_content_tabs.addTab(self.p4_positions_page, 'Positions')
+        self.p4_content_tabs.addTab(self.p4_pie_page, 'Pie Chart')
         self.p4_content_tabs.addTab(self.p4_heatmap_page, 'Portfolio Heatmap')
         self.p4_content_tabs.addTab(self.p4_momentum_page, 'Momentum Tracker')
         self.p4_content_tabs.addTab(self.p4_metrics_page, 'Portfolio Metrics')
@@ -1598,5 +1666,7 @@ class PortfolioSetupMixin:
             self.style_plot_widget(chart)
         if hasattr(self, 'p4_weight_chart'):
             self.style_plot_widget(self.p4_weight_chart)
+        if hasattr(self, 'p4_pie_chart'):
+            self.p4_pie_chart.set_theme(self.theme_pie_palette(), self.theme_color('text_primary'))
         if hasattr(self, '_apply_portfolio_heatmap_theme'):
             self._apply_portfolio_heatmap_theme()

@@ -21,6 +21,7 @@ from budget_terminal_app.constants import (
 from budget_terminal_app.dependencies import QApplication, QLabel, QObject, QTableWidget, Qt
 from budget_terminal_app.mixins.portfolio_metrics import PortfolioMetricsMixin
 from budget_terminal_app.mixins.portfolio_setup import PortfolioSetupMixin
+from budget_terminal_app.widgets.pie_chart import PieChartWidget
 
 _QT_APP = None
 
@@ -311,6 +312,7 @@ def test_weight_checkbox_filters_only_requested_views() -> None:
     bbb_row = _row_for(probe, "BBB")
     bbb_symbol = probe.p4_table.item(bbb_row, P4_PORTFOLIO_COL_SYMBOL)
     _assert(bbb_symbol.checkState() == Qt.CheckState.Checked, "existing positions should default to checked")
+    _assert("Pie Chart" in bbb_symbol.toolTip(), "checkbox tooltip should identify the Pie Chart as a filtered view")
     bbb_symbol.setCheckState(Qt.CheckState.Unchecked)
     probe._p4_on_weight_inclusion_changed(bbb_symbol)
 
@@ -341,6 +343,27 @@ def test_weight_checkbox_filters_only_requested_views() -> None:
     _assert(cache_key[2] == ("AAA",), "Dip Finder cache key should include the enabled ticker signature")
 
 
+def test_pie_chart_data_excludes_unticked_positions_and_keeps_cash() -> None:
+    _qt_app()
+    probe = _PortfolioProbe()
+    probe.cash_balance = 10.0
+    probe.tracker_data["BBB"]["include_in_weight"] = False
+    metrics_map, total_value = probe._p4_build_tracker_metrics_map(probe.last_data["portfolio"])
+    slices, filtered_total = probe._p4_pie_chart_data(metrics_map)
+
+    _assert(total_value == 40.0, "full portfolio total should retain the unticked stock")
+    _assert(filtered_total == 20.0, "Pie Chart total should exclude the unticked stock")
+    _assert(slices == {"AAA": 50.0, "CASH": 50.0}, "Pie Chart should contain checked stocks plus cash")
+
+    probe.p4_pie_chart = PieChartWidget()
+    probe.p4_pie_empty_label = QLabel()
+    probe.p4_pie_total_label = QLabel()
+    probe._p4_refresh_pie_chart(metrics_map)
+    _assert(not probe.p4_pie_chart.isHidden(), "Pie Chart should be shown when included value exists")
+    _assert(probe.p4_pie_empty_label.isHidden(), "Pie Chart empty state should be hidden when slices exist")
+    _assert(probe.p4_pie_total_label.text() == "Filtered Total:  $20.00  USD", "Pie Chart should display its filtered total")
+
+
 def test_all_positions_unchecked_leaves_cash_at_full_weight() -> None:
     _qt_app()
     probe = _PortfolioProbe()
@@ -354,6 +377,21 @@ def test_all_positions_unchecked_leaves_cash_at_full_weight() -> None:
     _assert(filtered_total == 25.0, "filtered total should contain only cash")
     _assert(weights == {"CASH": 100.0}, "cash should become 100% when every stock is unchecked")
     _assert(probe._p4_weight_included_tickers() == [], "no stock should remain in Dip Finder or Heatmap")
+    slices, pie_total = probe._p4_pie_chart_data(metrics_map)
+    _assert(slices == {"CASH": 100.0}, "Pie Chart should show cash at 100% when all stocks are unchecked")
+    _assert(pie_total == 25.0, "Pie Chart total should equal cash when all stocks are unchecked")
+
+    probe.cash_balance = 0.0
+    slices, pie_total = probe._p4_pie_chart_data(metrics_map)
+    _assert(slices == {}, "Pie Chart should enter its empty state without checked stocks or cash")
+    _assert(pie_total == 0.0, "empty Pie Chart total should be zero")
+    probe.p4_pie_chart = PieChartWidget()
+    probe.p4_pie_empty_label = QLabel()
+    probe.p4_pie_total_label = QLabel()
+    probe._p4_refresh_pie_chart(metrics_map)
+    _assert(probe.p4_pie_chart.isHidden(), "empty Pie Chart should hide the blank chart widget")
+    _assert(not probe.p4_pie_empty_label.isHidden(), "empty Pie Chart should show its empty-state label")
+    _assert(probe.p4_pie_total_label.text() == "Filtered Total:  $0.00  USD", "empty Pie Chart should show a zero filtered total")
 
 
 def main() -> None:
@@ -361,6 +399,7 @@ def main() -> None:
     test_incomplete_position_entry_does_not_fetch_or_move()
     test_complete_position_entry_fetches_once_and_sorting_resumes()
     test_weight_checkbox_filters_only_requested_views()
+    test_pie_chart_data_excludes_unticked_positions_and_keeps_cash()
     test_all_positions_unchecked_leaves_cash_at_full_weight()
     print("portfolio position row stability smoke tests passed")
 

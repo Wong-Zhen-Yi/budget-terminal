@@ -382,7 +382,6 @@ class RandomRecommenderMixin:
         candidates_header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         candidates_header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         candidates_header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
-        self.p18_candidates_table.itemDoubleClicked.connect(self._p18_open_candidate_item)
         self.p18_candidates_table.setVisible(False)
         candidates_layout.addWidget(candidates_title)
         candidates_layout.addWidget(self.p18_candidates_empty)
@@ -686,15 +685,6 @@ class RandomRecommenderMixin:
                 self.p18_candidates_table.setItem(row_index, col_index, item)
         self.p18_candidates_empty.setVisible(False)
         self.p18_candidates_table.setVisible(True)
-
-    def _p18_open_candidate_item(self, item: Any) -> None:
-        row = item.row() if hasattr(item, 'row') else -1
-        if row < 0:
-            return
-        ticker_item = self.p18_candidates_table.item(row, 1)
-        symbol = str(ticker_item.data(Qt.ItemDataRole.UserRole) if ticker_item is not None else '').upper().strip()
-        if symbol and symbol != self._p18_current_symbol():
-            self._p18_roll_stock(include_global_status=True, target_symbol=symbol)
 
     def _p18_update_metrics(self, info: dict[str, Any], quote: dict[str, Any], price: Any) -> None:
         market_cap = self._p18_info_value(info, 'marketCap') or quote.get('marketCap')

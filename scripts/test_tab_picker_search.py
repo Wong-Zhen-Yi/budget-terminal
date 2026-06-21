@@ -54,6 +54,7 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
     try:
         labels = _list_labels(window)
         assert "Calendar > Earnings" in labels
+        assert "Portfolio > Pie Chart" in labels
         assert "Valuation > Peers" in labels
         assert "Options > Options by Top Volume" in labels
         assert "ETF > Holdings" in labels
@@ -71,6 +72,10 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
         window._filter_tab_picker_items("arbitrage")
         assert window._tab_picker_list.count() == 1
         assert window._tab_picker_list.item(0).text() == "ETF > Arbitrage"
+
+        window._filter_tab_picker_items("allocation")
+        assert window._tab_picker_list.count() == 1
+        assert window._tab_picker_list.item(0).text() == "Portfolio > Pie Chart"
 
         window._filter_tab_picker_items("heatmap")
         assert window._tab_picker_list.count() >= 2
@@ -96,6 +101,33 @@ def test_tab_picker_activates_lazy_subpage() -> None:
         assert window._page_initialized(index=22)
         assert window.valuation_detail_tabs.tabText(window.valuation_detail_tabs.currentIndex()) == "Peers"
         assert not window._tab_picker_popup.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tab_picker_activates_portfolio_pie_chart() -> None:
+    app, window = _build_window()
+    try:
+        window._refresh_main_tab_picker_items()
+        window._filter_tab_picker_items("pie chart")
+        item = window._tab_picker_list.currentItem()
+        assert item is not None
+
+        window._activate_tab_picker_item(item)
+        app.processEvents()
+
+        assert window.stacked_widget.currentIndex() == 1
+        assert window._page_initialized(index=1)
+        assert window.p4_content_tabs.currentWidget() is window.p4_pie_page
+        assert window.p4_content_tabs.tabText(window.p4_content_tabs.currentIndex()) == "Pie Chart"
+        assert window.p4_pie_chart._donut_enabled is True
+        assert abs(window.p4_pie_chart._donut_hole_ratio - 0.50) < 0.001
+        assert window.p4_pie_chart._callout_labels_enabled is True
+        assert window.p4_pie_scroll_area.widget() is window.p4_pie_chart
+        assert window.p4_pie_scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        window._apply_portfolio_theme()
+        assert tuple(window.p4_pie_chart.slice_colors) == tuple(window.theme_pie_palette())
     finally:
         window.close()
         app.processEvents()
@@ -128,6 +160,7 @@ def test_backtick_opens_and_refocuses_from_input() -> None:
 if __name__ == "__main__":
     test_tab_picker_indexes_visible_pages_and_subpages()
     test_tab_picker_activates_lazy_subpage()
+    test_tab_picker_activates_portfolio_pie_chart()
     test_backtick_opens_and_refocuses_from_input()
     print("tab picker search smoke passed")
     sys.stdout.flush()

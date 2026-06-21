@@ -1058,6 +1058,7 @@ class WindowLifecycleMixin:
         return {
             1: (
                 {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Positions'},
+                {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Pie Chart', 'aliases': ('Pie', 'Allocation')},
                 {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Portfolio Heatmap'},
                 {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Momentum Tracker', 'aliases': ('Momentum',)},
                 {'tab_widget_attr': 'p4_content_tabs', 'tab_text': 'Portfolio Metrics', 'aliases': ('Metrics',)},

@@ -180,11 +180,12 @@ class CacheManager:
 
     def save_options_expiries(self, ticker: Any, expiries: Any) -> None:
         """Save options expiries."""
-        if not expiries:
+        if expiries is None:
             return
         try:
+            expiry_list = list(expiries)
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute('INSERT OR REPLACE INTO meta_options (ticker, expirations, last_updated) VALUES (?, ?, ?)', (ticker, json.dumps(list(expiries)), datetime.datetime.now().isoformat()))
+                conn.execute('INSERT OR REPLACE INTO meta_options (ticker, expirations, last_updated) VALUES (?, ?, ?)', (ticker, json.dumps(expiry_list), datetime.datetime.now().isoformat()))
         except Exception as e:
             logger.warning(f'Failed to save options expiries for {ticker}: {e}')
 

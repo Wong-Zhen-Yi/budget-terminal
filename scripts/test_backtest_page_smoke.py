@@ -12,7 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from budget_terminal_app.dependencies import pd
-from budget_terminal_app.persistence import _normalize_backtest_page_settings
+from budget_terminal_app.persistence import (
+    _normalize_backtest_page_settings,
+    load_backtest_page_settings,
+    save_backtest_page_settings,
+)
 from budget_terminal_app.services.backtest import calculate_buy_hold_backtest
 
 
@@ -81,8 +85,11 @@ def _build_window():
 
 
 def test_backtest_page_smoke() -> None:
-    app, window = _build_window()
+    original_state = load_backtest_page_settings()
+    app = None
+    window = None
     try:
+        app, window = _build_window()
         assert window._PAGE_LABELS[24] == "Backtest"
         assert window.btn_page25.text() == "Backtest"
         assert window.p25_table.rowCount() == 2
@@ -94,8 +101,11 @@ def test_backtest_page_smoke() -> None:
         assert "Backtest loaded" in window.p25_status_label.text()
         assert "Return +10.00%" == window.p25_return_label.text()
     finally:
-        window.close()
-        app.processEvents()
+        if window is not None:
+            window.close()
+        if app is not None:
+            app.processEvents()
+        save_backtest_page_settings(original_state)
 
 
 if __name__ == "__main__":

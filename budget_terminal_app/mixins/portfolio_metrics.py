@@ -450,6 +450,37 @@ class PortfolioMetricsMixin:
             weights['CASH'] = cash_balance / denominator * 100.0
         return weights, denominator
 
+    def _p4_pie_chart_data(self, metrics_map: Any) -> tuple[dict[str, float], float]:
+        """Return descending positive slices and total for the Pie Chart sub-tab."""
+        weights, filtered_total = self._p4_filtered_weight_map(metrics_map)
+        slices = {
+            str(ticker): float(weight)
+            for ticker, weight in sorted(weights.items(), key=lambda item: item[1], reverse=True)
+            if float(weight or 0.0) > 0.0
+        }
+        return slices, filtered_total
+
+    def _p4_refresh_pie_chart(self, metrics_map: Any = None) -> None:
+        """Refresh the checked-position pie chart and its filtered total."""
+        if metrics_map is None:
+            data = getattr(self, 'last_data', None)
+            portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
+            metrics_map, _total_value = self._p4_build_tracker_metrics_map(portfolio)
+        slices, filtered_total = self._p4_pie_chart_data(metrics_map)
+        chart = getattr(self, 'p4_pie_chart', None)
+        if chart is not None:
+            chart.set_data(slices)
+            chart.setVisible(bool(slices))
+        scroll_area = getattr(self, 'p4_pie_scroll_area', None)
+        if scroll_area is not None:
+            scroll_area.setVisible(bool(slices))
+        empty_label = getattr(self, 'p4_pie_empty_label', None)
+        if empty_label is not None:
+            empty_label.setVisible(not slices)
+        total_label = getattr(self, 'p4_pie_total_label', None)
+        if total_label is not None:
+            total_label.setText(f'Filtered Total:  ${filtered_total:,.2f}  USD')
+
     def _p4_apply_symbol_checkbox(self, row: int, ticker: Any) -> None:
         """Apply the persisted inclusion state to one visible Symbol item."""
         table = getattr(self, 'p4_table', None)
@@ -462,7 +493,7 @@ class PortfolioMetricsMixin:
             if self._p4_position_included_in_weight(ticker)
             else Qt.CheckState.Unchecked
         )
-        item.setToolTip('Include this position in Portfolio Weight, Dip Finder, and Portfolio Heatmap')
+        item.setToolTip('Include this position in Portfolio Weight, Pie Chart, Dip Finder, and Portfolio Heatmap')
 
     def _p4_apply_visible_symbol_checkboxes(self) -> None:
         """Restore checkboxes after a full table render or sort."""
@@ -543,6 +574,7 @@ class PortfolioMetricsMixin:
             self.p4_total_label.setText(f'Total:  ${total_value:,.2f}  USD')
         if hasattr(self, 'p4_weight_chart'):
             self._update_weight_chart(weights)
+        self._p4_refresh_pie_chart(metrics_map)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
@@ -1371,7 +1403,7 @@ class PortfolioMetricsMixin:
         self._p4_refresh_weight_filter_views()
 
     def _p4_refresh_weight_filter_views(self) -> None:
-        """Refresh Weight, Dip Finder, and Heatmap after an inclusion toggle."""
+        """Refresh allocation, Dip Finder, and Heatmap after an inclusion toggle."""
         data = getattr(self, 'last_data', None)
         portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
         metrics_map, _total_value = self._p4_build_tracker_metrics_map(portfolio)
@@ -1402,6 +1434,7 @@ class PortfolioMetricsMixin:
                 table.blockSignals(previous)
         if hasattr(self, 'p4_weight_chart'):
             self._update_weight_chart(weights)
+        self._p4_refresh_pie_chart(metrics_map)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
         timeframe = getattr(self, '_active_return_timeframe', 'dip_finder')
@@ -1493,6 +1526,7 @@ class PortfolioMetricsMixin:
         if self._p4_position_entry_is_active():
             return
         self._update_weight_chart(weights)
+        self._p4_refresh_pie_chart(metrics_map)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
@@ -2188,6 +2222,7 @@ class PortfolioMetricsMixin:
         if defer_refresh:
             return
         self._update_weight_chart(weights)
+        self._p4_refresh_pie_chart(metrics_map)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 

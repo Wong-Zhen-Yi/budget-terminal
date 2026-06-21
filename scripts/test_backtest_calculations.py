@@ -8,9 +8,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from budget_terminal_app.dependencies import pd
+from budget_terminal_app.services import backtest as backtest_module
 from budget_terminal_app.services.backtest import (
+    BacktestDataService,
     calculate_buy_hold_backtest,
     normalize_backtest_rows,
+    price_series_from_frame,
 )
 
 
@@ -89,6 +92,50 @@ def test_compare_alignment():
     assert round(float(compare_return.iloc[-1]), 4) == 18.1818
 
 
+def _multiindex_frame(values, *, ticker_first: bool):
+    frame = _frame(values)
+    if ticker_first:
+        frame.columns = pd.MultiIndex.from_tuples(
+            [("LOW", column) for column in frame.columns],
+            names=["Ticker", "Price"],
+        )
+    else:
+        frame.columns = pd.MultiIndex.from_tuples(
+            [(column, "LOW") for column in frame.columns],
+            names=["Price", "Ticker"],
+        )
+    return frame
+
+
+def test_low_ticker_multiindex_orientation():
+    original_download = backtest_module.yf.download
+    try:
+        for ticker_first in (False, True):
+            source = _multiindex_frame([100, 110, 120], ticker_first=ticker_first)
+            backtest_module.yf.download = lambda *args, _source=source, **kwargs: _source.copy()
+            frame = BacktestDataService().fetch_price_frame("LOW", interval="1d")
+            assert not isinstance(frame.columns, pd.MultiIndex)
+            assert list(frame.columns) == ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            series = price_series_from_frame(frame)
+            assert list(series.astype(float)) == [100.0, 110.0, 120.0]
+    finally:
+        backtest_module.yf.download = original_download
+
+
+def test_ambiguous_price_columns_failure():
+    frame = pd.DataFrame(
+        [[100.0, 101.0], [110.0, 111.0]],
+        columns=["Adj Close", "Adj Close"],
+        index=pd.date_range("2020-01-01", periods=2, freq="D"),
+    )
+    try:
+        price_series_from_frame(frame)
+    except ValueError as exc:
+        assert "expected one column, found 2" in str(exc)
+    else:
+        raise AssertionError("ambiguous price columns did not fail")
+
+
 if __name__ == "__main__":
     tests = [
         test_weight_normalization,
@@ -96,6 +143,8 @@ if __name__ == "__main__":
         test_common_date_alignment,
         test_missing_ticker_failure,
         test_compare_alignment,
+        test_low_ticker_multiindex_orientation,
+        test_ambiguous_price_columns_failure,
     ]
     for test in tests:
         test()

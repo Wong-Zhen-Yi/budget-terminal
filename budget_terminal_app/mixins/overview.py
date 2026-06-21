@@ -25,6 +25,13 @@ _P20_DOT_METRICS = {
     'ytd': ('YTD', 'YTD ADV ($)', 'ytd_avg_dollar_volume'),
     '1y': ('1Y', '1Y ADV ($)', 'one_year_avg_dollar_volume'),
 }
+_P20_DOT_TABLE_COLUMNS = {
+    '1d': 4,
+    '5d': 5,
+    '30d': 6,
+    'ytd': 7,
+    '1y': 8,
+}
 _P20_FILTER_DEFAULT = 'default'
 _P20_FILTER_EXCLUDE = 'exclude'
 _P20_FILTER_ROW_RANGE = 'row_range'
@@ -422,11 +429,11 @@ class OverviewMixin:
         return f'${numeric:,.0f}'
 
     def _p20_build_trading_volume_llm_export(self, rows: list[dict[str, Any]]) -> str:
-        """Build a Markdown payload for external LLM analysis of Trading Volumes."""
+        """Build independently ranked Markdown tables for every volume interval."""
+        export_rows = [dict(row) for row in rows if isinstance(row, dict)]
         exported_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         source = str(getattr(self, '_p20_trading_volume_source', '') or 'Yahoo Finance').strip()
         as_of = str(getattr(self, '_p20_trading_volume_as_of', '') or '').strip()
-        modifier_text = self._p20_filter_description(len(getattr(self, '_p20_trading_volume_all_rows', []) or []))
         lines = [
             '# Trading Volumes Export',
             '',
@@ -435,34 +442,35 @@ class OverviewMixin:
             f'- Exported at: {exported_at}',
             f'- Data source: {source or "N/A"}',
             f'- Data as of: {as_of or "N/A"}',
-            f'- Active modifier: {modifier_text}',
-            f'- Rows exported: {len(rows)}',
-            '',
-            '## Trading Volumes Data',
-            '',
-            '| Rank | Ticker | Name | Sector | Market Cap ($) | 1D ADV ($) | 5D ADV ($) | 30D ADV ($) | YTD ADV ($) | 1Y ADV ($) |',
-            '| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+            '- Intervals exported: 1D, 5D, 30D, YTD, 1Y',
+            f'- Stocks exported per interval: {len(export_rows)}',
+            '- Page modifiers: Ignored',
         ]
-        for row_index, row in enumerate(rows):
-            lines.append(
-                '| {rank} | {ticker} | {name} | {sector} | {market_cap} | {one_day_adv} | {five_day_adv} | {thirty_day_adv} | {ytd_adv} | {one_year_adv} |'.format(
-                    rank=self._p20_row_rank(row, row_index),
-                    ticker=self._p20_export_escape(str(row.get('ticker') or '').upper()),
-                    name=self._p20_export_escape(row.get('name') or row.get('ticker') or ''),
-                    sector=self._p20_export_escape(row.get('sector') or 'N/A'),
-                    market_cap=self._p20_format_export_currency(row.get('market_cap')),
-                    one_day_adv=self._p20_format_export_currency(row.get('one_day_dollar_volume')),
-                    five_day_adv=self._p20_format_export_currency(row.get('five_day_avg_dollar_volume')),
-                    thirty_day_adv=self._p20_format_export_currency(row.get('thirty_day_avg_dollar_volume')),
-                    ytd_adv=self._p20_format_export_currency(row.get('ytd_avg_dollar_volume')),
-                    one_year_adv=self._p20_format_export_currency(row.get('one_year_avg_dollar_volume')),
+        for metric_key, (button_label, axis_label, row_key) in _P20_DOT_METRICS.items():
+            ranked_rows = self._p20_ranked_trading_volume_rows(metric_key=metric_key, rows=export_rows)
+            lines.extend([
+                '',
+                f'## {button_label} Trading Volumes',
+                '',
+                f'| Rank | Ticker | Name | Sector | Market Cap ($) | {axis_label} |',
+                '| ---: | --- | --- | --- | ---: | ---: |',
+            ])
+            for row_index, row in enumerate(ranked_rows, start=1):
+                lines.append(
+                    '| {rank} | {ticker} | {name} | {sector} | {market_cap} | {interval_adv} |'.format(
+                        rank=row_index,
+                        ticker=self._p20_export_escape(str(row.get('ticker') or '').upper()),
+                        name=self._p20_export_escape(row.get('name') or row.get('ticker') or ''),
+                        sector=self._p20_export_escape(row.get('sector') or 'N/A'),
+                        market_cap=self._p20_format_export_currency(row.get('market_cap')),
+                        interval_adv=self._p20_format_export_currency(row.get(row_key)),
+                    )
                 )
-            )
         return '\n'.join(lines).rstrip() + '\n'
 
     def _p20_export_trading_volume_for_llm(self) -> None:
-        """Copy the loaded trading-volume panel data to the clipboard."""
-        rows = [dict(row) for row in getattr(self, '_p20_trading_volume_rows', []) or [] if isinstance(row, dict)]
+        """Copy all loaded stocks across every volume interval to the clipboard."""
+        rows = [dict(row) for row in getattr(self, '_p20_trading_volume_all_rows', []) or [] if isinstance(row, dict)]
         if not rows:
             self.set_status_text(self.p20_status_lbl, 'Load trading volume before exporting data.', status='warning')
             if hasattr(self, 'status_bar'):
@@ -476,9 +484,10 @@ class OverviewMixin:
                 self.set_status_text(self.status_bar, f'Trading Volumes export failed: {exc}', status='negative')
             QMessageBox.warning(self, 'Export Failed', f'Unable to copy Trading Volumes data to the clipboard:\n{exc}')
             return
-        self.set_status_text(self.p20_status_lbl, f'Copied {len(rows)} trading-volume rows to clipboard.', status='positive')
+        success_text = f'Copied {len(rows)} stocks across {len(_P20_DOT_METRICS)} trading-volume intervals to clipboard.'
+        self.set_status_text(self.p20_status_lbl, success_text, status='positive')
         if hasattr(self, 'status_bar'):
-            self.set_status_text(self.status_bar, f'Trading Volumes data copied to clipboard: {len(rows)} rows.', status='positive')
+            self.set_status_text(self.status_bar, success_text, status='positive')
 
     def _p20_export_tickers_for_llm(self) -> None:
         """Backward-compatible wrapper for the Trading Volumes LLM export action."""
@@ -526,7 +535,8 @@ class OverviewMixin:
                         item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, col_index, item)
         table.setSortingEnabled(True)
-        table.sortItems(4, Qt.SortOrder.DescendingOrder)
+        metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+        table.sortItems(_P20_DOT_TABLE_COLUMNS.get(metric_key, 4), Qt.SortOrder.DescendingOrder)
         self._p20_render_dot_plot(self._p20_trading_volume_rows)
 
     def _p20_exclude_top_value(self) -> int:
@@ -568,7 +578,7 @@ class OverviewMixin:
 
     def _p20_visible_trading_volume_rows(self) -> list[dict[str, Any]]:
         """Return displayed rows for the active Trading Volumes modifier."""
-        source_rows = [dict(row) for row in getattr(self, '_p20_trading_volume_all_rows', []) or [] if isinstance(row, dict)]
+        source_rows = self._p20_ranked_trading_volume_rows()
         filter_mode = self._p20_normalize_filter_mode(getattr(self, '_p20_filter_mode', _P20_FILTER_DEFAULT))
         start_rank = 1
         end_rank = len(source_rows)
@@ -584,6 +594,25 @@ class OverviewMixin:
             visible_row['_p20_rank'] = original_index
             visible_rows.append(visible_row)
         return visible_rows
+
+    def _p20_ranked_trading_volume_rows(
+        self,
+        *,
+        metric_key: str | None = None,
+        rows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return rows ranked by a requested or active volume metric."""
+        source = rows if rows is not None else getattr(self, '_p20_trading_volume_all_rows', []) or []
+        source_rows = [dict(row) for row in source if isinstance(row, dict)]
+        metric_key = str(metric_key or getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+        if metric_key not in _P20_DOT_METRICS:
+            metric_key = '1d'
+        row_key = _P20_DOT_METRICS[metric_key][2]
+        return sorted(
+            source_rows,
+            key=lambda row: self._p20_numeric_value(row.get(row_key)),
+            reverse=True,
+        )
 
     def _p20_apply_trading_volume_filter(self) -> None:
         """Refresh the Trading Volumes table and dot plot from the filtered row set."""
@@ -687,13 +716,16 @@ class OverviewMixin:
         return max(1, rank)
 
     def _p20_set_dot_metric(self, metric_key: str, checked: Any = True) -> None:
-        """Switch the Trading Volumes dot plot between supported volume metrics."""
+        """Switch the Trading Volumes table and dot plot to a volume metric."""
         if checked is False or metric_key not in _P20_DOT_METRICS:
             return
         self._p20_dot_metric = metric_key
         if hasattr(self, 'update_checked_button_state') and hasattr(self, 'p20_dot_metric_buttons'):
             self.update_checked_button_state(self.p20_dot_metric_buttons, self._p20_dot_metric)
-        self._p20_render_dot_plot(getattr(self, '_p20_trading_volume_rows', []) or [])
+        if hasattr(self, 'p20_trading_volume_table'):
+            self._p20_apply_trading_volume_filter()
+        else:
+            self._p20_render_dot_plot(getattr(self, '_p20_trading_volume_rows', []) or [])
 
     def _p20_render_dot_plot(self, rows: list[dict[str, Any]]) -> None:
         """Render the right-side Trading volume dot plot."""

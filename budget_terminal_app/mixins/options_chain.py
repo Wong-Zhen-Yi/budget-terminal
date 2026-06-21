@@ -10,7 +10,7 @@ from budget_terminal_app.mixins.options_chain_presenters import (
     prepare_strike_records,
     prepare_top_volume_records,
 )
-from budget_terminal_app.services.options_data import OPTIONS_MARKET_TIMEZONE
+from budget_terminal_app.services.options_data import OPTIONS_MARKET_TIMEZONE, is_options_expiry_closed
 
 
 class OptionsChainMixin:
@@ -351,15 +351,11 @@ class OptionsChainMixin:
         return datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
 
     def _p5_is_past_expiry(self, expiry: Any) -> bool:
-        """Return whether an expiry is before the current US options market date."""
-        try:
-            expiry_date = datetime.date.fromisoformat(str(expiry or '').strip())
-        except ValueError:
-            return False
-        return expiry_date < self._p5_current_options_market_date()
+        """Return whether an expiry is no longer tradable in the US options market."""
+        return is_options_expiry_closed(expiry)
 
     def _p5_filter_live_expiries(self, expiries: Any) -> list[str]:
-        """Return unique non-expired expiry strings, preserving source order."""
+        """Return unique open or future expiry strings, preserving source order."""
         live_expiries = []
         seen = set()
         for expiry in list(expiries or []):
@@ -1604,7 +1600,7 @@ class OptionsChainMixin:
             return
         if self._p5_is_past_expiry(expiry):
             self._p5_populate_tables(pd.DataFrame(), '')
-            self.set_status_text(self.p5_status_lbl, f'Option expiry {expiry} has passed. Choose a current expiration.', status='warning')
+            self.set_status_text(self.p5_status_lbl, f'Option expiry {expiry} has closed. Choose a current expiration.', status='warning')
             return
         self._p5_chain_request_seq += 1
         request_id = self._p5_chain_request_seq

@@ -12,6 +12,7 @@ BACKTEST_INTERVALS = {
 }
 BACKTEST_RANGES = ("Max", "5Y", "3Y", "1Y", "YTD")
 BACKTEST_START_VALUE = 10000.0
+_PRICE_FIELD_NAMES = {"OPEN", "HIGH", "LOW", "CLOSE", "ADJ CLOSE", "VOLUME"}
 
 
 def normalize_backtest_rows(rows: Any) -> tuple[list[dict[str, float | str]], float]:
@@ -51,7 +52,15 @@ def price_series_from_frame(frame: Any) -> Any:
     column = _price_column(frame)
     if not column:
         return pd.Series(dtype=float)
-    series = pd.Series(frame[column]).astype(float).dropna()
+    selected = frame[column]
+    if isinstance(selected, pd.DataFrame):
+        if selected.shape[1] != 1:
+            raise ValueError(
+                f"Ambiguous backtest price data for {column}: "
+                f"expected one column, found {selected.shape[1]}."
+            )
+        selected = selected.iloc[:, 0]
+    series = pd.Series(selected).astype(float).dropna()
     if series.empty:
         return pd.Series(dtype=float)
     index = pd.DatetimeIndex(pd.to_datetime(series.index))
@@ -60,6 +69,40 @@ def price_series_from_frame(frame: Any) -> Any:
     series.index = pd.DatetimeIndex(index.astype("datetime64[ns]"))
     series = series[~series.index.duplicated(keep="last")].sort_index()
     return series[series > 0.0]
+
+
+def _flatten_yfinance_price_columns(frame: Any, symbol: Any) -> Any:
+    """Flatten one-symbol yfinance MultiIndex columns using the OHLCV field level."""
+    if frame is None or not isinstance(getattr(frame, "columns", None), pd.MultiIndex):
+        return frame
+    if frame.columns.nlevels != 2:
+        logger.warning("Backtest %s returned unsupported column levels: %s", symbol, frame.columns.nlevels)
+        return frame
+
+    level_values = [
+        [str(value).upper().strip() for value in frame.columns.get_level_values(level)]
+        for level in range(2)
+    ]
+    field_scores = [len(set(values) & _PRICE_FIELD_NAMES) for values in level_values]
+    if not max(field_scores) or field_scores[0] == field_scores[1]:
+        logger.warning("Backtest %s returned ambiguous MultiIndex columns: %s", symbol, list(frame.columns))
+        return frame
+
+    field_level = 0 if field_scores[0] > field_scores[1] else 1
+    ticker_level = 1 - field_level
+    ticker_values = level_values[ticker_level]
+    symbol_text = str(symbol or "").upper().strip()
+    if symbol_text and symbol_text in ticker_values:
+        mask = [value == symbol_text for value in ticker_values]
+    elif len(set(ticker_values)) == 1:
+        mask = [True] * len(ticker_values)
+    else:
+        logger.warning("Backtest %s could not identify one ticker in columns: %s", symbol, list(frame.columns))
+        return frame
+
+    flattened = frame.loc[:, mask].copy()
+    flattened.columns = flattened.columns.get_level_values(field_level)
+    return flattened
 
 
 def slice_backtest_range(frame: Any, range_key: Any) -> Any:
@@ -181,14 +224,7 @@ class BacktestDataService:
             return pd.DataFrame()
         if frame is None or getattr(frame, "empty", True):
             return pd.DataFrame()
-        if isinstance(frame.columns, pd.MultiIndex):
-            try:
-                if symbol_text in [str(value).upper() for value in frame.columns.get_level_values(0)]:
-                    frame = frame[symbol_text]
-                elif symbol_text in [str(value).upper() for value in frame.columns.get_level_values(1)]:
-                    frame = frame.xs(symbol_text, axis=1, level=1)
-            except Exception:
-                pass
+        frame = _flatten_yfinance_price_columns(frame, symbol_text)
         return frame.copy()
 
     def run_backtest(
