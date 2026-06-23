@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from budget_terminal_app.mixins.news import NewsMixin
 from budget_terminal_app.mixins.window_lifecycle import WindowLifecycleMixin
+from budget_terminal_app.workers import data as data_module
 from budget_terminal_app.workers.data import DataWorker, NEWS_PAGE_REFRESH_REASON
 
 
@@ -44,12 +45,56 @@ class PortfolioNewsCacheWorker(DataWorker):
         super().__init__(['AAA'], [], refresh_reason=NEWS_PAGE_REFRESH_REASON)
         self.news_fetches = 0
 
-    def _ticker(self, symbol):
-        return object()
-
-    def _read_news_items(self, ticker_obj, ticker: str, category: str):
+    def _search_portfolio_news_items(self, ticker: str):
         self.news_fetches += 1
-        return [{'category': category, 'ticker': ticker, 'title': f'{ticker} fresh news'}]
+        return [{'category': 'portfolio', 'ticker': ticker, 'title': f'{ticker} fresh news'}]
+
+
+class _FakeSearchResult:
+    def __init__(self, news):
+        self.news = list(news)
+
+
+class _FakeYFinance:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def Search(self, ticker, **kwargs):
+        self.calls.append((ticker, kwargs))
+        if ticker == 'FAIL':
+            raise RuntimeError('simulated search failure')
+        return _FakeSearchResult(
+            [
+                {
+                    'title': f'{ticker} newest',
+                    'publisher': 'Primary Feed',
+                    'providerPublishTime': 200,
+                    'link': f'https://example.test/{ticker}/newest',
+                    'relatedTickers': ['BRK-B'] if ticker == 'BRK.B' else [ticker],
+                },
+                {
+                    'title': 'Unrelated headline',
+                    'publisher': 'Noise Feed',
+                    'providerPublishTime': 300,
+                    'link': 'https://example.test/unrelated',
+                    'relatedTickers': ['OTHER'],
+                },
+                {
+                    'title': f'{ticker} older',
+                    'publisher': 'Primary Feed',
+                    'providerPublishTime': 100,
+                    'link': f'https://example.test/{ticker}/older',
+                    'relatedTickers': [ticker.replace('.', '-')],
+                },
+                {
+                    'title': f'{ticker} newest duplicate',
+                    'publisher': 'Duplicate Feed',
+                    'providerPublishTime': 150,
+                    'link': f'https://example.test/{ticker}/newest',
+                    'relatedTickers': [ticker.replace('.', '-')],
+                },
+            ]
+        )
 
 
 class _StackedWidget:
@@ -78,6 +123,7 @@ class RefreshRoutingHarness(WindowLifecycleMixin):
 class NewsApplyHarness(NewsMixin):
     def __init__(self) -> None:
         self._p3_news_refresh_request_id = 7
+        self._p3_news_refresh_pending = True
         self.last_data = {
             'portfolio': {'AAA': {'price': 123.0}},
             'charts': {'SPY': 'existing chart payload'},
@@ -132,6 +178,31 @@ def test_portfolio_news_cache_does_not_poison_detail_cache() -> None:
             DataWorker._portfolio_news_cache.clear()
 
 
+def test_ticker_specific_search_and_partial_failures() -> None:
+    fake_yf = _FakeYFinance()
+    original_yf = data_module.yf
+    data_module.yf = fake_yf
+    with DataWorker._details_cache_lock:
+        DataWorker._portfolio_news_cache.clear()
+    try:
+        worker = DataWorker(['BRK.B', 'FAIL'], [], refresh_reason=NEWS_PAGE_REFRESH_REASON)
+        result = worker.fetch_portfolio_news_only(max_per_ticker=3)
+        articles = result['articles']
+        _assert([article['title'] for article in articles] == ['BRK.B newest', 'BRK.B older'], 'portfolio search should retain only exact ticker-associated news in newest-first order')
+        _assert(result['failed_tickers'] == ['FAIL'], 'one failed search should not discard successful ticker news')
+        _assert(fake_yf.calls[0][0] == 'BRK.B', 'portfolio search should preserve the requested Yahoo symbol')
+        _assert(fake_yf.calls[0][1]['news_count'] == 8, 'portfolio search should request the bounded candidate count')
+
+        cached = worker.fetch_portfolio_news_only(max_per_ticker=3)
+        _assert(cached['articles'] == articles, 'repeat portfolio news reads should use the stable cache')
+        successful_calls = [ticker for ticker, _kwargs in fake_yf.calls if ticker == 'BRK.B']
+        _assert(len(successful_calls) == 1, 'successful ticker news should be cached for repeat reads')
+    finally:
+        data_module.yf = original_yf
+        with DataWorker._details_cache_lock:
+            DataWorker._portfolio_news_cache.clear()
+
+
 def test_refresh_routing_splits_news_from_dashboard() -> None:
     dashboard = RefreshRoutingHarness(0)
     dashboard._refresh_current_page()
@@ -146,6 +217,7 @@ def test_news_refresh_preserves_existing_last_data() -> None:
     harness = NewsApplyHarness()
     harness._p3_apply_news_refresh_result(6, {'news': [{'title': 'Stale news'}]})
     _assert(harness.last_data['news'][0]['title'] == 'Old news', 'stale News refresh should be ignored')
+    _assert(harness._p3_news_refresh_pending is True, 'stale News results should not clear the active refresh state')
 
     harness._p3_apply_news_refresh_result(
         7,
@@ -157,11 +229,13 @@ def test_news_refresh_preserves_existing_last_data() -> None:
     _assert(harness.last_data['news'] == [{'category': 'macro', 'ticker': 'SPY', 'title': 'Fresh news'}], 'news should be replaced')
     _assert(harness.updated == {'news': [{'category': 'macro', 'ticker': 'SPY', 'title': 'Fresh news'}]}, 'News page should render the refreshed news')
     _assert(harness.statuses[-1] == ('News refreshed: 1 article(s).', 'positive'), 'successful refresh should set status')
+    _assert(harness._p3_news_refresh_pending is False, 'applied News results should clear the active refresh state')
 
 
 def main() -> None:
     test_worker_news_refresh_skips_dashboard_work()
     test_portfolio_news_cache_does_not_poison_detail_cache()
+    test_ticker_specific_search_and_partial_failures()
     test_refresh_routing_splits_news_from_dashboard()
     test_news_refresh_preserves_existing_last_data()
     print('News page fast refresh smoke tests passed')

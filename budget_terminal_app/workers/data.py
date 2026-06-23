@@ -42,6 +42,7 @@ OTHER_NEWS_FOCUS_TICKERS = [
 OTHER_NEWS_LIMIT = 36
 OTHER_NEWS_CANDIDATE_LIMIT = 80
 OTHER_NEWS_SEARCH_LIMIT = 8
+PORTFOLIO_NEWS_SEARCH_LIMIT = 8
 OTHER_NEWS_PER_SECTOR_LIMIT = 2
 OTHER_NEWS_PER_FOCUS_TICKER_LIMIT = 2
 OPTION_BUCKET_TEMPLATE = {'0_week': [], '2_weeks': [], '4_weeks': []}
@@ -324,6 +325,38 @@ class DataWorker(QObject):
                 continue
         return articles
 
+    @staticmethod
+    def _normalize_news_symbol(value: Any) -> str:
+        """Normalize Yahoo's dot/hyphen ticker variants for exact association checks."""
+        return str(value or '').upper().strip().replace('.', '-')
+
+    def _search_portfolio_news_items(self, ticker: str) -> list[dict[str, Any]]:
+        """Return Yahoo search news explicitly associated with one portfolio ticker."""
+        search = yf.Search(
+            ticker,
+            news_count=PORTFOLIO_NEWS_SEARCH_LIMIT,
+            lists_count=0,
+            include_cb=False,
+            include_nav_links=False,
+            include_research=False,
+            include_cultural_assets=False,
+            recommended=0,
+            timeout=10,
+            raise_errors=False,
+        )
+        requested = self._normalize_news_symbol(ticker)
+        articles = []
+        for item in list(getattr(search, 'news', []) or []):
+            related = item.get('relatedTickers', []) if isinstance(item, dict) else []
+            related_symbols = {self._normalize_news_symbol(value) for value in related}
+            if requested not in related_symbols:
+                continue
+            try:
+                articles.append(self._parse_news_item(item, ticker, 'portfolio'))
+            except Exception:
+                continue
+        return articles
+
     def _article_dedupe_key(self, article: dict[str, Any]) -> str:
         """Return a stable key for cross-section news dedupe."""
         url = str(article.get('url') or '').strip().lower()
@@ -448,9 +481,10 @@ class DataWorker(QObject):
                 logger.info('Yahoo refused optional target metadata for %s; continuing with N/A target.', ticker)
             else:
                 logger.info('Target metadata fetch failed for %s: %s', ticker, exc)
+        portfolio_news, _news_error = self._fetch_portfolio_news_with_status(ticker)
         payload = {
             'targets': self._target_payload(ticker, portfolio_info.get(ticker, {}).get('price', 0), info),
-            'news': self._read_news_items(ticker_obj, ticker, 'portfolio'),
+            'news': portfolio_news,
         }
         with self._details_cache_lock:
             self._stock_details_cache[ticker] = (
@@ -462,25 +496,46 @@ class DataWorker(QObject):
             )
         return payload
 
-    def _fetch_portfolio_news(self, ticker: str) -> list[dict[str, Any]]:
-        """Fetch portfolio news without populating target/detail cache entries."""
+    def _fetch_portfolio_news_with_status(self, ticker: str) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one ticker's portfolio news and preserve a per-ticker error."""
         now = time.time()
         with self._details_cache_lock:
-            cached = self._stock_details_cache.get(ticker)
-            if cached and (now - cached[0]) < self._DETAILS_CACHE_TTL_SECONDS:
-                payload = cached[1]
-                if isinstance(payload, dict) and isinstance(payload.get('targets'), dict) and isinstance(payload.get('news'), list):
-                    return [dict(item) for item in payload.get('news', [])]
             cached_news = self._portfolio_news_cache.get(ticker)
             if cached_news and (now - cached_news[0]) < self._DETAILS_CACHE_TTL_SECONDS:
-                return [dict(item) for item in cached_news[1]]
+                return [dict(item) for item in cached_news[1]], None
         try:
-            articles = self._read_news_items(self._ticker(ticker), ticker, 'portfolio')
+            articles = self._search_portfolio_news_items(ticker)
             with self._details_cache_lock:
                 self._portfolio_news_cache[ticker] = (now, [dict(item) for item in articles])
-            return articles
-        except Exception:
-            return []
+            return articles, None
+        except Exception as exc:
+            logger.warning('Portfolio news search failed for %s: %s', ticker, exc)
+            return [], str(exc)
+
+    def _fetch_portfolio_news(self, ticker: str) -> list[dict[str, Any]]:
+        """Fetch portfolio news without populating target/detail cache entries."""
+        articles, _error = self._fetch_portfolio_news_with_status(ticker)
+        return articles
+
+    def fetch_portfolio_news_only(self, max_per_ticker: int = 3) -> dict[str, Any]:
+        """Fetch, deduplicate, and rank ticker-specific portfolio news."""
+        limit = max(1, min(int(max_per_ticker), 10))
+        news_list = []
+        failed_tickers = []
+        if self.tickers:
+            with ThreadPoolExecutor(max_workers=self._executor_workers(len(self.tickers))) as executor:
+                results = executor.map(self._fetch_portfolio_news_with_status, self.tickers)
+                for ticker, result in zip(self.tickers, results):
+                    if self._is_cancelled():
+                        break
+                    articles, error = result
+                    if error:
+                        failed_tickers.append(str(ticker))
+                    ranked = sorted(articles, key=lambda article: float(article.get('_ts') or 0), reverse=True)
+                    news_list.extend(ranked[:limit])
+        deduped = self._dedupe_news(news_list, [])
+        deduped.sort(key=lambda article: float(article.get('_ts') or 0), reverse=True)
+        return {'articles': deduped, 'failed_tickers': failed_tickers}
 
     def _fetch_macro_news(self, ticker: str) -> list[dict[str, Any]]:
         now = time.time()

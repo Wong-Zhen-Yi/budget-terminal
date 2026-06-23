@@ -43,6 +43,34 @@ python budget_terminal.py
 
 When `.venv` exists, the launcher re-executes itself with `.\.venv\Scripts\python.exe` unless `BUDGET_TERMINAL_SKIP_LOCAL_VENV=1` is set.
 
+## Codex MCP Server on Windows
+
+Budget Terminal includes a local stdio MCP server that lets Codex inspect and operate the live PyQt6 application. Start it from PowerShell with:
+
+```powershell
+.\.venv\Scripts\python.exe budget_terminal_mcp.py
+```
+
+The normal MCP launch opens a visible Budget Terminal window. For diagnostics or automated smoke tests, use Qt's offscreen platform:
+
+```powershell
+.\.venv\Scripts\python.exe budget_terminal_mcp.py --headless
+```
+
+Codex Desktop reads MCP servers from `%USERPROFILE%\.codex\config.toml`. This checkout is registered with the absolute path to `.venv\Scripts\python.exe`, the absolute path to `budget_terminal_mcp.py`, a 30-second startup timeout, and automatic tool approval. Restart Codex or open a fresh thread after changing MCP configuration, then verify the registration with:
+
+```powershell
+codex mcp list
+```
+
+The MCP transport reserves stdout for JSON protocol messages. Startup diagnostics and application logs go to stderr or the normal Budget Terminal log files. If startup fails, confirm the virtual environment exists, reinstall `requirements.txt`, and run the focused smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_mcp_server.py
+```
+
+The MCP server includes `get_portfolio_news` for current ticker-specific headlines. It defaults to the active portfolio and also accepts `main`, `all`, a portfolio ID, or an exact portfolio name. Results are strictly matched against Yahoo's related-ticker metadata, sorted newest-first, cached for 15 minutes, and returned with publication timestamps and partial-failure details.
+
 ## Development
 
 Use the checks that match the code you touched. Common commands:

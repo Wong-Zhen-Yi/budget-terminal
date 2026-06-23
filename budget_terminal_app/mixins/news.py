@@ -68,6 +68,7 @@ class NewsMixin:
         self._p3_highlighted_news: dict[str, Any] | None = None
         self._p3_preview_request_id = 0
         self._p3_news_refresh_request_id = 0
+        self._p3_news_refresh_pending = False
         self._p3_syncing_news_selection = False
         self._p3_preview_signals = _NewsPreviewSignals()
         self._p3_preview_signals.preview_ready.connect(self._p3_on_preview_ready)
@@ -474,6 +475,7 @@ class NewsMixin:
         self._p3_news_refresh_request_id = int(getattr(self, '_p3_news_refresh_request_id', 0) or 0) + 1
         request_id = self._p3_news_refresh_request_id
         tickers = self._p3_fetch_tickers()
+        self._p3_news_refresh_pending = True
         self._p3_set_status('Refreshing news...', 'info')
         executor_factory = getattr(self, '_ensure_dashboard_fetch_executor', None)
         if not callable(executor_factory):
@@ -515,6 +517,8 @@ class NewsMixin:
                 data = worker.fetch()
             if data is not None:
                 self._p3_emit_main(lambda payload=data, req=request_id: self._p3_apply_news_refresh_result(req, payload))
+            else:
+                self._p3_emit_main(lambda req=request_id: self._p3_handle_news_refresh_error(req, 'News worker returned no data.'))
         except Exception as exc:
             logger.error('News refresh failed: %s', exc)
             self._p3_emit_main(lambda msg=str(exc), req=request_id: self._p3_handle_news_refresh_error(req, msg))
@@ -535,7 +539,9 @@ class NewsMixin:
         """Apply a News-only refresh if it is still the newest request."""
         if request_id != int(getattr(self, '_p3_news_refresh_request_id', 0) or 0):
             return
+        self._p3_news_refresh_pending = False
         news = self._p3_merge_news_refresh_data(data)
+        logger.info('Applying News page refresh %s with %s article(s).', request_id, len(news))
         self.update_page3({'news': news})
         status = 'positive' if news else 'warning'
         self._p3_set_status(f'News refreshed: {len(news)} article(s).', status)
@@ -544,6 +550,7 @@ class NewsMixin:
         """Show a News refresh failure unless a newer refresh superseded it."""
         if request_id != int(getattr(self, '_p3_news_refresh_request_id', 0) or 0):
             return
+        self._p3_news_refresh_pending = False
         text = str(message or 'Unknown error')
         self._p3_set_status(f'News refresh failed: {text}', 'negative')
 
