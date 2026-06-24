@@ -8,7 +8,15 @@ from typing import Any
 from .dependencies import QApplication, QIcon, QTimer, logger, pg, sys
 from .data_service import EmbeddedDataServiceRuntime
 from .dpi import configure_qt_high_dpi_policy
+from .mcp.bridge import BudgetTerminalBridge
+from .mcp.protocol import McpProtocol
 from .paths import resource_path
+from .single_instance import (
+    BudgetTerminalSingleInstanceServer,
+    activate_existing_instance,
+    activate_qt_window,
+    make_window_command_handler,
+)
 from .startup_loading import StartupLoadingLogHandler, StartupLoadingScreen, StartupProgressReporter
 from .startup_profile import StartupProfiler
 
@@ -62,6 +70,9 @@ def main() -> int:
         configure_qt_high_dpi_policy()
         app = QApplication(sys.argv)
         app.setStyle('Fusion')
+    if activate_existing_instance():
+        logger.info('Activated an existing Budget Terminal instance; exiting duplicate launcher.')
+        return 0
     loading_screen = StartupLoadingScreen()
     startup_progress = StartupProgressReporter(loading_screen)
     startup_log_handler = StartupLoadingLogHandler(loading_screen)
@@ -98,6 +109,26 @@ def main() -> int:
         data_service_client=None,
         startup_progress=startup_progress,
     )
+
+    def _activate_primary_window() -> bool:
+        target = window if window.isVisible() else loading_screen
+        activated = activate_qt_window(target, repeat_ms=150)
+        if target is loading_screen and window.isVisible():
+            activated = activate_qt_window(window, repeat_ms=150) or activated
+        return activated
+
+    single_instance_server = BudgetTerminalSingleInstanceServer(
+        command_handler=make_window_command_handler(
+            mcp_handler=McpProtocol(BudgetTerminalBridge(window)).handle,
+            activate_callback=_activate_primary_window,
+        ),
+        activate_callback=_activate_primary_window,
+        parent=window,
+    )
+    if single_instance_server.start():
+        setattr(window, '_single_instance_server', single_instance_server)
+    else:
+        logger.warning('Budget Terminal single-instance IPC server could not be started.')
     _start_data_service_async(data_service, window)
     startup_progress.begin('first_show', 'First usable view')
 
@@ -145,6 +176,10 @@ def main() -> int:
     try:
         return app.exec()
     finally:
+        try:
+            single_instance_server.close()
+        except Exception:
+            logger.debug('Single-instance IPC server cleanup failed.', exc_info=True)
         _detach_startup_log_handler()
         startup_progress.close()
         data_service.stop()

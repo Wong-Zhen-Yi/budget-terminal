@@ -5,9 +5,11 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,57 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from budget_terminal_app.mcp.protocol import McpProtocol
 from budget_terminal_app.mcp.server import read_messages
+
+
+def _process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_state(pid: int, *, running: bool, timeout_seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _process_is_running(pid) is running:
+            return True
+        time.sleep(0.1)
+    return _process_is_running(pid) is running
+
+
+def _terminate_process_tree(pid: int) -> None:
+    if pid <= 0 or not _process_is_running(pid):
+        return
+    if os.name == 'nt':
+        subprocess.run(
+            ['taskkill', '/PID', str(pid), '/T', '/F'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if not _wait_for_process_state(pid, running=False, timeout_seconds=5.0):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 class _StatusBridge:
@@ -165,6 +218,7 @@ def test_visible_lifecycle() -> None:
                 'BUDGET_TERMINAL_SKIP_LOCAL_VENV': '1',
             }
         )
+        app_pid = 0
         process = subprocess.Popen(
             [sys.executable, str(PROJECT_ROOT / 'budget_terminal_mcp.py')],
             cwd=PROJECT_ROOT,
@@ -185,14 +239,22 @@ def test_visible_lifecycle() -> None:
             responses = [json.loads(process.stdout.readline().decode('utf-8')) for _ in range(2)]
             assert process.poll() is None, 'visible MCP process should remain alive while stdin stays connected'
             status = json.loads(responses[1]['result']['content'][0]['text'])
-            assert status['window_visible'] is True
-            assert isinstance(status['process_id'], int) and status['process_id'] > 0
+            app_pid = int(status['process_id'])
+            assert app_pid > 0
+            assert app_pid != process.pid, 'visible MCP should proxy into the desktop app process'
+            assert _process_is_running(app_pid), 'desktop app should be alive while MCP proxy is connected'
             process.stdin.close()
             process.wait(timeout=30)
+            assert _process_is_running(app_pid), 'MCP stdin EOF should not close the desktop app'
         except Exception:
-            process.kill()
-            process.wait(timeout=10)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
             raise
+        finally:
+            if app_pid:
+                _terminate_process_tree(app_pid)
+                assert _wait_for_process_state(app_pid, running=False)
         assert process.returncode == 0, process.stderr.read().decode('utf-8', errors='replace')
 
 
@@ -204,7 +266,7 @@ def main() -> int:
     test_headless_subprocess()
     print('PASS Windows headless subprocess handshake and EOF shutdown')
     test_visible_lifecycle()
-    print('PASS visible window remains alive until MCP stdin closes')
+    print('PASS visible MCP proxy exits without closing the desktop app')
     return 0
 
 

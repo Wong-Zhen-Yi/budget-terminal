@@ -9,6 +9,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from .bridge import BudgetTerminalBridge
 from .protocol import McpProtocol
+from ..single_instance import send_single_instance_command
 
 
 def read_messages(stream: BinaryIO):
@@ -98,3 +99,40 @@ def run_server(
     reader = threading.Thread(target=read_loop, name="BudgetTerminalMcpInput", daemon=True)
     reader.start()
     return int(qt_app.exec())
+
+
+def run_single_instance_proxy(
+    *,
+    input_stream: Optional[BinaryIO] = None,
+    output_stream: Optional[BinaryIO] = None,
+    timeout_ms: int = 120_000,
+) -> int:
+    """Proxy stdio MCP requests into an already-running Budget Terminal app."""
+    input_stream = input_stream or sys.stdin.buffer
+    output_stream = output_stream or sys.stdout.buffer
+    write_lock = threading.Lock()
+
+    def write_response(response: dict[str, Any]) -> None:
+        payload = json.dumps(response, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+        with write_lock:
+            output_stream.write(payload)
+            output_stream.flush()
+
+    for message in read_messages(input_stream):
+        response = send_single_instance_command(
+            {"command": "mcp_request", "message": message},
+            timeout_ms=timeout_ms,
+        )
+        if response and response.get("ok"):
+            mcp_response = response.get("response")
+            if isinstance(mcp_response, dict):
+                write_response(mcp_response)
+            continue
+        request_id = message.get("id")
+        if request_id is None:
+            continue
+        error = "Budget Terminal app is not available."
+        if response and response.get("error"):
+            error = str(response.get("error"))
+        write_response({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": error}})
+    return 0
