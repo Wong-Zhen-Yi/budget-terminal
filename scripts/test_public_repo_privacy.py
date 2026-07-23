@@ -107,17 +107,37 @@ def _scan_content(path: str) -> list[str]:
     return errors
 
 
-def _scan_head_metadata() -> list[str]:
+def _scan_readme_title() -> list[str]:
+    readme_path = REPO_ROOT / "README.md"
     try:
-        metadata = _git("show", "-s", "--format=%an%n%ae%n%cn%n%ce", "HEAD").splitlines()
+        first_line = readme_path.read_text(encoding="utf-8").splitlines()[0]
+    except (IndexError, OSError, UnicodeDecodeError):
+        return ["README.md must contain a readable title"]
+    if first_line != "# Budget Terminal":
+        return ["README.md title must remain version-neutral: # Budget Terminal"]
+    return []
+
+
+def _scan_commit_metadata() -> list[str]:
+    try:
+        records = _git(
+            "log",
+            "--format=%H%x00%an%x00%ae%x00%cn%x00%ce",
+            "HEAD",
+        ).splitlines()
     except subprocess.CalledProcessError:
         return []
+
+    errors: list[str] = []
     expected = [GENERIC_COMMIT_NAME, GENERIC_COMMIT_EMAIL] * 2
-    if metadata != expected:
-        return ["HEAD commit must use the generic public-repository author and committer identity"]
-    if _git("rev-list", "--count", "HEAD").strip() != "1":
-        return ["public main must contain exactly one root commit"]
-    return []
+    for record in records:
+        fields = record.split("\x00")
+        if len(fields) != 5 or fields[1:] != expected:
+            commit = fields[0][:12] if fields else "unknown"
+            errors.append(
+                f"commit {commit} must use the generic public-repository author and committer identity"
+            )
+    return errors
 
 
 def main() -> int:
@@ -133,8 +153,9 @@ def main() -> int:
     for path in _tracked_files():
         errors.extend(_scan_filename(path))
         errors.extend(_scan_content(path))
+    errors.extend(_scan_readme_title())
     if not args.tree_only:
-        errors.extend(_scan_head_metadata())
+        errors.extend(_scan_commit_metadata())
 
     if errors:
         print("Public repository privacy check failed:")

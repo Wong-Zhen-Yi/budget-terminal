@@ -1,4 +1,4 @@
-# Budget Terminal v0.904
+# Budget Terminal
 
 Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio data, market context, options chains, news, ETF analysis, charts, and related research workflows. The top-level `budget_terminal.py` launcher remains the stable entry point, while the live application code is organized under `budget_terminal_app/`.
 
