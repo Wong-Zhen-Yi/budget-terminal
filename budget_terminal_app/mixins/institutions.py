@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.workers.dataroma import DataromaWorker
 
 
@@ -30,6 +31,7 @@ class InstitutionsMixin:
         self._p24_tables: list[QTableWidget] = []
         self._p24_panels: list[QFrame] = []
         self._p24_loaded_once = False
+        self._p24_render_generations: dict[int, int] = {}
 
         layout = QVBoxLayout(self.page24)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -185,6 +187,11 @@ class InstitutionsMixin:
     def _p24_on_show(self) -> None:
         if not getattr(self, '_p24_loaded_once', False):
             self._p24_refresh_activity(force=False)
+            return
+        facet = 'institution_ticker_activity' if self.p24_tabs.currentIndex() else 'institution_activity'
+        payload = self._p24_payloads.get(facet)
+        if isinstance(payload, dict):
+            self._p24_on_data(dict(payload))
 
     def _p24_refresh_current(self, *, force: bool = False) -> None:
         self._p24_refresh_activity(force=force)
@@ -233,6 +240,9 @@ class InstitutionsMixin:
         self._p24_payloads[facet] = dict(payload)
         if facet == 'institution_activity':
             self._p24_loaded_once = True
+        if not self._is_current_page(getattr(self, 'page24', None)):
+            return
+        if facet == 'institution_activity':
             self._p24_render_activity(payload)
         elif facet == 'institution_ticker_activity':
             self._p24_render_ticker_activity(payload)
@@ -345,9 +355,47 @@ class InstitutionsMixin:
 
     def _p24_set_rows(self, table: QTableWidget, rows: Any, columns: list[tuple[str, str]]) -> None:
         normalized_rows = [dict(row) for row in list(rows or []) if isinstance(row, dict)]
-        table.setSortingEnabled(False)
-        table.setRowCount(len(normalized_rows))
-        for row_index, row in enumerate(normalized_rows):
+        table_key = id(table)
+        render_generations = getattr(self, '_p24_render_generations', None)
+        if not isinstance(render_generations, dict):
+            render_generations = {}
+            self._p24_render_generations = render_generations
+        generation = render_generations.get(table_key, 0) + 1
+        render_generations[table_key] = generation
+        page = getattr(self, 'page24', None)
+        page_check = getattr(self, '_is_current_page', None)
+        supports_batched_render = page is not None and callable(page_check)
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+        selected_signature = ()
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_signature = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in range(table.columnCount())
+            )
+
+        def _is_visible() -> bool:
+            if not supports_batched_render:
+                return True
+            try:
+                return bool(page_check(page))
+            except (AttributeError, RuntimeError):
+                return False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            sorting_enabled = bool(table.isSortingEnabled())
+            prepared = True
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(normalized_rows))
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
             source_url = str(row.get('source_url') or row.get('history_url') or '').strip()
             for column_index, (_label, key) in enumerate(columns):
                 value = self._p24_cell_value(row, key)
@@ -365,7 +413,46 @@ class InstitutionsMixin:
                 else:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, column_index, item)
-        table.setSortingEnabled(True)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled or not supports_batched_render:
+                table.setSortingEnabled(True)
+            table.blockSignals(previous_signals)
+            if selected_signature:
+                for row_index in range(table.rowCount()):
+                    signature = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in range(table.columnCount())
+                    )
+                    if signature == selected_signature:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not supports_batched_render:
+            _prepare()
+            try:
+                for row_index, row in enumerate(normalized_rows):
+                    _apply(row_index, row)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            ('institutions-table', table_key),
+            normalized_rows,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == render_generations.get(table_key),
+            is_visible=_is_visible,
+        )
 
     @staticmethod
     def _p24_cell_value(row: dict[str, Any], key: str) -> str:

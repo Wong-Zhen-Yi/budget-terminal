@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import run_batched
 
 if TYPE_CHECKING:
     from budget_terminal_app.etf_holdings import EtfHoldingsResult
@@ -64,6 +65,7 @@ class EtfAnalyserMixin:
         self._p13_arbitrage_fetch_in_progress = False
         self._p13_arbitrage_payload: dict[str, Any] = {}
         self._p13_arbitrage_service = self._p13_build_arbitrage_service()
+        self._p13_render_generations: dict[str, int] = {}
 
         outer_layout = QHBoxLayout(self.page13)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -427,7 +429,6 @@ class EtfAnalyserMixin:
     ) -> None:
         """Render ETF summary and holdings into the page table."""
         self._p13_last_result = result
-        self._p13_update_holdings_chart(result.holdings)
         rows = [
             {
                 'symbol': holding.symbol,
@@ -437,23 +438,11 @@ class EtfAnalyserMixin:
             for holding in result.holdings
         ]
         self._p13_rows = rows
-        self.p13_table.setSortingEnabled(False)
-        self.p13_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            ticker_item = QTableWidgetItem(row.get('symbol', ''))
-            ticker_item.setForeground(self.theme_qcolor('text_primary'))
-            name_item = QTableWidgetItem(row.get('name', ''))
-            name_item.setForeground(self.theme_qcolor('text_secondary'))
-            weight_value = row.get('weight')
-            weight_text = '--' if weight_value is None else f'{weight_value * 100:.2f}%'
-            weight_item = QTableWidgetItem(weight_text)
-            weight_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            weight_item.setForeground(self.theme_qcolor('accent_positive'))
-            self.p13_table.setItem(row_index, 0, ticker_item)
-            self.p13_table.setItem(row_index, 1, name_item)
-            self.p13_table.setItem(row_index, 2, weight_item)
-        self.p13_table.setSortingEnabled(True)
-        self.p13_table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+        if not self._p13_is_render_surface_visible():
+            self.p13_load_btn.setEnabled(True)
+            return
+        self._p13_update_holdings_chart(result.holdings)
+        self._p13_render_holdings_rows(rows)
         self.p13_name_lbl.setText(f'Fund: {result.fund_name or result.ticker}')
         self.p13_category_lbl.setText(f'Issuer: {result.issuer or "Unknown"}')
         self.p13_family_lbl.setText(f'As Of: {result.as_of_date or "--"}')
@@ -497,6 +486,126 @@ class EtfAnalyserMixin:
         if rows and self._p13_arbitrage_tab_active():
             self._p13_request_arbitrage_refresh(force=False)
         self._p13_save_session_snapshot()
+
+    def _p13_render_holdings_rows(self, rows: list[dict[str, Any]]) -> None:
+        table = self.p13_table
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
+            ticker_item = QTableWidgetItem(row.get('symbol', ''))
+            ticker_item.setForeground(self.theme_qcolor('text_primary'))
+            name_item = QTableWidgetItem(row.get('name', ''))
+            name_item.setForeground(self.theme_qcolor('text_secondary'))
+            weight_value = row.get('weight')
+            weight_text = '--' if weight_value is None else f'{weight_value * 100:.2f}%'
+            weight_item = QTableWidgetItem(weight_text)
+            weight_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            weight_item.setForeground(self.theme_qcolor('accent_positive'))
+            table.setItem(row_index, 0, ticker_item)
+            table.setItem(row_index, 1, name_item)
+            table.setItem(row_index, 2, weight_item)
+
+        self._p13_render_table_batched(table, 'holdings', rows, _apply, sort_column=2)
+
+    def _p13_render_table_batched(
+        self,
+        table: Any,
+        key: str,
+        rows: Any,
+        apply_row: Any,
+        *,
+        sort_column: int,
+    ) -> None:
+        rows = list(rows or [])
+        render_generations = getattr(self, '_p13_render_generations', None)
+        if not isinstance(render_generations, dict):
+            render_generations = {}
+            self._p13_render_generations = render_generations
+        generation = render_generations.get(key, 0) + 1
+        render_generations[key] = generation
+        page = getattr(self, 'page13', None)
+        page_check = getattr(self, '_is_current_page', None)
+        supports_batched_render = page is not None and callable(page_check)
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+        selected_signature = ()
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_signature = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in range(table.columnCount())
+            )
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            sorting_enabled = bool(table.isSortingEnabled())
+            prepared = True
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled or not supports_batched_render:
+                table.setSortingEnabled(True)
+                table.sortByColumn(sort_column, Qt.SortOrder.DescendingOrder)
+            table.blockSignals(previous_signals)
+            if selected_signature:
+                for row_index in range(table.rowCount()):
+                    signature = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in range(table.columnCount())
+                    )
+                    if signature == selected_signature:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not supports_batched_render:
+            _prepare()
+            try:
+                for row_index, row in enumerate(rows):
+                    apply_row(row_index, row)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            ('etf-table', key),
+            rows,
+            apply_row,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == render_generations.get(key),
+            is_visible=self._p13_is_render_surface_visible,
+        )
+
+    def _p13_is_render_surface_visible(self) -> bool:
+        """Return page visibility without requiring a full-window test harness."""
+        page = getattr(self, 'page13', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _p13_on_show(self) -> None:
+        """Apply cached ETF results once when the page becomes visible."""
+        result = getattr(self, '_p13_last_result', None)
+        if result is not None:
+            self._p13_apply_result(result, update_collection_info=False)
+        if getattr(self, '_p13_aum_cache', None):
+            self._p13_render_aum_table()
 
     def _p13_export_clipboard(self) -> None:
         """Copy holdings to clipboard in tab-separated format for spreadsheet pasting."""
@@ -921,10 +1030,11 @@ class EtfAnalyserMixin:
     def _p13_render_aum_table(self) -> None:
         """Display every loaded US ETF by AUM, largest first."""
         rows = sorted(self._p13_aum_cache.items(), key=lambda x: x[1], reverse=True)
+        if not self._p13_is_render_surface_visible():
+            return
 
-        self._p13_aum_table.setSortingEnabled(False)
-        self._p13_aum_table.setRowCount(len(rows))
-        for row, (ticker, aum) in enumerate(rows):
+        def _apply(row: int, item: tuple[str, float]) -> None:
+            ticker, aum = item
             t_item = QTableWidgetItem(ticker)
             t_item.setData(Qt.ItemDataRole.UserRole, ticker)
             t_item.setData(Qt.ItemDataRole.UserRole + 1, aum)
@@ -936,8 +1046,13 @@ class EtfAnalyserMixin:
             a_item.setForeground(self.theme_qcolor('accent_positive'))
             self._p13_aum_table.setItem(row, 0, t_item)
             self._p13_aum_table.setItem(row, 1, a_item)
-        self._p13_aum_table.setSortingEnabled(True)
-        self._p13_aum_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+        self._p13_render_table_batched(
+            self._p13_aum_table,
+            'aum',
+            rows,
+            _apply,
+            sort_column=1,
+        )
         if not self._p13_aum_cache:
             self._p13_aum_status_lbl.setText('No US ETF AUM data returned by Yahoo Finance.')
         elif self._p13_aum_missing_count:

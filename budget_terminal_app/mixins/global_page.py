@@ -35,6 +35,13 @@ P26_NUMERIC_COLUMNS = (6, 7, 8, 9)
 
 
 class GlobalPageMixin:
+    def _p26_page_is_visible(self) -> bool:
+        """Return whether Global is the active page in the real application."""
+        checker = getattr(self, "_is_current_page", None)
+        if callable(checker):
+            return bool(checker(getattr(self, "page26", None)))
+        return True
+
     def _get_global_markets_data_service(self) -> GlobalMarketsDataService:
         service = getattr(self, "_global_markets_data_service", None)
         if service is None:
@@ -51,6 +58,8 @@ class GlobalPageMixin:
         self._p26_request_seq = 0
         self._p26_active_request = 0
         self._p26_payload: dict[str, Any] = {}
+        self._p26_render_pending = False
+        self._p26_pending_error = ""
         self._p26_market_status_key = None
         self._p26_interval_buttons = {}
         self._p26_interval_group = QButtonGroup(self)
@@ -116,6 +125,14 @@ class GlobalPageMixin:
 
     def _p26_on_show(self) -> None:
         self._p26_sync_status_bar()
+        if getattr(self, "_p26_render_pending", False):
+            self._p26_render_pending = False
+            self._p26_render_payload()
+            self._p26_update_payload_status()
+        pending_error = str(getattr(self, "_p26_pending_error", "") or "")
+        if pending_error:
+            self._p26_pending_error = ""
+            self._p26_set_status(f"Global indexes failed: {pending_error}", "negative")
         if not self._p26_rows():
             self._p26_request_refresh()
 
@@ -151,7 +168,7 @@ class GlobalPageMixin:
         self.global_page_state = save_global_page_settings({"interval_label": getattr(self, "p26_interval_label", "1D")})
 
     def _p26_request_refresh(self, *, force: bool = False) -> bool:
-        if getattr(self, "_p26_fetching", False) and not force:
+        if getattr(self, "_p26_fetching", False):
             return False
         self._p26_request_seq += 1
         request_id = self._p26_request_seq
@@ -182,7 +199,16 @@ class GlobalPageMixin:
         if hasattr(self, "p26_refresh_btn"):
             self.p26_refresh_btn.setEnabled(True)
         self._p26_payload = payload if isinstance(payload, dict) else {}
+        self._p26_pending_error = ""
+        if not self._p26_page_is_visible():
+            self._p26_render_pending = True
+            return
+        self._p26_render_pending = False
         self._p26_render_payload()
+        self._p26_update_payload_status()
+
+    def _p26_update_payload_status(self) -> None:
+        """Summarize the cached payload after it has been published to the page."""
         rows = self._p26_rows()
         missing = self._p26_payload.get("missing", []) if isinstance(self._p26_payload, dict) else []
         if missing:
@@ -196,6 +222,9 @@ class GlobalPageMixin:
         self._p26_fetching = False
         if hasattr(self, "p26_refresh_btn"):
             self.p26_refresh_btn.setEnabled(True)
+        if not self._p26_page_is_visible():
+            self._p26_pending_error = str(message)
+            return
         self._p26_set_status(f"Global indexes failed: {message}", "negative")
 
     def _p26_rows(self) -> list[dict[str, Any]]:

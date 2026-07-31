@@ -729,6 +729,14 @@ def test_us_etf_orders_fill_and_unsupported_funds_remain_blocked() -> None:
         assert position["symbol"] == "SPY"
         assert position["quantity"] == 10
 
+        spym_quote = _quote("SPYM", bid=87.1, ask=87.2, exchange="PCX", quote_type="EQUITY")
+        spym_order = engine.submit_order(
+            PaperOrderRequest(account["id"], "SPYM", "buy", 1, "market", "day"),
+            quote=spym_quote,
+        )
+        assert engine.process_pending_orders(quotes={"SPYM": spym_quote})["filled"] == 1
+        assert store.get_order(spym_order["id"])["status"] == "filled"
+
         qqq_quote = _quote("QQQ", bid=599.8, ask=600.0, exchange="NGM", quote_type="ETF")
         qqq_order = engine.submit_order(
             PaperOrderRequest(account["id"], "QQQ", "buy", 2, "limit", "gtc", limit_price=600),
@@ -753,6 +761,8 @@ def test_us_etf_orders_fill_and_unsupported_funds_remain_blocked() -> None:
             )
         except ValueError as exc:
             assert "NYSE Arca" in str(exc)
+            assert "type=ETF" in str(exc)
+            assert "exchange=PNK" in str(exc)
         else:
             raise AssertionError("OTC ETFs should remain unsupported")
 

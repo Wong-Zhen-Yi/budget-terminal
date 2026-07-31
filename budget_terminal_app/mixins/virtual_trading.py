@@ -18,6 +18,7 @@ from budget_terminal_app.paper_trading import (
 )
 from budget_terminal_app.paper_trading.models import iso_utc
 from budget_terminal_app.services.chart_data import ChartDataService
+from budget_terminal_app.widgets.batched_render import run_batched
 
 
 P32_SYMBOL_CHART_RANGES = {
@@ -64,6 +65,19 @@ class VirtualTradingMixin:
         self._p32_market_phase = ""
         self._p32_chart_data_service = None
         self._p32_owns_chart_data_service = False
+        self._p32_view_request_seq = 0
+        self._p32_view_refresh_running = False
+        self._p32_view_refresh_context = None
+        self._p32_view_refresh_pending = None
+        self._p32_view_cache = {}
+        self._p32_pending_recurring_selection = None
+        self._p32_active_account_snapshot = None
+        self._p32_table_render_generations: dict[int, int] = {}
+        self._p32_accounts_request_seq = 0
+        self._p32_accounts_refresh_running = False
+        self._p32_accounts_refresh_context = ""
+        self._p32_accounts_refresh_pending: str | None = None
+        self._p32_accounts: list[dict[str, Any]] = []
 
         page_layout.addWidget(self._p32_build_header())
         page_layout.addWidget(self._p32_build_empty_state(), 1)
@@ -264,6 +278,7 @@ class VirtualTradingMixin:
         self.p32_fills_table = self._p32_table(["Symbol", "Side", "Shares", "Price", "Realized P&L", "Filled"])
         self.p32_tabs.addTab(self.p32_fills_table, "Activity")
         self.p32_tabs.addTab(self._p32_build_recurring_tab(), "Recurring")
+        self.p32_tabs.currentChanged.connect(lambda _index: self._p32_refresh_all())
         layout.addWidget(self.p32_tabs, 3)
         return panel
 
@@ -554,16 +569,35 @@ class VirtualTradingMixin:
         self._p32_set_status("Recurring schedule cancelled.", "positive")
         self._p32_refresh_recurring(schedule["id"])
 
-    def _p32_refresh_recurring(self, select_schedule_id: str | None = None) -> None:
+    def _p32_refresh_recurring(
+        self,
+        select_schedule_id: str | None = None,
+        *,
+        schedules: Any = None,
+        account: Any = None,
+    ) -> None:
         if not getattr(self, "_p32_active_account_id", ""):
             self.p32_recurring_table.setRowCount(0)
             self._p32_update_recurring_controls()
             return
-        schedules = self._p32_store.list_recurring_schedules(self._p32_active_account_id)
+        if schedules is None:
+            if select_schedule_id is not None:
+                self._p32_pending_recurring_selection = str(select_schedule_id)
+            if self._p32_has_window_refresh_runtime():
+                self._p32_refresh_all()
+                return
+            schedules = [
+                dict(row)
+                for row in self._p32_store.list_recurring_schedules(self._p32_active_account_id)
+            ]
+            account = dict(self._p32_store.get_account(self._p32_active_account_id))
         selected_id = select_schedule_id
+        if selected_id is None:
+            selected_id = getattr(self, "_p32_pending_recurring_selection", None)
         if selected_id is None:
             current = self._p32_selected_schedule()
             selected_id = str(current["id"]) if current else None
+        self._p32_pending_recurring_selection = None
         values: list[list[str]] = []
         selected_row = -1
         for row_index, schedule in enumerate(schedules):
@@ -608,10 +642,14 @@ class VirtualTradingMixin:
             ])
             if str(schedule["id"]) == str(selected_id or ""):
                 selected_row = row_index
-        self._p32_fill_table(self.p32_recurring_table, values)
-        if selected_row >= 0:
-            self.p32_recurring_table.selectRow(selected_row)
-        self._p32_update_recurring_controls()
+        def _after_render() -> None:
+            if selected_row >= 0:
+                self.p32_recurring_table.selectRow(selected_row)
+            if isinstance(account, dict):
+                self._p32_active_account_snapshot = dict(account)
+            self._p32_update_recurring_controls()
+
+        self._p32_fill_table(self.p32_recurring_table, values, on_complete=_after_render)
 
     def _p32_update_recurring_controls(self) -> None:
         table = getattr(self, "p32_recurring_table", None)
@@ -620,10 +658,8 @@ class VirtualTradingMixin:
         editable = bool(selected and status != "cancelled")
         archived = False
         if getattr(self, "_p32_active_account_id", ""):
-            try:
-                archived = self._p32_store.get_account(self._p32_active_account_id)["status"] == "archived"
-            except ValueError:
-                archived = True
+            account = getattr(self, "_p32_active_account_snapshot", None)
+            archived = not isinstance(account, dict) or account.get("status") == "archived"
         self.p32_edit_schedule_btn.setEnabled(editable and not archived)
         self.p32_toggle_schedule_btn.setEnabled(editable and not archived)
         self.p32_toggle_schedule_btn.setText("Resume" if status == "paused" else "Pause")
@@ -849,6 +885,9 @@ class VirtualTradingMixin:
     def _p32_stop(self) -> None:
         self._p32_chart_request_id = int(getattr(self, "_p32_chart_request_id", 0)) + 1
         self._p32_chart_inflight = False
+        self._p32_accounts_request_seq = int(getattr(self, "_p32_accounts_request_seq", 0)) + 1
+        self._p32_accounts_refresh_running = False
+        self._p32_accounts_refresh_pending = None
         for timer_name in ("_p32_engine_timer", "_p32_mark_timer"):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -869,8 +908,83 @@ class VirtualTradingMixin:
         return str(getattr(self, "_p31_active_account_id", "") or "")
 
     def _p32_refresh_accounts(self, select_account_id: str | None = None) -> None:
-        accounts = self._p32_store.list_accounts(include_archived=True)
         desired = str(select_account_id or self._p32_active_account_id or "")
+        if getattr(self, "_p32_accounts_refresh_running", False):
+            active_desired = str(getattr(self, "_p32_accounts_refresh_context", "") or "")
+            if desired == active_desired:
+                self._p32_accounts_refresh_pending = None
+            elif desired != getattr(self, "_p32_accounts_refresh_pending", None):
+                self._p32_accounts_refresh_pending = desired
+            return
+        self._p32_start_accounts_refresh(desired)
+
+    def _p32_start_accounts_refresh(self, desired: str) -> None:
+        """Load the Virtual account selector without blocking Qt's event loop."""
+        executor = getattr(self, "_p32_executor", None)
+        dispatcher = getattr(self, "_invoke_main", None)
+        has_window_runtime = executor is not None and callable(getattr(dispatcher, "emit", None))
+        self._p32_accounts_request_seq = int(getattr(self, "_p32_accounts_request_seq", 0)) + 1
+        request_id = self._p32_accounts_request_seq
+        self._p32_accounts_refresh_running = True
+        self._p32_accounts_refresh_context = str(desired or "")
+
+        def _work() -> list[dict[str, Any]]:
+            return [dict(account) for account in self._p32_store.list_accounts(include_archived=True)]
+
+        if not has_window_runtime:
+            try:
+                accounts = _work()
+                error = ""
+            except Exception as exc:
+                accounts = []
+                error = str(exc)
+            self._p32_complete_accounts_refresh(request_id, desired, accounts, error)
+            return
+
+        future = executor.submit(_work)
+
+        def _complete(done: Any) -> None:
+            try:
+                accounts = done.result()
+                error = ""
+            except Exception as exc:
+                accounts = []
+                error = str(exc)
+            try:
+                self._invoke_main.emit(
+                    lambda rid=request_id, selected=desired, rows=accounts, message=error: self._p32_complete_accounts_refresh(
+                        rid, selected, rows, message
+                    )
+                )
+            except RuntimeError:
+                return
+
+        future.add_done_callback(_complete)
+
+    def _p32_complete_accounts_refresh(
+        self,
+        request_id: int,
+        desired: str,
+        accounts: Any,
+        error: str,
+    ) -> None:
+        if request_id != int(getattr(self, "_p32_accounts_request_seq", 0)):
+            return
+        self._p32_accounts_refresh_running = False
+        self._p32_accounts_refresh_context = ""
+        pending = getattr(self, "_p32_accounts_refresh_pending", None)
+        self._p32_accounts_refresh_pending = None
+        if pending is not None and pending != desired:
+            self._p32_start_accounts_refresh(pending)
+            return
+        if error:
+            self._p32_set_status(f"Virtual accounts could not be refreshed: {error}", "negative")
+            return
+        self._p32_apply_accounts(accounts, desired)
+
+    def _p32_apply_accounts(self, accounts: Any, desired: str) -> None:
+        accounts = [dict(account) for account in list(accounts or []) if isinstance(account, dict)]
+        self._p32_accounts = accounts
         self.p32_account_combo.blockSignals(True)
         self.p32_account_combo.clear()
         selected_index = -1
@@ -885,6 +999,10 @@ class VirtualTradingMixin:
         self.p32_account_combo.setCurrentIndex(selected_index)
         self.p32_account_combo.blockSignals(False)
         self._p32_active_account_id = str(self.p32_account_combo.currentData() or "")
+        self._p32_active_account_snapshot = next(
+            (dict(account) for account in accounts if str(account["id"] or "") == self._p32_active_account_id),
+            None,
+        )
         has_accounts = bool(accounts)
         self.p32_empty_state.setVisible(not has_accounts)
         self.p32_workspace.setVisible(has_accounts)
@@ -894,16 +1012,19 @@ class VirtualTradingMixin:
 
     def _p32_on_account_changed(self, _index: int) -> None:
         self._p32_active_account_id = str(self.p32_account_combo.currentData() or "")
+        self._p32_active_account_snapshot = next(
+            (
+                dict(account)
+                for account in getattr(self, "_p32_accounts", [])
+                if str(account.get("id") or "") == self._p32_active_account_id
+            ),
+            None,
+        )
         self._p32_update_account_controls()
         self._p32_refresh_all()
 
     def _p32_update_account_controls(self) -> None:
-        account = None
-        if self._p32_active_account_id:
-            try:
-                account = self._p32_store.get_account(self._p32_active_account_id)
-            except ValueError:
-                account = None
+        account = getattr(self, "_p32_active_account_snapshot", None)
         archived = bool(account and account["status"] == "archived")
         self.p32_edit_account_btn.setEnabled(account is not None)
         self.p32_archive_account_btn.setEnabled(account is not None)
@@ -1612,23 +1733,161 @@ class VirtualTradingMixin:
         self.p32_symbol_input.setFocus()
 
     def _p32_refresh_all(self) -> None:
+        """Refresh common account data and only the visible Virtual tab off the UI thread."""
         if not self._p32_active_account_id:
             return
+        account_id = str(self._p32_active_account_id)
+        tab_index = int(self.p32_tabs.currentIndex()) if hasattr(self, "p32_tabs") else 0
+        order_filter = str(self.p32_order_filter.currentData() or "all") if hasattr(self, "p32_order_filter") else "all"
+        context = (account_id, tab_index, order_filter)
+        cached = getattr(self, "_p32_view_cache", {}).get(context)
+        if isinstance(cached, dict):
+            self._p32_apply_view_snapshot(context, cached)
+        if getattr(self, "_p32_view_refresh_running", False):
+            if context != getattr(self, "_p32_view_refresh_context", None):
+                self._p32_view_refresh_pending = context
+            return
+        self._p32_start_view_refresh(context)
+
+    def _p32_has_window_refresh_runtime(self) -> bool:
+        """Return whether the full window can marshal refresh results to Qt's UI thread."""
+        dispatcher = getattr(self, "_invoke_main", None)
+        return callable(getattr(dispatcher, "emit", None)) and callable(
+            getattr(self, "_is_current_page", None)
+        )
+
+    def _p32_page_is_visible(self) -> bool:
+        """Treat isolated widget probes as visible while preserving real-window guards."""
+        is_current_page = getattr(self, "_is_current_page", None)
+        if not callable(is_current_page):
+            return True
+        return bool(is_current_page(getattr(self, "page32", None)))
+
+    def _p32_start_view_refresh(self, context: tuple[str, int, str]) -> None:
+        executor = getattr(self, "_p32_executor", None)
+        has_window_runtime = self._p32_has_window_refresh_runtime()
+        if executor is None and has_window_runtime:
+            return
+        self._p32_view_request_seq += 1
+        request_id = self._p32_view_request_seq
+        self._p32_view_refresh_running = True
+        self._p32_view_refresh_context = context
+
+        def _work() -> dict[str, Any]:
+            account_id, tab_index, order_filter = context
+            account = dict(self._p32_store.get_account(account_id))
+            summary = dict(self._p32_store.account_summary(account_id))
+            positions = [dict(row) for row in self._p32_store.list_positions(account_id)]
+            snapshot: dict[str, Any] = {
+                "account": account,
+                "summary": summary,
+                "net_contributions": float(self._p32_store.net_contributions(account_id)),
+                "positions": positions,
+                "performance": [dict(row) for row in self._p32_store.list_equity_snapshots(account_id)],
+                "cash_events": [dict(row) for row in self._p32_store.list_cash_events(account_id, external_only=True)],
+                "tab_index": tab_index,
+            }
+            if tab_index == 1:
+                snapshot["orders"] = [dict(row) for row in self._p32_store.list_orders(account_id, status=order_filter)]
+            elif tab_index == 2:
+                snapshot["fills"] = [dict(row) for row in self._p32_store.list_fills(account_id)]
+            elif tab_index == 3:
+                snapshot["recurring"] = [dict(row) for row in self._p32_store.list_recurring_schedules(account_id)]
+            return snapshot
+
+        if not has_window_runtime:
+            try:
+                payload = _work()
+                error = ""
+            except Exception as exc:
+                payload = None
+                error = str(exc)
+            self._p32_complete_view_refresh(request_id, context, payload, error)
+            return
+
+        future = executor.submit(_work)
+
+        def _complete(done: Any) -> None:
+            try:
+                payload = done.result()
+                error = ""
+            except Exception as exc:
+                payload = None
+                error = str(exc)
+            try:
+                self._invoke_main.emit(
+                    lambda rid=request_id, ctx=context, data=payload, message=error: self._p32_complete_view_refresh(
+                        rid, ctx, data, message
+                    )
+                )
+            except RuntimeError:
+                return
+
+        future.add_done_callback(_complete)
+
+    def _p32_complete_view_refresh(
+        self,
+        request_id: int,
+        context: tuple[str, int, str],
+        payload: Any,
+        error: str,
+    ) -> None:
+        if request_id != getattr(self, "_p32_view_request_seq", 0):
+            return
+        self._p32_view_refresh_running = False
+        self._p32_view_refresh_context = None
+        if isinstance(payload, dict):
+            self._p32_view_cache[context] = payload
+            self._p32_apply_view_snapshot(context, payload)
+        elif error and self._p32_page_is_visible():
+            self._p32_set_status(f"Virtual view refresh failed: {error}", "negative")
+        pending = self._p32_view_refresh_pending
+        self._p32_view_refresh_pending = None
+        if pending is not None and pending != context:
+            self._p32_start_view_refresh(pending)
+
+    def _p32_current_view_context(self) -> tuple[str, int, str]:
+        return (
+            str(getattr(self, "_p32_active_account_id", "") or ""),
+            int(self.p32_tabs.currentIndex()) if hasattr(self, "p32_tabs") else 0,
+            str(self.p32_order_filter.currentData() or "all") if hasattr(self, "p32_order_filter") else "all",
+        )
+
+    def _p32_apply_view_snapshot(self, context: tuple[str, int, str], payload: dict[str, Any]) -> None:
+        if context != self._p32_current_view_context():
+            return
+        if not self._p32_page_is_visible():
+            return
         try:
-            self._p32_refresh_summary()
-            self._p32_refresh_performance()
-            self._p32_refresh_positions()
-            self._p32_refresh_orders()
-            self._p32_refresh_fills()
-            self._p32_refresh_recurring()
+            account = payload.get("account", {})
+            if isinstance(account, dict):
+                self._p32_active_account_snapshot = dict(account)
+            self._p32_refresh_summary(payload)
+            self._p32_refresh_performance(snapshot=payload)
+            tab_index = int(payload.get("tab_index", context[1]))
+            if tab_index == 0:
+                self._p32_refresh_positions(payload.get("positions", []))
+            elif tab_index == 1:
+                self._p32_refresh_orders(rows=payload.get("orders", []))
+            elif tab_index == 2:
+                self._p32_refresh_fills(payload.get("fills", []))
+            elif tab_index == 3:
+                self._p32_refresh_recurring(
+                    getattr(self, "_p32_pending_recurring_selection", None),
+                    schedules=payload.get("recurring", []),
+                    account=account,
+                )
         except Exception as exc:
             logger.exception("Virtual page refresh failed.")
             self._p32_set_status(f"Virtual view refresh failed: {exc}", "negative")
 
-    def _p32_refresh_summary(self) -> None:
-        summary = self._p32_store.account_summary(self._p32_active_account_id)
+    def _p32_refresh_summary(self, snapshot: Any = None) -> None:
+        if not isinstance(snapshot, dict):
+            self._p32_refresh_all()
+            return
+        summary = snapshot.get("summary", {})
         equity = float(summary.get("equity", 0.0) or 0.0)
-        net_contributions = self._p32_store.net_contributions(self._p32_active_account_id)
+        net_contributions = float(snapshot.get("net_contributions", 0.0) or 0.0)
         total_return = equity - net_contributions
         self.p32_equity_label.setText(f"${equity:,.2f}")
         sign = "+" if total_return > 0 else ""
@@ -1644,7 +1903,7 @@ class VirtualTradingMixin:
         for key, label in self.p32_summary_labels.items():
             label.setText(f"${float(summary.get(key, 0.0) or 0.0):,.2f}")
         stale = int(summary.get("stale_mark_count", 0) or 0)
-        positions = self._p32_store.list_positions(self._p32_active_account_id)
+        positions = list(snapshot.get("positions", []) or [])
         has_premarket_marks = any("pre-market" in str(row.get("mark_source") or "").lower() for row in positions)
         if self._p32_market_phase == "premarket" or has_premarket_marks:
             badge = "PRE · delayed Yahoo marks"
@@ -1654,13 +1913,16 @@ class VirtualTradingMixin:
         else:
             self.p32_market_state_label.setText("Live paper marks" if not stale else f"{stale} stale mark(s)")
 
-    def _p32_refresh_performance(self, *_: Any) -> None:
+    def _p32_refresh_performance(self, *_: Any, snapshot: Any = None) -> None:
         if not getattr(self, "_p32_active_account_id", ""):
             return
-        rows = self._p32_store.list_equity_snapshots(self._p32_active_account_id)
-        account = self._p32_store.get_account(self._p32_active_account_id)
-        summary = self._p32_store.account_summary(self._p32_active_account_id)
-        external_events = self._p32_store.list_cash_events(self._p32_active_account_id, external_only=True)
+        if not isinstance(snapshot, dict):
+            self._p32_refresh_all()
+            return
+        rows = list(snapshot.get("performance", []) or [])
+        account = dict(snapshot.get("account", {}) or {})
+        summary = dict(snapshot.get("summary", {}) or {})
+        external_events = list(snapshot.get("cash_events", []) or [])
         adjustment_events = []
         for event in external_events:
             if event.get("event_type") not in {"deposit", "withdrawal"}:
@@ -1692,7 +1954,7 @@ class VirtualTradingMixin:
             adjusted_rows = filtered
         values = [adjusted_equity for _timestamp, adjusted_equity in adjusted_rows]
         initial_cash = float(account.get("initial_cash", 0.0) or 0.0)
-        net_contributions = self._p32_store.net_contributions(self._p32_active_account_id)
+        net_contributions = float(snapshot.get("net_contributions", 0.0) or 0.0)
         adjusted_current_equity = float(summary.get("equity", 0.0) or 0.0) - (net_contributions - initial_cash)
         if not values:
             values = (
@@ -1716,8 +1978,10 @@ class VirtualTradingMixin:
         )
         self.p32_performance_plot.enableAutoRange()
 
-    def _p32_refresh_positions(self) -> None:
-        rows = self._p32_store.list_positions(self._p32_active_account_id)
+    def _p32_refresh_positions(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p32_refresh_all()
+            return
         has_premarket_marks = any("pre-market" in str(row.get("mark_source") or "").lower() for row in rows)
         price_header = self.p32_positions_table.horizontalHeaderItem(2)
         if price_header is not None:
@@ -1740,17 +2004,20 @@ class VirtualTradingMixin:
                 f"${average:,.4f}",
             ])
             returns.append(total_return)
-        self._p32_fill_table(self.p32_positions_table, values)
-        for row_index, value in enumerate(returns):
-            item = self.p32_positions_table.item(row_index, 4)
-            if item is not None:
-                item.setForeground(QColor(self._P32_ACCENT if value > 0 else self.theme_color("accent_negative") if value < 0 else self.theme_color("text_secondary")))
+        def _after_render() -> None:
+            for row_index, value in enumerate(returns):
+                item = self.p32_positions_table.item(row_index, 4)
+                if item is not None:
+                    item.setForeground(QColor(self._P32_ACCENT if value > 0 else self.theme_color("accent_negative") if value < 0 else self.theme_color("text_secondary")))
 
-    def _p32_refresh_orders(self, *_: Any) -> None:
+        self._p32_fill_table(self.p32_positions_table, values, on_complete=_after_render)
+
+    def _p32_refresh_orders(self, *_: Any, rows: Any = None) -> None:
         if not self._p32_active_account_id:
             return
-        status = str(self.p32_order_filter.currentData() or "all")
-        rows = self._p32_store.list_orders(self._p32_active_account_id, status=status)
+        if rows is None:
+            self._p32_refresh_all()
+            return
         values = []
         for order in rows:
             order_type = str(order["order_type"])
@@ -1773,9 +2040,11 @@ class VirtualTradingMixin:
                 self._p32_format_time(order["submitted_at"]),
                 order["id"],
             ])
-        self._p32_fill_table(self.p32_orders_table, values)
-        self._p32_update_cancel_button()
-        self._p32_update_order_detail()
+        self._p32_fill_table(
+            self.p32_orders_table,
+            values,
+            on_complete=lambda: (self._p32_update_cancel_button(), self._p32_update_order_detail()),
+        )
 
     def _p32_update_cancel_button(self) -> None:
         selected = self.p32_orders_table.currentRow()
@@ -1808,8 +2077,10 @@ class VirtualTradingMixin:
             f"Expires: {expires} · {decision}"
         )
 
-    def _p32_refresh_fills(self) -> None:
-        rows = self._p32_store.list_fills(self._p32_active_account_id)
+    def _p32_refresh_fills(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p32_refresh_all()
+            return
         values = [[
             fill["symbol"],
             str(fill["side"]).title(),
@@ -1820,14 +2091,80 @@ class VirtualTradingMixin:
         ] for fill in rows]
         self._p32_fill_table(self.p32_fills_table, values)
 
-    @staticmethod
-    def _p32_fill_table(table: QTableWidget, rows: list[list[str]]) -> None:
-        table.setUpdatesEnabled(False)
-        table.setRowCount(len(rows))
-        for row_index, values in enumerate(rows):
+    def _p32_fill_table(
+        self,
+        table: QTableWidget,
+        rows: list[list[str]],
+        *,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
+        table_key = id(table)
+        generation = self._p32_table_render_generations.get(table_key, 0) + 1
+        self._p32_table_render_generations[table_key] = generation
+        selected_signature = ()
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_signature = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in range(table.columnCount())
+            )
+        previous_updates = True
+        previous_signals = False
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            prepared = True
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _apply(row_index: int, values: list[str]) -> None:
             for column, value in enumerate(values):
                 table.setItem(row_index, column, QTableWidgetItem(str(value)))
-        table.setUpdatesEnabled(True)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            table.blockSignals(previous_signals)
+            current = generation == self._p32_table_render_generations.get(table_key)
+            visible = self._p32_page_is_visible()
+            if current and selected_signature:
+                for row_index in range(table.rowCount()):
+                    signature = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in range(table.columnCount())
+                    )
+                    if signature == selected_signature:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+            if current and visible and callable(on_complete):
+                on_complete()
+
+        if not self._p32_has_window_refresh_runtime():
+            _prepare()
+            try:
+                for row_index, values in enumerate(rows):
+                    _apply(row_index, values)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            ('virtual-table', table_key),
+            list(rows),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p32_table_render_generations.get(table_key),
+            is_visible=self._p32_page_is_visible,
+        )
 
     @staticmethod
     def _p32_parse_utc_time(value: Any) -> dt.datetime | None:

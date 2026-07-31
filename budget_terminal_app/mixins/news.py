@@ -8,6 +8,7 @@ from typing import Any
 from PyQt6.QtCore import QStandardPaths
 
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import DEFAULT_MAX_ITEMS, run_batched
 from ..workers.data import DataWorker, NEWS_PAGE_REFRESH_REASON
 from ..workers.news_preview import build_news_preview_text
 
@@ -63,6 +64,32 @@ class _NewsArticleCard(QFrame):
 
 
 class NewsMixin:
+
+    def _p34_page_is_visible(self) -> bool:
+        """Return whether News is the active real-app surface."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page34', None)))
+        return True
+
+    def _p34_on_show(self) -> None:
+        """Apply the newest shared Dashboard news payload once when visible."""
+        dashboard_applied = False
+        if hasattr(self, '_dashboard_apply_pending_page_data'):
+            dashboard_applied = bool(self._dashboard_apply_pending_page_data('news'))
+        if dashboard_applied:
+            self._p34_render_pending = False
+        elif getattr(self, '_p34_render_pending', False):
+            self._p34_render_pending = False
+            self._p34_refresh_cards()
+        pending_preview = getattr(self, '_p34_pending_preview', None)
+        if isinstance(pending_preview, tuple) and len(pending_preview) == 3:
+            self._p34_pending_preview = None
+            self._p34_on_preview_ready(*pending_preview)
+        pending_status = getattr(self, '_p34_pending_status', None)
+        if isinstance(pending_status, tuple) and len(pending_status) == 2:
+            self._p34_pending_status = None
+            self._p34_set_status(str(pending_status[0]), str(pending_status[1]))
 
     def _sort_articles_by_newest(self, articles: Any) -> Any:
         """Return newest articles first for shared news tables."""
@@ -186,6 +213,8 @@ class NewsMixin:
         self._p34_preview_request_id = 0
         self._p34_news_refresh_request_id = 0
         self._p34_news_refresh_pending = False
+        self._p34_news_refresh_signature: tuple[str, ...] = ()
+        self._p34_news_refresh_queued_tickers: list[str] | None = None
         self._p34_ticker_search_request_id = 0
         self._p34_ticker_search_pending = False
         self._p34_ticker_search_tickers: list[str] = []
@@ -194,6 +223,10 @@ class NewsMixin:
         self._p34_ticker_search_failed_tickers: list[str] = []
         self._p34_active_filter = 'all'
         self._p34_card_columns = 0
+        self._p34_render_generation = 0
+        self._p34_render_pending = False
+        self._p34_pending_preview: tuple[int, object, object] | None = None
+        self._p34_pending_status: tuple[str, str] | None = None
         self._p34_ticker_search_cards: list[_NewsArticleCard] = []
         self._p34_portfolio_cards: list[_NewsArticleCard] = []
         self._p34_market_cards: list[_NewsArticleCard] = []
@@ -403,6 +436,14 @@ class NewsMixin:
     def _p34_set_status(self, text: str, status: str) -> None:
         if hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=status)
+
+    def _p34_publish_status(self, text: str, status: str) -> None:
+        """Avoid replacing the destination page's status from a hidden completion."""
+        if self._p34_page_is_visible():
+            self._p34_pending_status = None
+            self._p34_set_status(text, status)
+        else:
+            self._p34_pending_status = (str(text), str(status))
 
     def _p34_numeric(self, value: Any) -> float:
         try:
@@ -653,48 +694,103 @@ class NewsMixin:
     def _p34_refresh_cards(self, *_args: Any) -> None:
         if not hasattr(self, 'p34_portfolio_grid'):
             return
+        if not self._p34_page_is_visible():
+            self._p34_render_pending = True
+            return
+        self._p34_render_pending = False
         highlighted_key = self._p34_article_key(getattr(self, '_p34_highlighted_news', None))
         ticker_search = self._p34_filtered_ticker_search_articles()
         portfolio, market = self._p34_filtered_groups()
         all_visible = ticker_search + portfolio + market
         self._p34_visible_articles = [dict(article) for article in all_visible]
-        self._p34_clear_cards()
-        for article in ticker_search:
-            card = self._p34_create_card(article)
-            self._p34_ticker_search_cards.append(card)
-            self._p34_cards_by_key[self._p34_article_key(article)] = card
-        for article in portfolio:
-            card = self._p34_create_card(article)
-            self._p34_portfolio_cards.append(card)
-            self._p34_cards_by_key[self._p34_article_key(article)] = card
-        for article in market:
-            card = self._p34_create_card(article)
-            self._p34_market_cards.append(card)
-            self._p34_cards_by_key[self._p34_article_key(article)] = card
+        grouped_articles = [
+            *(('ticker', article) for article in ticker_search),
+            *(('portfolio', article) for article in portfolio),
+            *(('market', article) for article in market),
+        ]
         has_ticker_search = bool(
             getattr(self, '_p34_ticker_search_pending', False)
             or getattr(self, '_p34_ticker_search_tickers', [])
         )
-        self.p34_ticker_search_section.setVisible(has_ticker_search)
-        self.p34_portfolio_section.setVisible(bool(portfolio))
-        self.p34_market_section.setVisible(bool(market))
-        self._p34_update_ticker_search_summary()
-        self._p34_update_counts(len(all_visible))
-        self._p34_card_columns = 0
         viewport_width = self.p34_cards_scroll.viewport().width() if hasattr(self, 'p34_cards_scroll') else 1050
-        self._p34_reflow_cards(viewport_width)
-        visible_keys = {self._p34_article_key(article) for article in all_visible}
-        if highlighted_key in visible_keys:
-            selected = next(article for article in all_visible if self._p34_article_key(article) == highlighted_key)
-        elif ticker_search:
-            selected = ticker_search[0]
-        elif portfolio:
-            selected = portfolio[0]
-        elif market:
-            selected = market[0]
-        else:
-            selected = None
-        self._p34_set_highlighted_news(selected, force=True)
+        columns = self._p34_columns_for_width(viewport_width)
+        self._p34_render_generation += 1
+        generation = self._p34_render_generation
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal prepared
+            prepared = True
+            self._p34_clear_cards()
+            self._p34_card_columns = columns
+            for grid in (self.p34_ticker_search_grid, self.p34_portfolio_grid, self.p34_market_grid):
+                for column in range(3):
+                    grid.setColumnStretch(column, 1 if column < columns else 0)
+
+        def _apply(_index: int, grouped: tuple[str, dict[str, Any]]) -> None:
+            group, article = grouped
+            card = self._p34_create_card(article)
+            if group == 'ticker':
+                cards = self._p34_ticker_search_cards
+                grid = self.p34_ticker_search_grid
+            elif group == 'portfolio':
+                cards = self._p34_portfolio_cards
+                grid = self.p34_portfolio_grid
+            else:
+                cards = self._p34_market_cards
+                grid = self.p34_market_grid
+            group_index = len(cards)
+            cards.append(card)
+            self._p34_cards_by_key[self._p34_article_key(article)] = card
+            grid.addWidget(card, group_index // columns, group_index % columns)
+
+        def _finish() -> None:
+            is_current = generation == self._p34_render_generation
+            if is_current and not self._p34_page_is_visible():
+                self._p34_render_pending = True
+            if not prepared or not is_current or not self._p34_page_is_visible():
+                return
+            self.p34_ticker_search_section.setVisible(has_ticker_search)
+            self.p34_portfolio_section.setVisible(bool(portfolio))
+            self.p34_market_section.setVisible(bool(market))
+            self._p34_update_ticker_search_summary()
+            self._p34_update_counts(len(all_visible))
+            visible_keys = {self._p34_article_key(article) for article in all_visible}
+            if highlighted_key in visible_keys:
+                selected = next(article for article in all_visible if self._p34_article_key(article) == highlighted_key)
+            elif ticker_search:
+                selected = ticker_search[0]
+            elif portfolio:
+                selected = portfolio[0]
+            elif market:
+                selected = market[0]
+            else:
+                selected = None
+            self._p34_set_highlighted_news(selected, force=True)
+
+        if (
+            not callable(getattr(self, '_is_current_page', None))
+            or len(grouped_articles) <= DEFAULT_MAX_ITEMS
+        ):
+            _prepare()
+            try:
+                for index, grouped in enumerate(grouped_articles):
+                    _apply(index, grouped)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            'news-cards',
+            grouped_articles,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p34_render_generation,
+            is_visible=self._p34_page_is_visible,
+        )
 
     def _p34_update_counts(self, visible_count: int) -> None:
         loaded = getattr(self, '_p34_loaded_news', {})
@@ -805,13 +901,17 @@ class NewsMixin:
             return
         if self._p34_article_key(getattr(self, '_p34_highlighted_news', None)) != article_key:
             return
+        if not self._p34_page_is_visible():
+            self._p34_pending_preview = (request_id, article_key, result)
+            return
+        self._p34_pending_preview = None
         payload = result if isinstance(result, dict) else {}
         text = str(payload.get('text') or '').strip()
         error = str(payload.get('error') or '').strip()
         self.p34_reader_body.setPlainText(text or 'Preview unavailable. Open externally for the full article.')
         if error:
             logger.info('News preview unavailable: %s', error)
-            self._p34_set_status('Preview unavailable. Open externally for the full article.', 'warning')
+            self._p34_publish_status('Preview unavailable. Open externally for the full article.', 'warning')
             if hasattr(self, 'status_bar'):
                 self.status_bar.setToolTip(error)
 
@@ -967,7 +1067,7 @@ class NewsMixin:
             notes.append(f"failed: {', '.join(self._p34_ticker_search_failed_tickers)}")
         suffix = f" ({'; '.join(notes)})" if notes else ''
         status = 'positive' if articles and not notes else 'warning'
-        self._p34_set_status(f'Ticker search returned {len(articles)} article(s).{suffix}', status)
+        self._p34_publish_status(f'Ticker search returned {len(articles)} article(s).{suffix}', status)
 
     def _p34_handle_ticker_search_error(self, request_id: int, message: Any) -> None:
         if request_id != int(getattr(self, '_p34_ticker_search_request_id', 0) or 0):
@@ -977,7 +1077,7 @@ class NewsMixin:
         self._p34_ticker_search_empty_tickers = []
         self._p34_ticker_search_failed_tickers = list(getattr(self, '_p34_ticker_search_tickers', []))
         self._p34_refresh_cards()
-        self._p34_set_status(f'Ticker search failed: {str(message or "Unknown error")}', 'negative')
+        self._p34_publish_status(f'Ticker search failed: {str(message or "Unknown error")}', 'negative')
 
     def _p34_clear_ticker_search(self) -> None:
         selected = getattr(self, '_p34_highlighted_news', None)
@@ -995,11 +1095,26 @@ class NewsMixin:
         self._p34_refresh_cards()
         self._p34_set_status('Ticker search cleared.', 'info')
 
-    def _p34_request_news_refresh(self) -> None:
+    def _p34_request_news_refresh(self) -> bool:
+        tickers = self._p34_fetch_tickers()
+        signature = tuple(str(ticker or '').upper().strip() for ticker in tickers if str(ticker or '').strip())
+        if getattr(self, '_p34_news_refresh_pending', False):
+            if signature != getattr(self, '_p34_news_refresh_signature', ()):
+                self._p34_news_refresh_queued_tickers = list(tickers)
+            else:
+                self._p34_news_refresh_queued_tickers = None
+            return False
+        self._p34_start_news_refresh(tickers)
+        return True
+
+    def _p34_start_news_refresh(self, tickers: list[str]) -> None:
         self._p34_news_refresh_request_id = int(getattr(self, '_p34_news_refresh_request_id', 0) or 0) + 1
         request_id = self._p34_news_refresh_request_id
         self._p34_news_refresh_pending = True
-        self._p34_set_status('Refreshing News...', 'info')
+        self._p34_news_refresh_signature = tuple(
+            str(ticker or '').upper().strip() for ticker in tickers if str(ticker or '').strip()
+        )
+        self._p34_publish_status('Refreshing News...', 'info')
         executor_factory = getattr(self, '_ensure_dashboard_fetch_executor', None)
         if not callable(executor_factory):
             self._p34_handle_news_refresh_error(request_id, 'News refresh executor is unavailable.')
@@ -1007,8 +1122,18 @@ class NewsMixin:
         self._p34_news_refresh_future = executor_factory().submit(
             self._p34_run_news_refresh,
             request_id,
-            self._p34_fetch_tickers(),
+            list(tickers),
         )
+
+    def _p34_start_queued_news_refresh(self) -> bool:
+        queued = getattr(self, '_p34_news_refresh_queued_tickers', None)
+        self._p34_news_refresh_queued_tickers = None
+        if queued is None:
+            self._p34_news_refresh_signature = ()
+            return False
+        self._p34_news_refresh_pending = False
+        self._p34_start_news_refresh(list(queued))
+        return True
 
     def _p34_run_news_refresh(self, request_id: int, tickers: list[str]) -> None:
         try:
@@ -1063,7 +1188,10 @@ class NewsMixin:
     def _p34_apply_news_refresh_result(self, request_id: int, data: Any) -> None:
         if request_id != int(getattr(self, '_p34_news_refresh_request_id', 0) or 0):
             return
+        if self._p34_start_queued_news_refresh():
+            return
         self._p34_news_refresh_pending = False
+        self._p34_news_refresh_signature = ()
         refresh_meta = dict(data.get('_news_refresh_meta', {})) if isinstance(data, dict) else {}
         news = self._p34_merge_news_refresh_data(data)
         logger.info('Applying News refresh %s with %s article(s).', request_id, len(news))
@@ -1081,13 +1209,16 @@ class NewsMixin:
             notes.append(f'{len(failed_tickers)} ticker search failure(s)')
         suffix = f" ({', '.join(notes)})" if notes else ''
         status = 'positive' if news and not notes else 'warning'
-        self._p34_set_status(f'News refreshed: {len(news)} article(s).{suffix}', status)
+        self._p34_publish_status(f'News refreshed: {len(news)} article(s).{suffix}', status)
 
     def _p34_handle_news_refresh_error(self, request_id: int, message: Any) -> None:
         if request_id != int(getattr(self, '_p34_news_refresh_request_id', 0) or 0):
             return
+        if self._p34_start_queued_news_refresh():
+            return
         self._p34_news_refresh_pending = False
-        self._p34_set_status(f'News refresh failed: {str(message or "Unknown error")}', 'negative')
+        self._p34_news_refresh_signature = ()
+        self._p34_publish_status(f'News refresh failed: {str(message or "Unknown error")}', 'negative')
 
     def _p34_downloads_directory(self) -> Path:
         standard_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)

@@ -96,6 +96,7 @@ def test_backtest_page_smoke() -> None:
         assert window.p25_compare_input.text() == "SPY"
         window._backtest_data_service = _FakeBacktestService()
         window._p25_executor = _InlineExecutor()
+        window.switch_page(24)
         window._p25_run_backtest()
         app.processEvents()
         assert "Backtest loaded" in window.p25_status_label.text()

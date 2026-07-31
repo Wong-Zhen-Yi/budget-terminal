@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.workers.overview import TradingVolumeWorker
 
 _P20_HEADERS = (
@@ -15,6 +16,7 @@ _P20_HEADERS = (
     '30D ADV ($m)',
     'YTD ADV ($m)',
     '1Y ADV ($m)',
+    '3Y ADV ($m)',
 )
 _P20_NUMERIC_SORT_ROLE = Qt.ItemDataRole.UserRole
 _P20_MISSING_SORT_VALUE = float('-inf')
@@ -24,6 +26,7 @@ _P20_DOT_METRICS = {
     '30d': ('30D', '30D ADV ($)', 'thirty_day_avg_dollar_volume'),
     'ytd': ('YTD', 'YTD ADV ($)', 'ytd_avg_dollar_volume'),
     '1y': ('1Y', '1Y ADV ($)', 'one_year_avg_dollar_volume'),
+    '3y': ('3Y', '3Y ADV ($)', 'three_year_avg_dollar_volume'),
 }
 _P20_DOT_TABLE_COLUMNS = {
     '1d': 4,
@@ -31,6 +34,7 @@ _P20_DOT_TABLE_COLUMNS = {
     '30d': 6,
     'ytd': 7,
     '1y': 8,
+    '3y': 9,
 }
 _P20_DOT_RETURN_FIELDS = {
     '1d': 'one_day_price_return_pct',
@@ -38,11 +42,20 @@ _P20_DOT_RETURN_FIELDS = {
     '30d': 'thirty_day_price_return_pct',
     'ytd': 'ytd_price_return_pct',
     '1y': 'one_year_price_return_pct',
+    '3y': 'three_year_price_return_pct',
 }
 _P20_FILTER_DEFAULT = 'default'
 _P20_FILTER_EXCLUDE = 'exclude'
 _P20_FILTER_ROW_RANGE = 'row_range'
 _P20_FILTER_MODES = {_P20_FILTER_DEFAULT, _P20_FILTER_EXCLUDE, _P20_FILTER_ROW_RANGE}
+_P20_MARKET_CAP_HISTORY_FIELD = 'market_cap_estimate_history'
+_P20_MARKET_CAP_ANIMATION_DURATION_MS = 5000
+_P20_MARKET_CAP_ANIMATION_FRAME_MS = 33
+_P20_MARKET_CAP_TRAILING_POINTS = {
+    '1d': 2,
+    '5d': 6,
+    '30d': 31,
+}
 
 
 class _P20NumericTableWidgetItem(QTableWidgetItem):
@@ -97,6 +110,8 @@ class OverviewMixin:
         """Build the Trading Volumes page UI."""
         self._p20_trading_volume_all_rows: list[dict[str, Any]] = []
         self._p20_trading_volume_rows: list[dict[str, Any]] = []
+        self._p20_render_generation = 0
+        self._p20_render_pending = False
         self._p20_trading_volume_fetching = False
         self._p20_trading_volume_loaded = False
         self._p20_trading_volume_cache_restored = False
@@ -113,6 +128,14 @@ class OverviewMixin:
         self._p20_dot_plot_log_points: list[tuple[float, float, str]] = []
         self._p20_dot_plot_return_states: list[tuple[str, str, float | None]] = []
         self._p20_dot_label_items: list[Any] = []
+        self._p20_dot_scatter_item = None
+        self._p20_market_cap_animation_entries: list[dict[str, Any]] = []
+        self._p20_market_cap_animation_dates: list[datetime.date] = []
+        self._p20_market_cap_animation_frame_points: list[tuple[float, float, str]] = []
+        self._p20_market_cap_animation_progress = 1.0
+        self._p20_market_cap_animation_timer = QTimer(self)
+        self._p20_market_cap_animation_timer.setInterval(_P20_MARKET_CAP_ANIMATION_FRAME_MS)
+        self._p20_market_cap_animation_timer.timeout.connect(self._p20_step_market_cap_animation)
 
         layout = QVBoxLayout(self.page20)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -222,7 +245,20 @@ class OverviewMixin:
         dot_title = QLabel('<b>Trading Volumes Dot Plot</b>')
         self.set_theme_role(dot_title, 'section_title')
         dot_header.addWidget(dot_title)
+        self.p20_market_cap_animation_lbl = QLabel('Estimated market cap')
+        self.set_theme_role(self.p20_market_cap_animation_lbl, 'status_muted')
+        self.p20_market_cap_animation_lbl.setToolTip(
+            'Price-based estimate that assumes shares outstanding remain unchanged.'
+        )
+        dot_header.addWidget(self.p20_market_cap_animation_lbl)
         dot_header.addStretch()
+        self.p20_market_cap_replay_btn = QPushButton('Replay')
+        self.p20_market_cap_replay_btn.setMinimumWidth(64)
+        self.set_theme_variant(self.p20_market_cap_replay_btn, 'accent')
+        self.p20_market_cap_replay_btn.setEnabled(False)
+        self.p20_market_cap_replay_btn.setToolTip('Refresh Trading Volumes to load daily market-cap history.')
+        self.p20_market_cap_replay_btn.clicked.connect(self._p20_replay_market_cap_animation)
+        dot_header.addWidget(self.p20_market_cap_replay_btn)
         self.p20_dot_metric_buttons: dict[str, QPushButton] = {}
         self.p20_dot_metric_group = QButtonGroup(self.page20)
         self.p20_dot_metric_group.setExclusive(True)
@@ -278,6 +314,9 @@ class OverviewMixin:
 
     def _p20_on_show(self) -> None:
         """Load the Trading Volumes table when the page is first opened."""
+        if getattr(self, '_p20_render_pending', False):
+            self._p20_render_pending = False
+            self._p20_apply_trading_volume_filter()
         if getattr(self, '_p20_trading_volume_fetching', False):
             return
         if not getattr(self, '_p20_trading_volume_loaded', False):
@@ -291,12 +330,17 @@ class OverviewMixin:
             self._p20_trading_volume_auto_refresh_started = True
             QTimer.singleShot(0, lambda: self._p20_refresh_trading_volume(force=True))
 
+    def _p20_on_hide(self) -> None:
+        """Stop market-cap playback when the Trading Volumes page is hidden."""
+        self._p20_stop_market_cap_animation(render_current=True)
+
     def _p20_refresh_trading_volume(self, *, force: bool = False) -> None:
         """Fetch or refresh the trading-volume table."""
         if getattr(self, '_p20_trading_volume_fetching', False):
             return
         if getattr(self, '_p20_trading_volume_loaded', False) and not force:
             return
+        self._p20_stop_market_cap_animation(render_current=True)
         worker = TradingVolumeWorker()
         worker.error.connect(self._p20_on_trading_volume_error)
         self._p20_trading_volume_worker = worker
@@ -415,11 +459,13 @@ class OverviewMixin:
                 'thirty_day_avg_dollar_volume': self._p20_json_number(row.get('thirty_day_avg_dollar_volume')),
                 'ytd_avg_dollar_volume': self._p20_json_number(row.get('ytd_avg_dollar_volume')),
                 'one_year_avg_dollar_volume': self._p20_json_number(row.get('one_year_avg_dollar_volume')),
+                'three_year_avg_dollar_volume': self._p20_json_number(row.get('three_year_avg_dollar_volume')),
                 'one_day_price_return_pct': self._p20_json_number(row.get('one_day_price_return_pct')),
                 'five_day_price_return_pct': self._p20_json_number(row.get('five_day_price_return_pct')),
                 'thirty_day_price_return_pct': self._p20_json_number(row.get('thirty_day_price_return_pct')),
                 'ytd_price_return_pct': self._p20_json_number(row.get('ytd_price_return_pct')),
                 'one_year_price_return_pct': self._p20_json_number(row.get('one_year_price_return_pct')),
+                'three_year_price_return_pct': self._p20_json_number(row.get('three_year_price_return_pct')),
             })
         return snapshot_rows[:100]
 
@@ -455,7 +501,7 @@ class OverviewMixin:
             f'- Exported at: {exported_at}',
             f'- Data source: {source or "N/A"}',
             f'- Data as of: {as_of or "N/A"}',
-            '- Intervals exported: 1D, 5D, 30D, YTD, 1Y',
+            '- Intervals exported: 1D, 5D, 30D, YTD, 1Y, 3Y',
             f'- Stocks exported per interval: {len(export_rows)}',
             '- Page modifiers: Ignored',
         ]
@@ -508,10 +554,44 @@ class OverviewMixin:
 
     def _p20_render_trading_volume_rows(self, rows: list[dict[str, Any]]) -> None:
         self._p20_trading_volume_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        page = getattr(self, 'page20', None)
+        page_check = getattr(self, '_is_current_page', None)
+        supports_batched_render = page is not None and callable(page_check)
+
+        def _is_visible() -> bool:
+            if not supports_batched_render:
+                return True
+            try:
+                return bool(page_check(page))
+            except (AttributeError, RuntimeError):
+                return False
+
+        if not _is_visible():
+            self._p20_render_pending = True
+            return
+        self._p20_render_generation = getattr(self, '_p20_render_generation', 0) + 1
+        generation = self._p20_render_generation
         table = self.p20_trading_volume_table
-        table.setSortingEnabled(False)
-        table.setRowCount(len(self._p20_trading_volume_rows))
-        for row_index, row in enumerate(self._p20_trading_volume_rows):
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+        selected_ticker = ''
+        selected_row = table.currentRow()
+        if selected_row >= 0 and table.item(selected_row, 1) is not None:
+            selected_ticker = table.item(selected_row, 1).text()
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            sorting_enabled = bool(table.isSortingEnabled())
+            prepared = True
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(self._p20_trading_volume_rows))
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
             rank = self._p20_row_rank(row, row_index)
             values = (
                 str(rank),
@@ -523,6 +603,7 @@ class OverviewMixin:
                 self._p20_format_dollar_volume_m(row.get('thirty_day_avg_dollar_volume')),
                 self._p20_format_dollar_volume_m(row.get('ytd_avg_dollar_volume')),
                 self._p20_format_dollar_volume_m(row.get('one_year_avg_dollar_volume')),
+                self._p20_format_dollar_volume_m(row.get('three_year_avg_dollar_volume')),
             )
             sort_values = (
                 float(rank),
@@ -534,6 +615,7 @@ class OverviewMixin:
                 self._p20_numeric_value(row.get('thirty_day_avg_dollar_volume')),
                 self._p20_numeric_value(row.get('ytd_avg_dollar_volume')),
                 self._p20_numeric_value(row.get('one_year_avg_dollar_volume')),
+                self._p20_numeric_value(row.get('three_year_avg_dollar_volume')),
             )
             for col_index, value in enumerate(values):
                 if col_index == 0 or col_index >= 3:
@@ -547,10 +629,47 @@ class OverviewMixin:
                     else:
                         item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, col_index, item)
-        table.setSortingEnabled(True)
-        metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
-        table.sortItems(_P20_DOT_TABLE_COLUMNS.get(metric_key, 4), Qt.SortOrder.DescendingOrder)
-        self._p20_render_dot_plot(self._p20_trading_volume_rows)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled or not supports_batched_render:
+                table.setSortingEnabled(True)
+                metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+                table.sortItems(_P20_DOT_TABLE_COLUMNS.get(metric_key, 4), Qt.SortOrder.DescendingOrder)
+            table.blockSignals(previous_signals)
+            if selected_ticker:
+                for row_index in range(table.rowCount()):
+                    ticker_item = table.item(row_index, 1)
+                    if ticker_item is not None and ticker_item.text() == selected_ticker:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+            if generation == getattr(self, '_p20_render_generation', 0) and _is_visible():
+                self._p20_render_dot_plot(self._p20_trading_volume_rows)
+
+        if not supports_batched_render:
+            _prepare()
+            try:
+                for row_index, row in enumerate(self._p20_trading_volume_rows):
+                    _apply(row_index, row)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            'trading-volumes-table',
+            list(self._p20_trading_volume_rows),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == getattr(self, '_p20_render_generation', 0),
+            is_visible=_is_visible,
+        )
 
     def _p20_exclude_top_value(self) -> int:
         """Return the current top-stock exclusion count."""
@@ -740,11 +859,13 @@ class OverviewMixin:
         else:
             self._p20_render_dot_plot(getattr(self, '_p20_trading_volume_rows', []) or [])
 
-    def _p20_render_dot_plot(self, rows: list[dict[str, Any]]) -> None:
-        """Render the right-side Trading volume dot plot."""
+    def _p20_render_dot_plot(self, rows: list[dict[str, Any]], *, stop_animation: bool = True) -> None:
+        """Render the right-side Trading volume dot plot at current market caps."""
         plot = getattr(self, 'p20_dot_plot', None)
         if plot is None:
             return
+        if stop_animation:
+            self._p20_stop_market_cap_animation(render_current=False)
         metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
         if metric_key not in _P20_DOT_METRICS:
             metric_key = '1d'
@@ -752,12 +873,14 @@ class OverviewMixin:
         _button_label, axis_label, row_key = _P20_DOT_METRICS[metric_key]
         return_key = _P20_DOT_RETURN_FIELDS.get(metric_key, 'one_day_price_return_pct')
         plot.clear()
+        self._p20_dot_scatter_item = None
         self._p20_dot_label_items = []
         plot.setLabel('left', 'Market Cap')
         plot.setLabel('bottom', axis_label)
         points: list[tuple[float, float, str]] = []
         log_points: list[tuple[float, float, str]] = []
         return_states: list[tuple[str, str, float | None]] = []
+        plotted_rows: list[dict[str, Any]] = []
         for row_index, row in enumerate((rows or [])[:100]):
             if not isinstance(row, dict):
                 continue
@@ -771,9 +894,11 @@ class OverviewMixin:
             log_points.append((math.log10(volume_value), math.log10(market_cap), ticker))
             return_value = self._p20_json_number(row.get(return_key))
             return_states.append((ticker, self._p20_dot_return_state(return_value), return_value))
+            plotted_rows.append(row)
         self._p20_dot_plot_points = list(points)
         self._p20_dot_plot_log_points = list(log_points)
         self._p20_dot_plot_return_states = list(return_states)
+        self._p20_market_cap_animation_frame_points = list(points)
         if not points:
             empty_text = f'No rows with numeric Market Cap and {axis_label} values to plot.'
             if not rows:
@@ -782,6 +907,7 @@ class OverviewMixin:
             self.p20_dot_empty_lbl.setVisible(True)
             plot.setXRange(0, 1, padding=0)
             plot.setYRange(0, 1, padding=0)
+            self._p20_update_market_cap_replay_state(rows or [])
             return
         self.p20_dot_empty_lbl.setVisible(False)
         xs = [point[0] for point in log_points]
@@ -793,14 +919,22 @@ class OverviewMixin:
                 'size': 7,
                 'brush': self._p20_dot_return_brush(return_states[index][1]),
                 'pen': spot_pen,
-                'data': ticker,
+                'data': self._p20_market_cap_tooltip_payload(
+                    plotted_rows[index],
+                    ticker=ticker,
+                    market_cap=points[index][1],
+                    metric_key=metric_key,
+                ),
             }
             for index, (x_value, y_value, ticker) in enumerate(log_points)
         ]
         scatter = pg.ScatterPlotItem(
             spots=spots,
+            hoverable=True,
+            tip=lambda x, y, data: self._p20_market_cap_tooltip(x, y, data),
         )
         plot.addItem(scatter)
+        self._p20_dot_scatter_item = scatter
         label_color = self.theme_color('text_primary') if hasattr(self, 'theme_color') else '#e5e7eb'
         for x_value, y_value, ticker in log_points:
             label = pg.TextItem(text=ticker, color=label_color, anchor=(0.5, 1.15))
@@ -813,6 +947,281 @@ class OverviewMixin:
         y_padding = max((max_y - min_y) * 0.12, 0.08)
         plot.setXRange(min_x - x_padding, max_x + x_padding, padding=0)
         plot.setYRange(min_y - y_padding, max_y + y_padding, padding=0)
+        self._p20_update_market_cap_replay_state(plotted_rows)
+
+    def _p20_market_cap_history(self, row: Any) -> list[tuple[datetime.date, float]]:
+        """Return one row's valid estimated market-cap history, ordered by date."""
+        payload = row if isinstance(row, dict) else {}
+        by_date: dict[datetime.date, float] = {}
+        for point in list(payload.get(_P20_MARKET_CAP_HISTORY_FIELD) or []):
+            if not isinstance(point, dict):
+                continue
+            text = str(point.get('date') or '').strip()
+            try:
+                point_date = datetime.date.fromisoformat(text[:10])
+            except Exception:
+                continue
+            value = self._p20_json_number(point.get('value'))
+            if value is None or value <= 0:
+                continue
+            by_date[point_date] = value
+        return sorted(by_date.items())
+
+    def _p20_interval_market_cap_history(
+        self,
+        row: Any,
+        metric_key: str | None = None,
+    ) -> list[tuple[datetime.date, float]]:
+        """Slice estimated market-cap history to the active Trading Volumes interval."""
+        history = self._p20_market_cap_history(row)
+        if not history:
+            return []
+        key = str(metric_key or getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+        trailing_points = _P20_MARKET_CAP_TRAILING_POINTS.get(key)
+        if trailing_points is not None:
+            return history[-trailing_points:]
+        end_date = history[-1][0]
+        if key == 'ytd':
+            return [point for point in history if point[0].year == end_date.year]
+        if key == '1y':
+            start_date = end_date - datetime.timedelta(days=365)
+            return [point for point in history if point[0] >= start_date]
+        if key == '3y':
+            start_date = (pd.Timestamp(end_date) - pd.DateOffset(years=3)).date()
+            return [point for point in history if point[0] >= start_date]
+        return history
+
+    def _p20_market_cap_tooltip_payload(
+        self,
+        row: Any,
+        *,
+        ticker: str,
+        market_cap: float,
+        metric_key: str,
+        point_date: datetime.date | None = None,
+        baseline_market_cap: float | None = None,
+    ) -> dict[str, Any]:
+        """Build data used by static and animated market-cap hover text."""
+        history = self._p20_interval_market_cap_history(row, metric_key)
+        sufficient_history = len(history) >= 2
+        baseline = baseline_market_cap
+        if baseline is None:
+            baseline = history[0][1] if sufficient_history else market_cap
+        if point_date is None and history:
+            point_date = history[-1][0]
+        return {
+            'ticker': ticker,
+            'date': point_date.isoformat() if point_date is not None else '',
+            'market_cap': market_cap,
+            'baseline_market_cap': baseline,
+            'sufficient_history': sufficient_history,
+        }
+
+    def _p20_market_cap_tooltip(self, _x: Any, _y: Any, data: Any) -> str:
+        """Format hover details for one estimated market-cap animation point."""
+        if not isinstance(data, dict):
+            return str(data or '')
+        ticker = str(data.get('ticker') or 'N/A').upper()
+        market_cap = self._p20_json_number(data.get('market_cap'))
+        baseline = self._p20_json_number(data.get('baseline_market_cap'))
+        point_date = str(data.get('date') or '').strip()
+        lines = [ticker]
+        if point_date:
+            lines.append(f'Date: {point_date}')
+        lines.append(f'Estimated Market Cap: {self._p20_format_compact_currency(market_cap)}')
+        if not data.get('sufficient_history') or market_cap is None or baseline is None or baseline <= 0:
+            lines.append('Market Cap Change: Insufficient history')
+        else:
+            change = market_cap - baseline
+            change_pct = change / baseline * 100.0
+            sign = '+' if change >= 0 else '-'
+            change_text = self._p20_format_compact_currency(abs(change))
+            lines.append(f'Change from interval start: {sign}{change_text} ({change_pct:+.2f}%)')
+        lines.append('Price-based estimate; assumes shares outstanding are unchanged.')
+        return '\n'.join(lines)
+
+    def _p20_update_market_cap_replay_state(self, rows: Any = None) -> None:
+        """Enable Replay only when the visible live rows include usable daily history."""
+        source_rows = rows if isinstance(rows, list) else getattr(self, '_p20_trading_volume_rows', []) or []
+        metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+        enabled = any(len(self._p20_interval_market_cap_history(row, metric_key)) >= 2 for row in source_rows)
+        button = getattr(self, 'p20_market_cap_replay_btn', None)
+        if button is not None:
+            button.setEnabled(enabled)
+            button.setToolTip(
+                'Replay the selected interval using price-based estimated market caps.'
+                if enabled
+                else 'Refresh Trading Volumes to load daily market-cap history.'
+            )
+        label = getattr(self, 'p20_market_cap_animation_lbl', None)
+        timer = getattr(self, '_p20_market_cap_animation_timer', None)
+        if label is not None and not (timer is not None and timer.isActive()):
+            label.setText('Estimated market cap • price-based' if enabled else 'Estimated market cap')
+
+    def _p20_align_market_cap_history(
+        self,
+        history: list[tuple[datetime.date, float]],
+        timeline_dates: list[datetime.date],
+        current_market_cap: float,
+    ) -> list[float]:
+        """Align one ticker's observations to the shared playback dates."""
+        if len(history) < 2:
+            return [current_market_cap for _ in timeline_dates]
+        aligned: list[float] = []
+        right_index = 1
+        for target_date in timeline_dates:
+            if target_date <= history[0][0]:
+                aligned.append(history[0][1])
+                continue
+            if target_date >= history[-1][0]:
+                aligned.append(history[-1][1])
+                continue
+            while right_index < len(history) and history[right_index][0] < target_date:
+                right_index += 1
+            left_date, left_value = history[right_index - 1]
+            right_date, right_value = history[right_index]
+            day_span = max((right_date - left_date).days, 1)
+            fraction = min(max((target_date - left_date).days / day_span, 0.0), 1.0)
+            log_value = math.log10(left_value) + (math.log10(right_value) - math.log10(left_value)) * fraction
+            aligned.append(10 ** log_value)
+        if aligned:
+            aligned[-1] = current_market_cap
+        return aligned
+
+    def _p20_replay_market_cap_animation(self) -> None:
+        """Replay estimated market-cap movement for the active interval and visible rows."""
+        rows = [dict(row) for row in getattr(self, '_p20_trading_volume_rows', []) or [] if isinstance(row, dict)]
+        if not rows:
+            self._p20_update_market_cap_replay_state([])
+            return
+        self._p20_render_dot_plot(rows)
+        metric_key = str(getattr(self, '_p20_dot_metric', '1d') or '1d').lower()
+        _button_label, _axis_label, row_key = _P20_DOT_METRICS[metric_key]
+        return_key = _P20_DOT_RETURN_FIELDS.get(metric_key, 'one_day_price_return_pct')
+        candidates: list[dict[str, Any]] = []
+        timeline_dates: set[datetime.date] = set()
+        for row_index, row in enumerate(rows[:100]):
+            ticker = str(row.get('ticker') or '').upper().strip() or str(row_index + 1)
+            market_cap = self._p20_numeric_value(row.get('market_cap'))
+            volume_value = self._p20_numeric_value(row.get(row_key))
+            if not self._p20_is_loggable_value(market_cap) or not self._p20_is_loggable_value(volume_value):
+                continue
+            history = self._p20_interval_market_cap_history(row, metric_key)
+            if len(history) >= 2:
+                timeline_dates.update(point[0] for point in history)
+            return_value = self._p20_json_number(row.get(return_key))
+            candidates.append({
+                'row': row,
+                'ticker': ticker,
+                'market_cap': market_cap,
+                'volume_value': volume_value,
+                'x_log': math.log10(volume_value),
+                'history': history,
+                'return_state': self._p20_dot_return_state(return_value),
+            })
+        ordered_dates = sorted(timeline_dates)
+        if len(ordered_dates) < 2:
+            self._p20_update_market_cap_replay_state(rows)
+            return
+        entries: list[dict[str, Any]] = []
+        y_values: list[float] = []
+        for candidate in candidates:
+            aligned_values = self._p20_align_market_cap_history(
+                candidate['history'],
+                ordered_dates,
+                candidate['market_cap'],
+            )
+            candidate['aligned_values'] = aligned_values
+            candidate['baseline_market_cap'] = (
+                candidate['history'][0][1] if len(candidate['history']) >= 2 else candidate['market_cap']
+            )
+            entries.append(candidate)
+            y_values.extend(aligned_values)
+        if not entries or not y_values:
+            self._p20_update_market_cap_replay_state(rows)
+            return
+        self._p20_market_cap_animation_entries = entries
+        self._p20_market_cap_animation_dates = ordered_dates
+        min_y = math.log10(min(y_values))
+        max_y = math.log10(max(y_values))
+        y_padding = max((max_y - min_y) * 0.12, 0.08)
+        self.p20_dot_plot.setYRange(min_y - y_padding, max_y + y_padding, padding=0)
+        self._p20_market_cap_animation_progress = 0.0
+        self._p20_apply_market_cap_animation_frame(0.0)
+        timer = getattr(self, '_p20_market_cap_animation_timer', None)
+        if timer is not None:
+            timer.start()
+
+    def _p20_step_market_cap_animation(self) -> None:
+        """Advance the market-cap replay by one approximately 30 FPS frame."""
+        step = _P20_MARKET_CAP_ANIMATION_FRAME_MS / max(float(_P20_MARKET_CAP_ANIMATION_DURATION_MS), 1.0)
+        progress = min(1.0, float(getattr(self, '_p20_market_cap_animation_progress', 0.0)) + step)
+        self._p20_market_cap_animation_progress = progress
+        self._p20_apply_market_cap_animation_frame(progress)
+        if progress >= 1.0:
+            timer = getattr(self, '_p20_market_cap_animation_timer', None)
+            if timer is not None:
+                timer.stop()
+
+    def _p20_apply_market_cap_animation_frame(self, progress: float) -> None:
+        """Move retained scatter points and labels to one replay frame."""
+        entries = list(getattr(self, '_p20_market_cap_animation_entries', []) or [])
+        timeline_dates = list(getattr(self, '_p20_market_cap_animation_dates', []) or [])
+        scatter = getattr(self, '_p20_dot_scatter_item', None)
+        if not entries or len(timeline_dates) < 2 or scatter is None:
+            return
+        normalized = min(max(float(progress), 0.0), 1.0)
+        timeline_position = normalized * (len(timeline_dates) - 1)
+        left_index = min(int(math.floor(timeline_position)), len(timeline_dates) - 1)
+        right_index = min(left_index + 1, len(timeline_dates) - 1)
+        fraction = timeline_position - left_index
+        display_index = min(int(round(timeline_position)), len(timeline_dates) - 1)
+        display_date = timeline_dates[display_index]
+        spot_pen = self.theme_pen('chart_reference', width=0.6) if hasattr(self, 'theme_pen') else pg.mkPen('#9aa4b2', width=0.6)
+        spots: list[dict[str, Any]] = []
+        frame_points: list[tuple[float, float, str]] = []
+        for entry_index, entry in enumerate(entries):
+            values = entry['aligned_values']
+            left_value = values[left_index]
+            right_value = values[right_index]
+            log_market_cap = math.log10(left_value) + (math.log10(right_value) - math.log10(left_value)) * fraction
+            market_cap = 10 ** log_market_cap
+            tooltip_payload = {
+                'ticker': entry['ticker'],
+                'date': display_date.isoformat(),
+                'market_cap': market_cap,
+                'baseline_market_cap': entry['baseline_market_cap'],
+                'sufficient_history': len(entry['history']) >= 2,
+            }
+            spots.append({
+                'pos': (entry['x_log'], log_market_cap),
+                'size': 7,
+                'brush': self._p20_dot_return_brush(entry['return_state']),
+                'pen': spot_pen,
+                'data': tooltip_payload,
+            })
+            frame_points.append((entry['volume_value'], market_cap, entry['ticker']))
+            if entry_index < len(self._p20_dot_label_items):
+                self._p20_dot_label_items[entry_index].setPos(entry['x_log'], log_market_cap)
+        scatter.setData(spots=spots)
+        self._p20_market_cap_animation_frame_points = frame_points
+        label = getattr(self, 'p20_market_cap_animation_lbl', None)
+        if label is not None:
+            label.setText(f'Estimated market cap • {display_date.isoformat()}')
+
+    def _p20_stop_market_cap_animation(self, *, render_current: bool = False) -> None:
+        """Stop playback and optionally restore the current-cap dot plot."""
+        timer = getattr(self, '_p20_market_cap_animation_timer', None)
+        if timer is not None:
+            timer.stop()
+        self._p20_market_cap_animation_progress = 1.0
+        self._p20_market_cap_animation_entries = []
+        self._p20_market_cap_animation_dates = []
+        if render_current and getattr(self, 'p20_dot_plot', None) is not None:
+            rows = getattr(self, '_p20_trading_volume_rows', []) or []
+            self._p20_render_dot_plot(rows, stop_animation=False)
+            return
+        self._p20_update_market_cap_replay_state()
 
     def _p20_dot_return_state(self, value: Any) -> str:
         try:

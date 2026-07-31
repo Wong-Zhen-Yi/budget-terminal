@@ -391,9 +391,30 @@ class StocksPageMixin:
         self._apply_stocks_theme()
 
     def _stocks_on_show(self) -> None:
+        pending = getattr(self, '_stocks_pending_apply', None)
+        if isinstance(pending, tuple) and len(pending) == 2:
+            self._stocks_pending_apply = None
+            payload, context = pending
+            self._stocks_apply_payload_to_ui(
+                payload,
+                include_global_status=bool(context.get('include_global_status', True)),
+                update_collection_info=bool(context.get('update_collection_info', True)),
+            )
+            self._stocks_loaded_once = True
+            return
         if not self._stocks_loaded_once:
             self._stocks_loaded_once = True
             self._stocks_load_from_input()
+
+    def _stocks_page_is_visible(self) -> bool:
+        page = getattr(self, 'page12', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
 
     def _stocks_session_snapshot(self) -> dict[str, Any] | None:
         """Return the current Stocks workspace snapshot when data is loaded."""
@@ -788,6 +809,10 @@ class StocksPageMixin:
             self._stocks_request_contexts.pop(request_id, None)
             return
         context = self._stocks_request_contexts.pop(request_id, {})
+        if not self._stocks_page_is_visible():
+            self._stocks_pending_apply = (payload, context)
+            self.stocks_load_btn.setEnabled(True)
+            return
         self._stocks_apply_payload_to_ui(
             payload,
             include_global_status=bool(context.get('include_global_status', True)),

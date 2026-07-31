@@ -10,6 +10,7 @@ from budget_terminal_app.services.up_down import (
     normalize_up_down_symbols,
     sort_up_down_rows,
 )
+from budget_terminal_app.widgets.batched_render import cancel_batched, run_batched
 
 
 P27_MAX_WORKERS = 1
@@ -45,6 +46,17 @@ class _P27NumericItem(QTableWidgetItem):
 
 
 class UpDownPageMixin:
+    def _p27_has_page_visibility_api(self) -> bool:
+        """Return whether the host provides the real window visibility guard."""
+        return callable(getattr(self, "_is_current_page", None))
+
+    def _p27_page_is_visible(self) -> bool:
+        """Treat small standalone probes as visible while guarding the real app."""
+        checker = getattr(self, "_is_current_page", None)
+        if callable(checker):
+            return bool(checker(getattr(self, "page27", None)))
+        return True
+
     def _get_up_down_data_service(self) -> UpDownDataService:
         service = getattr(self, "_up_down_data_service", None)
         if service is None:
@@ -66,6 +78,7 @@ class UpDownPageMixin:
         self._p27_request_seq = 0
         self._p27_active_request = 0
         self._p27_fetching = False
+        self._p27_render_generation = 0
         self._p27_interval_buttons: dict[str, QPushButton] = {}
         self._p27_tables: dict[str, QTableWidget] = {}
 
@@ -315,10 +328,32 @@ class UpDownPageMixin:
         if table is None:
             return
         rows = sort_up_down_rows(list((payload or {}).get("rows", []) if isinstance(payload, dict) else []))
-        table.setSortingEnabled(False)
-        table.setRowCount(0)
-        for row_index, row in enumerate(rows):
-            table.insertRow(row_index)
+        if not self._p27_page_is_visible() or source_key != self.p27_active_source:
+            return
+        self._p27_render_generation += 1
+        generation = self._p27_render_generation
+        render_key = ("up-down", source_key)
+        cancel_batched(self, render_key)
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+        selected_ticker = ""
+        selected_row = table.currentRow()
+        if selected_row >= 0 and table.item(selected_row, 1) is not None:
+            selected_ticker = table.item(selected_row, 1).text()
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            sorting_enabled = bool(table.isSortingEnabled())
+            prepared = True
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
             values = (
                 row_index + 1,
                 str(row.get("ticker") or ""),
@@ -344,8 +379,54 @@ class UpDownPageMixin:
                 if column in {0, 3, 4, 5, 6, 7}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(6, Qt.SortOrder.DescendingOrder)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled:
+                table.setSortingEnabled(True)
+                table.sortItems(6, Qt.SortOrder.DescendingOrder)
+            table.blockSignals(previous_signals)
+            if selected_ticker:
+                for row_index in range(table.rowCount()):
+                    item = table.item(row_index, 1)
+                    if item is not None and item.text() == selected_ticker:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not self._p27_has_page_visibility_api():
+            _prepare()
+            try:
+                for row_index, row in enumerate(rows):
+                    _apply(row_index, row)
+            finally:
+                _finish()
+            return
+
+        # Publish the bounded first row with the result callback so callers can
+        # immediately observe the new lightweight table state. Remaining rows
+        # still render in guarded, time-sliced batches.
+        _prepare()
+        remaining_rows = rows
+        row_offset = 0
+        if rows:
+            _apply(0, rows[0])
+            remaining_rows = rows[1:]
+            row_offset = 1
+
+        run_batched(
+            self,
+            render_key,
+            remaining_rows,
+            lambda row_index, row: _apply(row_index + row_offset, row),
+            generation=generation,
+            finish=_finish,
+            is_current=lambda value: value == self._p27_render_generation,
+            is_visible=lambda: self._p27_page_is_visible() and source_key == self.p27_active_source,
+        )
 
     def _p27_source_symbols(self, source_key: str) -> tuple[list[str], dict[str, str]]:
         if source_key == "portfolio":

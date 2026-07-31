@@ -958,10 +958,24 @@ class ValuationMixin:
         context = self._valuation_request_contexts.pop(request_id, {})
         if request_id != getattr(self, '_valuation_active_request_id', 0):
             return
+        if not self._valuation_page_is_visible():
+            self._valuation_pending_result = (payload, context)
+            self.valuation_load_btn.setEnabled(True)
+            return
         self.update_valuation_page(
             payload if isinstance(payload, dict) else {},
             update_collection_info=bool(context.get('update_collection_info', True)),
         )
+
+    def _valuation_page_is_visible(self) -> bool:
+        page = getattr(self, 'page23', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
 
     def _valuation_handle_error(self, request_id: int, message: Any) -> None:
         self._valuation_request_contexts.pop(request_id, None)
@@ -1298,7 +1312,15 @@ class ValuationMixin:
             self.load_valuation_data(update_collection_info=False)
 
     def _valuation_on_show(self) -> None:
-        if not isinstance(getattr(self, 'valuation_current_data', None), dict) or not getattr(self, 'valuation_current_data', None):
+        pending = getattr(self, '_valuation_pending_result', None)
+        if isinstance(pending, tuple) and len(pending) == 2:
+            self._valuation_pending_result = None
+            payload, context = pending
+            self.update_valuation_page(
+                payload if isinstance(payload, dict) else {},
+                update_collection_info=bool(context.get('update_collection_info', True)),
+            )
+        elif not isinstance(getattr(self, 'valuation_current_data', None), dict) or not getattr(self, 'valuation_current_data', None):
             if getattr(self, 'valuation_thread', None) is None:
                 self.load_valuation_data(update_collection_info=True)
         for plot in (

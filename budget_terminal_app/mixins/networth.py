@@ -273,6 +273,7 @@ class NetWorthMixin:
         self._p6_fx_source = getattr(self, '_p6_fx_source', '')
         self._p6_fx_error = ''
         self._p6_fx_loading = False
+        self._p6_fx_render_dirty = False
         self._p6_totals_currency = self._p6_normalize_totals_currency(self.networth_data.get('totals_currency', 'SGD'))
         self.networth_data['totals_currency'] = self._p6_totals_currency
         self._p6_goal_data = self._p6_normalize_goal_data(self.networth_data.get('goal', {}))
@@ -808,8 +809,29 @@ class NetWorthMixin:
             self._p6_fx_error = ''
         else:
             self._p6_fx_error = str((payload or {}).get('error', 'Unable to fetch USD/SGD rate.') if isinstance(payload, dict) else 'Unable to fetch USD/SGD rate.')
-        self._p6_refresh_fx_label()
-        self._p6_update_total(force_progress_rebuild=True)
+        self._p6_fx_render_dirty = True
+        self._p6_apply_pending_fx_render()
+
+    def _p6_page_is_visible(self) -> bool:
+        """Treat standalone probes as visible while guarding the real app page."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page6', None)))
+        return True
+
+    def _p6_apply_pending_fx_render(self, *, total_already_rendered: bool=False) -> bool:
+        """Apply one cached FX completion when Personal Finance is visible."""
+        if not getattr(self, '_p6_fx_render_dirty', False) or not self._p6_page_is_visible():
+            return False
+        self._p6_fx_render_dirty = False
+        try:
+            self._p6_refresh_fx_label()
+            if not total_already_rendered:
+                self._p6_update_total(force_progress_rebuild=True)
+        except Exception:
+            self._p6_fx_render_dirty = True
+            raise
+        return True
 
     def _p6_refresh_fx_label(self) -> None:
         label = getattr(self, 'p6_fx_label', None)
@@ -1069,6 +1091,10 @@ class NetWorthMixin:
 
     def _p6_on_show(self) -> None:
         """Autoplay the current-totals animation only once per app session."""
+        dashboard_rendered = False
+        if hasattr(self, '_dashboard_apply_pending_page_data'):
+            dashboard_rendered = bool(self._dashboard_apply_pending_page_data('personal_finance'))
+        self._p6_apply_pending_fx_render(total_already_rendered=dashboard_rendered)
         if not getattr(self, '_p6_progress_autoplay_done', False):
             self._p6_progress_autoplay_done = True
             self._p6_replay_progress_animation()

@@ -7,7 +7,8 @@ Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio da
 - Portfolio dashboard, net worth tracking, holdings metrics, and sector views
 - Options-chain fetching, table rendering, and related Yahoo Finance smoke tests
 - News hub with deterministic headline briefings, politics, calendar, pre-market, and YouTube helpers
-- Fundamentals, earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
+- Fundamentals and valuation
+- Earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
 - Default theme support through reusable theme tokens and shared styling helpers
 - In-process market-data coordination by default, with HTTP compatibility mode and direct-worker fallback
 
@@ -33,7 +34,8 @@ Create a virtual environment and install dependencies:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
 ```
 
 For linting and packaging work, also install `requirements-dev.txt`.
@@ -89,7 +91,7 @@ This is a PyQt6 desktop GUI app, so the standard packaging target is a windowed 
 Install build prerequisites:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
 ```
 
 Build the executable package:
@@ -101,7 +103,7 @@ Build the executable package:
 The build script:
 
 - activates `.venv`
-- installs `requirements.txt` plus `pyinstaller`
+- upgrades the packaging tools and installs the pinned runtime and development requirements
 - removes old `build/` output and only the current-version `dist/` target
 - builds from `packaging\budget_terminal.spec`
 - creates `release\BudgetTerminal-v*-windows.zip`

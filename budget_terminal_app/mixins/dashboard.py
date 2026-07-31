@@ -49,6 +49,168 @@ Format the response with these exact sections:
 class DashboardMixin:
     _DASHBOARD_DATA_SERVICE_WAIT_SECONDS = 0.75
 
+    def _dashboard_page_is_visible(self, page_attr: str) -> bool:
+        """Return whether one initialized main page is the current stacked page."""
+        page = getattr(self, str(page_attr or ''), None)
+        if page is None:
+            return not hasattr(self, 'stacked_widget')
+        if hasattr(self, '_is_current_page'):
+            try:
+                return bool(self._is_current_page(page))
+            except Exception:
+                pass
+        stack = getattr(self, 'stacked_widget', None)
+        return True if stack is None else stack.currentWidget() is page
+
+    def _dashboard_related_page_spec(self, key: str) -> tuple[str, str, bool] | None:
+        """Return page attribute, update callback, and payload mode for a shared-data consumer."""
+        return {
+            'news': ('page34', 'update_page34', True),
+            'portfolio': ('page4', 'update_page4', True),
+            'calendar': ('page7', '_p7_fetch_events', False),
+            'personal_finance': ('page6', '_p6_update_total', False),
+        }.get(str(key or ''))
+
+    def _dashboard_related_page_is_visible(self, key: str, page_attr: str) -> bool:
+        """Return whether one related page, including its relevant subtab, is visible."""
+        if not self._dashboard_page_is_visible(page_attr):
+            return False
+        if key == 'calendar' and hasattr(self, '_p7_calendar_tab_is_active'):
+            return bool(self._p7_calendar_tab_is_active())
+        return True
+
+    def _dashboard_apply_related_page_data(self, key: str, data: Any) -> bool:
+        """Apply cached shared data to one currently visible initialized page."""
+        spec = self._dashboard_related_page_spec(key)
+        if spec is None:
+            return False
+        page_attr, callback_name, pass_payload = spec
+        if hasattr(self, '_page_initialized') and not self._page_initialized(page_attr=page_attr):
+            return False
+        if not self._dashboard_related_page_is_visible(key, page_attr):
+            return False
+        callback = getattr(self, callback_name, None)
+        if not callable(callback):
+            return False
+        if pass_payload:
+            callback(data)
+        else:
+            callback()
+        return True
+
+    def _dashboard_queue_related_page_data(self, key: str, data: Any) -> bool:
+        """Render a visible shared-data consumer or retain one latest hidden update."""
+        spec = self._dashboard_related_page_spec(key)
+        if spec is None:
+            return False
+        page_attr, _callback_name, _pass_payload = spec
+        if hasattr(self, '_page_initialized') and not self._page_initialized(page_attr=page_attr):
+            return False
+        pending = getattr(self, '_dashboard_pending_page_data', None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._dashboard_pending_page_data = pending
+        if self._dashboard_related_page_is_visible(key, page_attr):
+            pending.pop(key, None)
+            return self._dashboard_apply_related_page_data(key, data)
+        pending[key] = data
+        return False
+
+    def _dashboard_apply_pending_page_data(self, key: str) -> bool:
+        """Apply and clear one newest deferred shared-data update on page show."""
+        pending = getattr(self, '_dashboard_pending_page_data', None)
+        if not isinstance(pending, dict) or key not in pending:
+            return False
+        spec = self._dashboard_related_page_spec(key)
+        if spec is None:
+            pending.pop(key, None)
+            return False
+        page_attr, _callback_name, _pass_payload = spec
+        if not self._dashboard_related_page_is_visible(key, page_attr):
+            return False
+        data = pending.pop(key)
+        return self._dashboard_apply_related_page_data(key, data)
+
+    def _dashboard_queue_related_page_updates(self, data: Any, *, include_portfolio: bool = True) -> None:
+        """Publish shared Dashboard data without rebuilding hidden consumer pages."""
+        keys = ['news', 'calendar', 'personal_finance']
+        if include_portfolio:
+            keys.insert(1, 'portfolio')
+        for key in keys:
+            self._dashboard_queue_related_page_data(key, data)
+
+    def _dashboard_merge_membership_payload(self, previous: Any, incoming: Any) -> dict[str, Any]:
+        """Merge a holdings-only response without erasing the cached chart workspace."""
+        incoming_data = dict(incoming) if isinstance(incoming, dict) else {}
+        if not isinstance(previous, dict):
+            return incoming_data
+        merged = dict(previous)
+        merged.update(incoming_data)
+        for key in (
+            'charts',
+            'chart_options',
+            'chart_option_expirations',
+            'chart_ma200',
+            'chart_rsi',
+            'chart_configs',
+        ):
+            if not incoming_data.get(key) and previous.get(key):
+                merged[key] = previous[key]
+        return merged
+
+    def _dashboard_preserve_newer_portfolio_quotes(self, data: Any, request_id: int) -> Any:
+        """Keep a quote-only Portfolio completion newer than this Dashboard request."""
+        overlay = getattr(self, '_p4_latest_quote_overlay', None)
+        if not isinstance(data, dict) or not isinstance(overlay, dict):
+            return data
+        context = getattr(self, '_dashboard_latest_request_context', {}) or {}
+        if request_id and int(context.get('request_id', 0) or 0) != int(request_id):
+            return data
+        try:
+            request_started = float(context.get('started_monotonic', 0.0) or 0.0)
+            quote_completed = float(overlay.get('completed_monotonic', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return data
+        if quote_completed < request_started:
+            return data
+        quotes = overlay.get('quotes', {})
+        if not isinstance(quotes, dict) or not quotes:
+            return data
+        active_symbols = {
+            str(symbol or '').upper().strip()
+            for symbol in self._get_fetch_tickers()
+            if str(symbol or '').strip()
+        }
+        newer_quotes = {
+            str(symbol).upper(): dict(quote) if isinstance(quote, dict) else quote
+            for symbol, quote in quotes.items()
+            if str(symbol).upper() in active_symbols
+        }
+        if not newer_quotes:
+            return data
+        merged = dict(data)
+        portfolio = {
+            str(symbol).upper(): quote
+            for symbol, quote in dict(merged.get('portfolio', {}) or {}).items()
+            if str(symbol).upper() in active_symbols
+        }
+        portfolio.update(newer_quotes)
+        merged['portfolio'] = portfolio
+        return merged
+
+    def _dashboard_on_show(self) -> bool:
+        """Render only the newest Dashboard payload deferred while another page was visible."""
+        pending = getattr(self, '_dashboard_pending_visible_update', None)
+        if not isinstance(pending, dict) or not self._dashboard_page_is_visible('page1'):
+            return False
+        self._dashboard_pending_visible_update = None
+        self._dashboard_apply_visible_update(
+            pending.get('data', {}),
+            refresh_reason=str(pending.get('refresh_reason', 'full') or 'full'),
+            apply_non_chart=bool(pending.get('apply_non_chart', False)),
+        )
+        return True
+
     def _ensure_dashboard_fetch_executor(self) -> Any:
         """Create the bounded Dashboard fetch executor on demand."""
         executor = getattr(self, '_dashboard_fetch_executor', None)
@@ -281,7 +443,12 @@ class DashboardMixin:
         )
         render_table_rows(self.target_table, rows)
 
-    def _dashboard_apply_local_portfolio_membership(self, data: Any = None) -> dict[str, Any]:
+    def _dashboard_apply_local_portfolio_membership(
+        self,
+        data: Any = None,
+        *,
+        update_related_pages: bool = True,
+    ) -> dict[str, Any]:
         """Refresh dashboard-side portfolio tables without touching the chart workspace."""
         self._dashboard_sync_portfolio_runtime_view()
         snapshot = self._dashboard_filtered_membership_snapshot(
@@ -292,9 +459,8 @@ class DashboardMixin:
         self._dashboard_render_target_rows(main_targets)
         portfolio_news = self._dashboard_limited_portfolio_news(snapshot.get('news', []))
         self._populate_news_table(self.news_table, portfolio_news)
-        self._call_if_page_initialized('update_page34', snapshot, page_attr='page34')
-        self._call_if_page_initialized('_p7_fetch_events', page_attr='page7')
-        self._call_if_page_initialized('_p6_update_total', page_attr='page6')
+        if update_related_pages:
+            self._dashboard_queue_related_page_updates(snapshot, include_portfolio=False)
         return snapshot
 
     def _dashboard_save_state(self) -> Any:
@@ -1118,7 +1284,7 @@ class DashboardMixin:
         self._execute_refresh_data()
 
     def _execute_refresh_data(self) -> None:
-        """Perform the dashboard refresh immediately."""
+        """Coordinate one Dashboard refresh and retain only the newest changed request."""
         refresh_reason = str(getattr(self, '_dashboard_pending_refresh_reason', 'full') or 'full')
         allow_non_chart_reuse = refresh_reason in {
             'full',
@@ -1138,21 +1304,69 @@ class DashboardMixin:
         period, interval = self.dashboard_timeframe_map.get(self.dashboard_timeframe_label, self.dashboard_timeframe_map['1 Day'])
         self.chart_configs = [(self.dashboard_symbol, period, interval)]
         self._dashboard_save_state()
-        self._dashboard_request_seq += 1
-        request_id = self._dashboard_request_seq
-        self._dashboard_latest_request_id = request_id
-        self._dashboard_latest_request_context = {
-            'request_id': request_id,
+        fetch_tickers = tuple(str(ticker or '').upper().strip() for ticker in self._get_fetch_tickers())
+        signature = (
+            self.dashboard_symbol,
+            self.dashboard_timeframe_label,
+            str(period),
+            str(interval),
+            fetch_tickers,
+            refresh_reason,
+        )
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None:
+            from budget_terminal_app.services.refresh_control import RefreshCoordinator
+
+            coordinator = RefreshCoordinator()
+            self._refresh_coordinator = coordinator
+        token, should_start = coordinator.request(('dashboard', 'main'), signature)
+        context = {
+            'request_id': token.generation,
             'symbol': self.dashboard_symbol,
             'timeframe_label': self.dashboard_timeframe_label,
             'period': period,
             'interval': interval,
+            'refresh_reason': refresh_reason,
+            'allow_non_chart_reuse': allow_non_chart_reuse,
+            'membership_only_refresh': membership_only_refresh,
+            'chart_configs': list(self.chart_configs),
+            'fetch_tickers': fetch_tickers,
         }
+        contexts = getattr(self, '_dashboard_refresh_contexts', None)
+        if not isinstance(contexts, dict):
+            contexts = {}
+            self._dashboard_refresh_contexts = contexts
+        contexts.setdefault(token.generation, context)
+        active_token = coordinator.active_token(('dashboard', 'main'))
+        pending_token = coordinator.pending_token(('dashboard', 'main'))
+        retained_generations = {
+            item.generation for item in (active_token, pending_token) if item is not None
+        }
+        self._dashboard_refresh_contexts = {
+            generation: value
+            for generation, value in contexts.items()
+            if generation in retained_generations
+        }
+        self._dashboard_request_seq = max(int(getattr(self, '_dashboard_request_seq', 0)), token.generation)
+        self._dashboard_latest_request_id = token.generation
+        self._dashboard_latest_request_context = dict(context)
+        if not should_start:
+            return
+        self._dashboard_start_coordinated_refresh(token, context)
+
+    def _dashboard_start_coordinated_refresh(self, token: Any, context: dict[str, Any]) -> None:
+        """Launch the active Dashboard token after its immutable inputs are captured."""
+        request_id = int(token.generation)
+        refresh_reason = str(context.get('refresh_reason', 'full') or 'full')
+        membership_only_refresh = bool(context.get('membership_only_refresh', False))
+        chart_configs_snapshot = list(context.get('chart_configs', []))
+        context['started_monotonic'] = time.monotonic()
         recent_request_keys = getattr(self, '_startup_recent_data_request_keys', None)
         if isinstance(recent_request_keys, set):
-            recent_request_keys.add(('chart', self.dashboard_symbol, str(period), str(interval)))
+            recent_request_keys.add(
+                ('chart', str(context.get('symbol') or ''), str(context.get('period') or ''), str(context.get('interval') or ''))
+            )
         self.dashboard_pending_x_range = self._dashboard_get_current_x_range() if self.dashboard_auto_follow else (self._dashboard_get_current_x_range() or self.dashboard_manual_x_range)
-        chart_configs_snapshot = list(self.chart_configs)
         self.dashboard_load_btn.setEnabled(False)
         if hasattr(self, '_set_shell_refresh_busy'):
             self._set_shell_refresh_busy(True, 'Refreshing...')
@@ -1165,13 +1379,54 @@ class DashboardMixin:
         if refresh_reason == 'startup_visible_refresh' and not getattr(self, '_startup_dashboard_data_actual_done', False):
             self._startup_dashboard_timeout_pending = True
             QTimer.singleShot(self._STARTUP_DASHBOARD_DATA_TIMEOUT_MS, self._on_startup_dashboard_timeout)
-        self._dashboard_latest_future = self._ensure_dashboard_fetch_executor().submit(
+        future = self._ensure_dashboard_fetch_executor().submit(
             self.run_worker,
             request_id,
             chart_configs_snapshot,
             refresh_reason,
-            allow_non_chart_reuse,
+            bool(context.get('allow_non_chart_reuse', False)),
+            tuple(context.get('fetch_tickers', ())),
         )
+        self._dashboard_latest_future = future
+
+        def _complete(done: Any) -> None:
+            try:
+                exception = done.exception()
+                error = str(exception) if exception is not None else ''
+            except Exception as exc:
+                error = str(exc)
+            try:
+                self._invoke_main.emit(
+                    lambda refresh_token=token, message=error: self._dashboard_complete_coordinated_refresh(
+                        refresh_token, message
+                    )
+                )
+            except RuntimeError:
+                return
+
+        future.add_done_callback(_complete)
+
+    def _dashboard_complete_coordinated_refresh(self, token: Any, error: str = '') -> None:
+        """Finish one Dashboard token and launch only the latest queued input state."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None:
+            return
+        if error and coordinator.is_current(token):
+            self.handle_error(error, request_id=token.generation)
+        contexts = getattr(self, '_dashboard_refresh_contexts', {})
+        if isinstance(contexts, dict):
+            contexts.pop(token.generation, None)
+        next_token = coordinator.complete(token)
+        if next_token is None:
+            return
+        next_context = contexts.get(next_token.generation) if isinstance(contexts, dict) else None
+        if isinstance(next_context, dict):
+            self._dashboard_start_coordinated_refresh(next_token, next_context)
+            return
+        coordinator.complete(next_token)
+        if hasattr(self, '_set_shell_refresh_busy'):
+            self._set_shell_refresh_busy(False)
+        self.dashboard_load_btn.setEnabled(True)
 
     def _complete_startup_dashboard_data(
         self,
@@ -1216,15 +1471,23 @@ class DashboardMixin:
             time.sleep(0.05)
         return getattr(self, '_data_service_client', None)
 
-    def run_worker(self, request_id: int, chart_configs_snapshot: Any, refresh_reason: str, allow_non_chart_reuse: bool) -> None:
+    def run_worker(
+        self,
+        request_id: int,
+        chart_configs_snapshot: Any,
+        refresh_reason: str,
+        allow_non_chart_reuse: bool,
+        fetch_tickers: Any = None,
+    ) -> None:
         """Run the shared market data worker."""
+        ticker_snapshot = list(fetch_tickers) if fetch_tickers is not None else self._get_fetch_tickers()
         client = getattr(self, '_data_service_client', None)
         if client is None:
             client = self._dashboard_wait_for_data_service_client()
         if client is not None:
             try:
                 data = client.fetch_dashboard(
-                    self._get_fetch_tickers(),
+                    ticker_snapshot,
                     chart_configs_snapshot,
                     request_id=request_id,
                     refresh_reason=refresh_reason,
@@ -1238,10 +1501,10 @@ class DashboardMixin:
                     self._record_data_health_fallback(
                         'Dashboard',
                         exc,
-                        symbols=self._get_fetch_tickers(),
+                        symbols=ticker_snapshot,
                     )
         worker = DataWorker(
-            self._get_fetch_tickers(),
+            ticker_snapshot,
             chart_configs_snapshot,
             request_id=request_id,
             cancel_check=lambda req=request_id: req != getattr(self, '_dashboard_latest_request_id', 0),
@@ -1250,11 +1513,13 @@ class DashboardMixin:
             allow_non_chart_reuse=allow_non_chart_reuse,
         )
         worker.finished.connect(self.update_ui)
-        worker.error.connect(self.handle_error)
+        worker.error.connect(lambda message, req=request_id: self.handle_error(message, request_id=req))
         worker.run()
 
-    def handle_error(self, error_msg: Any) -> None:
+    def handle_error(self, error_msg: Any, *, request_id: int | None = None) -> None:
         """Handle data refresh errors."""
+        if request_id is not None and int(request_id) != int(getattr(self, '_dashboard_latest_request_id', 0) or 0):
+            return
         logger.error('UI received error: %s', error_msg)
         if hasattr(self, '_record_data_health_exception'):
             self._record_data_health_exception('Dashboard', error_msg, symbols=self._get_fetch_tickers())
@@ -1447,7 +1712,7 @@ class DashboardMixin:
             return
         self._dashboard_set_status(f'Top options volume copied to clipboard for {symbol}', 'positive')
 
-    def _dashboard_apply_non_chart_data(self, data: Any) -> None:
+    def _dashboard_apply_non_chart_data(self, data: Any, *, update_related_pages: bool = True) -> None:
         """Apply shared non-chart dashboard data and related page updates."""
         self.repopulate_portfolio()
         for idx, info in data.get('market', {}).items():
@@ -1462,10 +1727,8 @@ class DashboardMixin:
         self._dashboard_render_target_rows(main_targets)
         portfolio_news = self._dashboard_limited_portfolio_news(data.get('news', []))
         self._populate_news_table(self.news_table, portfolio_news)
-        self._call_if_page_initialized('update_page34', data, page_attr='page34')
-        self._call_if_page_initialized('update_page4', data, page_attr='page4')
-        self._call_if_page_initialized('_p7_fetch_events', page_attr='page7')
-        self._call_if_page_initialized('_p6_update_total', page_attr='page6')
+        if update_related_pages:
+            self._dashboard_queue_related_page_updates(data)
 
     def _dashboard_apply_chart_data(self, symbol: Any, data: Any) -> bool:
         """Apply the selected dashboard symbol chart and options payload."""
@@ -1565,49 +1828,28 @@ class DashboardMixin:
             return False
         return True
 
-    def update_ui(self, data: Any) -> Any:
-        """Update the dashboard and shared pages with new data."""
+    def _dashboard_apply_visible_update(
+        self,
+        data: Any,
+        *,
+        refresh_reason: str,
+        apply_non_chart: bool,
+    ) -> None:
+        """Apply a cached Dashboard payload only while the Dashboard page is visible."""
         request_id = int(data.get('request_id', 0)) if isinstance(data, dict) else 0
-        response_symbol = self._dashboard_response_chart_symbol(data)
-        if not self._dashboard_response_matches_latest_request(request_id, response_symbol):
-            return
-        refresh_meta = data.get('_dashboard_refresh_meta', {}) if isinstance(data, dict) else {}
-        refresh_reason = str(refresh_meta.get('refresh_reason', 'full') or 'full')
-        non_chart_reused = bool(refresh_meta.get('non_chart_reused', False))
-        worker_timings_ms = refresh_meta.get('worker_timings_ms', {})
-        logger.info(
-            'Updating UI with new data (reason=%s, non_chart_reused=%s, worker_timings_ms=%s)',
-            refresh_reason,
-            non_chart_reused,
-            worker_timings_ms,
-        )
-        had_previous_data = bool(getattr(self, 'last_data', None))
-        self.last_data = data
-        symbol = response_symbol or str(getattr(self, 'dashboard_symbol', '') or '').upper().strip()
-        if hasattr(self, '_record_data_health_payload'):
-            self._record_data_health_payload(
-                'Dashboard',
-                data,
-                symbols=[symbol] if symbol else self._get_fetch_tickers(),
-                expected_symbols=self._get_fetch_tickers(),
-            )
-        self._set_data_collection_info(data_sources_from_meta(data, 'yfinance'))
-        apply_non_chart = (not non_chart_reused) or (not had_previous_data)
+        symbol = self._dashboard_response_chart_symbol(data) or str(
+            getattr(self, 'dashboard_symbol', '') or ''
+        ).upper().strip()
         ui_non_chart_ms = 0.0
         if apply_non_chart:
             non_chart_started = time.perf_counter()
             if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
-                self._dashboard_apply_local_portfolio_membership(data)
-                self._call_if_page_initialized('update_page4', data, page_attr='page4')
+                self._dashboard_apply_local_portfolio_membership(data, update_related_pages=False)
             else:
-                self._dashboard_apply_non_chart_data(data)
+                self._dashboard_apply_non_chart_data(data, update_related_pages=False)
             ui_non_chart_ms = (time.perf_counter() - non_chart_started) * 1000.0
-        else:
-            logger.info('Skipping non-chart UI apply for dashboard request %s (reason=%s).', request_id, refresh_reason)
         if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
             self.dashboard_load_btn.setEnabled(True)
-            if hasattr(self, '_set_shell_refresh_busy'):
-                self._set_shell_refresh_busy(False)
             self.dashboard_pending_x_range = None
             self._dashboard_set_status('Portfolio holdings refreshed.', 'positive')
             logger.info(
@@ -1619,17 +1861,83 @@ class DashboardMixin:
         chart_started = time.perf_counter()
         chart_loaded = self._dashboard_apply_chart_data(symbol, data)
         ui_chart_ms = (time.perf_counter() - chart_started) * 1000.0
-        if hasattr(self, '_set_shell_refresh_busy'):
-            self._set_shell_refresh_busy(False)
+        refresh_meta = data.get('_dashboard_refresh_meta', {}) if isinstance(data, dict) else {}
         logger.info(
             'Dashboard UI apply finished for %s (reason=%s, non_chart_reused=%s, chart_loaded=%s, ui_non_chart_ms=%.1f, ui_chart_ms=%.1f)',
             symbol,
             refresh_reason,
-            non_chart_reused,
+            bool(refresh_meta.get('non_chart_reused', False)) if isinstance(refresh_meta, dict) else False,
             chart_loaded,
             ui_non_chart_ms,
             ui_chart_ms,
         )
+
+    def update_ui(self, data: Any) -> Any:
+        """Cache worker results immediately and render only currently visible pages."""
+        request_id = int(data.get('request_id', 0)) if isinstance(data, dict) else 0
+        response_symbol = self._dashboard_response_chart_symbol(data)
+        if not self._dashboard_response_matches_latest_request(request_id, response_symbol):
+            return
+        data = self._dashboard_preserve_newer_portfolio_quotes(data, request_id)
+        refresh_meta = data.get('_dashboard_refresh_meta', {}) if isinstance(data, dict) else {}
+        refresh_reason = str(refresh_meta.get('refresh_reason', 'full') or 'full')
+        non_chart_reused = bool(refresh_meta.get('non_chart_reused', False))
+        worker_timings_ms = refresh_meta.get('worker_timings_ms', {})
+        logger.info(
+            'Updating UI with new data (reason=%s, non_chart_reused=%s, worker_timings_ms=%s)',
+            refresh_reason,
+            non_chart_reused,
+            worker_timings_ms,
+        )
+        had_previous_data = bool(getattr(self, 'last_data', None))
+        previous_data = getattr(self, 'last_data', None)
+        if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
+            data = self._dashboard_merge_membership_payload(previous_data, data)
+        self.last_data = data
+        symbol = response_symbol or str(getattr(self, 'dashboard_symbol', '') or '').upper().strip()
+        if hasattr(self, '_record_data_health_payload'):
+            self._record_data_health_payload(
+                'Dashboard',
+                data,
+                symbols=[symbol] if symbol else self._get_fetch_tickers(),
+                expected_symbols=self._get_fetch_tickers(),
+            )
+        self._set_data_collection_info(data_sources_from_meta(data, 'yfinance'))
+        apply_non_chart = (not non_chart_reused) or (not had_previous_data)
+        if apply_non_chart:
+            if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
+                self._dashboard_sync_portfolio_runtime_view()
+                related_data = self._dashboard_filtered_membership_snapshot(data)
+            else:
+                related_data = data
+            self._dashboard_queue_related_page_updates(related_data)
+        else:
+            logger.info('Skipping non-chart UI apply for dashboard request %s (reason=%s).', request_id, refresh_reason)
+        self.dashboard_load_btn.setEnabled(True)
+        if hasattr(self, '_set_shell_refresh_busy'):
+            self._set_shell_refresh_busy(False)
+        if refresh_reason == _DASHBOARD_MEMBERSHIP_REFRESH_REASON:
+            self.dashboard_pending_x_range = None
+        if not self._dashboard_page_is_visible('page1'):
+            previous_pending = getattr(self, '_dashboard_pending_visible_update', None)
+            pending_non_chart = bool(previous_pending.get('apply_non_chart', False)) if isinstance(previous_pending, dict) else False
+            self._dashboard_pending_visible_update = {
+                'data': data,
+                'refresh_reason': refresh_reason,
+                'apply_non_chart': bool(apply_non_chart or pending_non_chart),
+            }
+            logger.info(
+                'Deferred Dashboard render for hidden page (request=%s, reason=%s).',
+                request_id,
+                refresh_reason,
+            )
+        else:
+            self._dashboard_pending_visible_update = None
+            self._dashboard_apply_visible_update(
+                data,
+                refresh_reason=refresh_reason,
+                apply_non_chart=apply_non_chart,
+            )
         if not had_previous_data:
             self._startup_profiler_stamp('startup_refresh_complete')
             self._complete_startup_dashboard_data('Dashboard Data')

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime
+import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from budget_terminal_app.dependencies import pd
+from budget_terminal_app.dependencies import QTimer, pd
 from budget_terminal_app.persistence import (
     DEFAULT_NAVIGATION_PAGE_ORDER,
     load_charts_options_top_volume_page_settings,
@@ -76,8 +78,11 @@ class _FakeEmptyChartService:
         return {"df": pd.DataFrame()}
 
 
+_FAKE_OPTIONS_TODAY = datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
+
+
 class _FakeOptionsService:
-    EXPIRIES = ("2026-07-17", "2026-08-21")
+    EXPIRIES = tuple((_FAKE_OPTIONS_TODAY + datetime.timedelta(days=days)).isoformat() for days in (30, 75))
 
     def __init__(self, cache_manager: Any) -> None:
         self.cache_manager = cache_manager
@@ -137,11 +142,27 @@ def _build_window(chart_service_cls: Any = _FakeChartService, options_service_cl
         window._chart_data_service = chart_service_cls(cache_manager)
         window._options_data_service = options_service_cls(cache_manager)
         window._p28_fetch_executor = _InlineExecutor()
+        window._p28_initial_load_requested = True
+        window.switch_page(27)
         app.processEvents()
+        window._p28_initial_load_requested = False
     finally:
         WindowLifecycleMixin._schedule_startup_refresh = original_schedule
         WindowLifecycleMixin._start_lazy_warmup = original_warmup
     return app, window
+
+
+def _drain_projection_render(app: Any, window: Any, timeout: float = 3.0) -> Any:
+    deadline = time.monotonic() + timeout
+    handle = None
+    while time.monotonic() < deadline:
+        app.processEvents()
+        handles = getattr(window, '_budget_terminal_batched_render_handles', {})
+        handle = handles.get('projections-option-sections') if isinstance(handles, dict) else None
+        if handle is None or handle.finished:
+            return handle
+        time.sleep(0.001)
+    raise AssertionError('timed out waiting for Projections option sections')
 
 
 def _marker_layers(window: Any, kind: str) -> list[Any]:
@@ -402,6 +423,131 @@ def test_projection_refresh_keeps_completed_view() -> None:
             app.processEvents()
 
 
+def test_hidden_completion_applies_once_without_refetch() -> None:
+    original = load_charts_options_top_volume_page_settings()
+    app = window = None
+    try:
+        save_charts_options_top_volume_page_settings({
+            "symbol": "AAA", "timeframe_label": "1 Day", "type_filter": "calls",
+            "expiration_scope": "all", "splitter_sizes": [5, 3],
+        })
+        app, window = _build_window()
+        apply_calls: list[str] = []
+        original_apply = window._p28_apply_completed_view
+
+        def _tracked_apply(**payload: Any) -> None:
+            apply_calls.append(str(payload.get('ticker') or ''))
+            original_apply(**payload)
+
+        window._p28_apply_completed_view = _tracked_apply
+        window.switch_page(0)
+        app.processEvents()
+        window.p28_symbol_input.setText('HID')
+        window._p28_load(force_refresh=True)
+        app.processEvents()
+
+        _assert(isinstance(window._p28_pending_completed_view, dict), 'hidden completion should cache the latest payload')
+        _assert(window._p28_pending_completed_view['ticker'] == 'HID', 'hidden cache should retain the completed ticker')
+        _assert(window._p28_payload.get('ticker') != 'HID', 'hidden completion must not rebuild the visible payload')
+        _assert(apply_calls == [], 'hidden completion must not apply chart or option panels')
+        chain_calls = len(window._options_data_service.chain_calls)
+
+        window.switch_page(27)
+        deadline = time.monotonic() + 3.0
+        while not apply_calls and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        _drain_projection_render(app, window)
+        _assert(apply_calls == ['HID'], 'returning to Projections should apply the cached result exactly once')
+        _assert(window._p28_payload['ticker'] == 'HID', 'cached result should become the visible payload')
+        _assert(window._p28_pending_completed_view is None, 'cached result should be consumed after rendering')
+        _assert(len(window._options_data_service.chain_calls) == chain_calls, 'showing cached Projections must not refetch options')
+
+        window.switch_page(0)
+        app.processEvents()
+        window.switch_page(27)
+        app.processEvents()
+        _assert(apply_calls == ['HID'], 'later page visits must not reapply an already-consumed completion')
+    finally:
+        save_charts_options_top_volume_page_settings(original)
+        if window is not None:
+            window.close()
+        if app is not None:
+            app.processEvents()
+
+
+def test_expiration_sections_render_in_responsive_batches() -> None:
+    from budget_terminal_app.mixins import charts_options_top_volume as projections_module
+
+    app = window = None
+    heartbeat = None
+    original_render_rows = projections_module.render_table_rows
+    try:
+        app, window = _build_window()
+        window._p28_load(force_refresh=True)
+        app.processEvents()
+        _drain_projection_render(app, window)
+        loaded_records = window._p28_payload.get('records', {})
+        sample_rows = list(next((rows for rows in loaded_records.values() if rows), []))
+        _assert(bool(sample_rows), 'worst-case batching fixture requires at least one prepared option row')
+
+        today = datetime.datetime.now(OPTIONS_MARKET_TIMEZONE).date()
+        expiries = tuple((today + datetime.timedelta(days=14 + index * 7)).isoformat() for index in range(30))
+        config = tuple((expiry, expiry, (datetime.date.fromisoformat(expiry) - today).days) for expiry in expiries)
+        records = {expiry: [dict(row) for row in sample_rows] for expiry in expiries}
+        expiration_map = {expiry: expiry for expiry in expiries}
+        window._p28_set_bucket_config(config)
+        window._p28_render_option_tables('AAA', records, expiration_map)
+        first_handle = getattr(window, '_budget_terminal_batched_render_handles', {}).get('projections-option-sections')
+        _assert(first_handle is not None and first_handle.processed_count == 0, 'section rendering should begin on a later event-loop turn')
+        _drain_projection_render(app, window)
+
+        first_table = window._p28_sections[expiries[0]]['table']
+        _assert(first_table.rowCount() > 0, 'fixture should populate the first expiration table')
+        first_table.setCurrentCell(0, 0)
+        first_table.selectRow(0)
+        selection_key = window._p28_table_selection_key(first_table)
+        selected_filter = window.p28_type_filter
+        window._p28_set_status('Batch status sentinel', 'warning')
+
+        def _slow_render_rows(table: Any, rows: Any) -> None:
+            started = time.perf_counter()
+            while time.perf_counter() - started < 0.001:
+                pass
+            original_render_rows(table, rows)
+
+        projections_module.render_table_rows = _slow_render_rows
+        heartbeat_times: list[float] = []
+        heartbeat = QTimer()
+        heartbeat.setInterval(1)
+        heartbeat.timeout.connect(lambda: heartbeat_times.append(time.perf_counter()))
+        heartbeat.start()
+
+        window._p28_render_option_tables('AAA', records, expiration_map)
+        handle = getattr(window, '_budget_terminal_batched_render_handles', {}).get('projections-option-sections')
+        _assert(handle is not None and handle.processed_count == 0, 'worst-case sections must not render synchronously')
+        _drain_projection_render(app, window)
+        heartbeat.stop()
+
+        _assert(handle.completed and handle.processed_count == len(expiries), 'every expiration section should complete')
+        _assert(handle.batch_count >= math.ceil(len(expiries) / 4), 'section renderer should enforce the four-item slice bound')
+        _assert(len(heartbeat_times) >= 2, 'event-loop heartbeat should run during section rendering')
+        gaps = [right - left for left, right in zip(heartbeat_times, heartbeat_times[1:])]
+        _assert(not gaps or max(gaps) <= 0.2, 'expiration rendering should not stall the event loop for 200 ms')
+        _assert(window.p28_status_label.text() == 'Batch status sentinel', 'batched table work should preserve page status')
+        _assert(window.p28_type_filter == selected_filter, 'batched table work should preserve the selected filter')
+        _assert(window._p28_table_selection_key(first_table) == selection_key, 'batched rebuild should restore table selection')
+        _assert(all(window._p28_sections[expiry]['table'].rowCount() > 0 for expiry in expiries), 'all expiration tables should render')
+    finally:
+        projections_module.render_table_rows = original_render_rows
+        if heartbeat is not None:
+            heartbeat.stop()
+        if window is not None:
+            window.close()
+        if app is not None:
+            app.processEvents()
+
+
 if __name__ == "__main__":
     test_navigation_normalization()
     test_projection_state_migration()
@@ -411,6 +557,8 @@ if __name__ == "__main__":
     test_projection_math_and_quality()
     test_projection_without_chart_close()
     test_projection_refresh_keeps_completed_view()
+    test_hidden_completion_applies_once_without_refetch()
+    test_expiration_sections_render_in_responsive_batches()
     print("Projections page smoke passed.")
     sys.stdout.flush()
     os._exit(0)

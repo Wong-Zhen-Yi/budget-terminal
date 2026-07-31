@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -24,6 +25,45 @@ from budget_terminal_app.mixins.portfolio_setup import PortfolioSetupMixin
 from budget_terminal_app.widgets.pie_chart import PieChartWidget
 
 _QT_APP = None
+
+
+class _ImmediateSignal:
+    def emit(self, callback) -> None:
+        callback()
+
+
+class _PortfolioDataClient:
+    def __init__(self, probe) -> None:
+        self.probe = probe
+        self.quote_generation = 0
+
+    def fetch_portfolio_quotes(self, tickers):
+        self.probe.refresh_count += 1
+        self.quote_generation += 1
+        self.probe.last_quote_tickers = list(tickers)
+        return {
+            "portfolio": {
+                ticker: {"price": float(self.quote_generation * 10 + index + 1), "change": 1.0}
+                for index, ticker in enumerate(tickers)
+            }
+        }
+
+    def fetch_market_caps(self, tickers):
+        self.probe.market_cap_fetch_count += 1
+        self.probe.last_market_cap_tickers = list(tickers)
+        return {ticker: float(index + 1) * 1_000_000_000 for index, ticker in enumerate(tickers)}
+
+    def fetch_month_returns(self, tickers, **_kwargs):
+        self.probe.returns_fetch_count += 1
+        return {ticker: float(index + 1) for index, ticker in enumerate(tickers)}
+
+    def fetch_portfolio_momentum(self, *_args, **_kwargs):
+        self.probe.momentum_fetch_count += 1
+        return {"dates": [], "returns": []}
+
+    def fetch_portfolio_analytics(self, *_args, **_kwargs):
+        self.probe.metrics_refresh_count += 1
+        return {"metrics": {}, "exposure": {}}
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -80,6 +120,8 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
         self.heatmap_refresh_count = 0
         self.cash_balance = 0.0
         self.p4_weight_chart = object()
+        self._invoke_main = _ImmediateSignal()
+        self._data_service_client = _PortfolioDataClient(self)
 
         self.p4_table = QTableWidget(0, len(P4_PORTFOLIO_COLUMNS))
         self.p4_table.setHorizontalHeaderLabels(P4_PORTFOLIO_COLUMNS)
@@ -152,14 +194,41 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
         self.momentum_fetch_count += 1
 
     def _fetch_market_caps(self, tickers=None) -> None:
-        self.market_cap_fetch_count += 1
-        self.last_market_cap_tickers = list(tickers or [])
+        needed = self._p4_get_mktcap_refresh_candidates(tickers)
+        if needed:
+            self.market_cap_fetch_count += 1
+            self.last_market_cap_tickers = list(needed)
+
+    def _update_returns_chart(self, timeframe_key, results) -> None:
+        self.last_return_payload = (timeframe_key, dict(results or {}))
 
     def _p4_metrics_tab_visible(self) -> bool:
         return False
 
     def _p4_schedule_portfolio_metrics_refresh(self) -> None:
         self.metrics_refresh_count += 1
+
+    def _p4_submit_background_task(self, fn) -> None:
+        fn()
+
+
+class _DeferredPortfolioProbe(_PortfolioProbe):
+    def __init__(self) -> None:
+        self.visible = True
+        self.render_count = 0
+        self.pending_tasks = []
+        super().__init__()
+        self.render_count = 0
+
+    def _p4_page_visible(self) -> bool:
+        return self.visible
+
+    def update_page4(self, *args, **kwargs) -> None:
+        self.render_count += 1
+        super().update_page4(*args, **kwargs)
+
+    def _p4_submit_background_task(self, fn) -> None:
+        self.pending_tasks.append(fn)
 
 
 def _symbols(probe: _PortfolioProbe) -> list[str]:
@@ -289,14 +358,15 @@ def test_complete_position_entry_waits_for_manual_refresh() -> None:
     _assert(probe.p4_table.isSortingEnabled(), "normal sorting should resume after entry focus leaves the row")
 
     probe.p4_refresh_holdings_btn.click()
-    _assert(probe.dashboard_membership_count == 1, "manual refresh should update dashboard membership once")
+    _assert(probe.dashboard_membership_count == 0, "manual refresh should not redraw Dashboard")
     _assert(probe.refresh_count == 1, "manual refresh should refresh quotes once")
-    _assert(probe.last_refresh_reason == "portfolio_membership_change", "manual refresh should use the holdings refresh path")
     _assert(probe.market_cap_fetch_count == 1, "manual refresh should refresh market caps once")
     _assert(probe.last_market_cap_tickers == ["AAA", "BBB", "ZZZ"], "manual refresh should cover every active holding")
     _assert(probe.returns_fetch_count == 1, "manual refresh should fetch returns once")
-    _assert(probe.momentum_fetch_count == 1, "manual refresh should fetch momentum once")
-    _assert(probe.metrics_refresh_count == 1, "manual refresh should refresh analytics once")
+    _assert(probe.momentum_fetch_count == 0, "hidden Momentum should stay deferred")
+    _assert(probe.metrics_refresh_count == 0, "hidden Metrics should stay deferred")
+    _assert(probe.p4_refresh_holdings_btn.isEnabled(), "manual refresh should always restore its button")
+    _assert(probe.p4_refresh_holdings_btn.text() == "Refresh Holdings", "manual refresh should restore its label")
 
 
 def test_weight_checkbox_filters_only_requested_views() -> None:
@@ -338,7 +408,7 @@ def test_weight_checkbox_filters_only_requested_views() -> None:
     _assert(probe.p4_stock_pl_label.text() == "Stock P&L:  +$3.00", "stock P&L should include only checked stocks")
     _assert(probe.weight_chart_count == 1, "weight chart should refresh once")
     _assert(probe.heatmap_refresh_count == 1, "heatmap should refresh once")
-    _assert(probe.returns_fetch_count == 1, "Dip Finder should refetch once for the new ticker selection")
+    _assert(probe.returns_fetch_count == 0, "Dip Finder should wait for explicit holdings refresh")
     _assert(probe.momentum_fetch_count == 0, "momentum should not refresh")
     _assert(probe.metrics_refresh_count == 0, "portfolio analytics should not refresh")
     _assert(probe.refresh_count == 0, "quotes should not refresh")
@@ -350,6 +420,156 @@ def test_weight_checkbox_filters_only_requested_views() -> None:
     _assert(abs(heatmap_rows[0]["weight"] - 0.5) < 0.001, "heatmap weight should include cash in its denominator")
     cache_key = probe._p4_returns_cache_key("dip_finder")
     _assert(cache_key[2] == ("AAA",), "Dip Finder cache key should include the enabled ticker signature")
+
+
+def test_holdings_refresh_is_single_flight_and_preserves_dashboard_payload() -> None:
+    _qt_app()
+    probe = _DeferredPortfolioProbe()
+    probe.last_data.update({
+        "charts": {"SPY": "chart"},
+        "chart_options": {"SPY": ["option"]},
+        "news": [{"title": "kept"}],
+        "targets": [{"ticker": "AAA", "target": 50.0}],
+    })
+
+    probe._p4_refresh_holdings()
+    probe._p4_refresh_holdings()
+    _assert(len(probe.pending_tasks) == 1, "same-signature refreshes should share one active task")
+    _assert(not probe.p4_refresh_holdings_btn.isEnabled(), "only the holdings refresh button should be busy")
+
+    probe.tracker_data["AAA"]["shares"] = 2.0
+    probe._p4_refresh_holdings()
+    _assert(len(probe.pending_tasks) == 1, "changed inputs should queue, not start, one replacement task")
+
+    probe.pending_tasks.pop(0)()
+    _assert(len(probe.pending_tasks) == 1, "the latest changed-input request should run after the active task")
+    _assert(probe.last_data["portfolio"]["AAA"]["price"] == 10.0, "superseded quotes must not overwrite current data")
+
+    probe.pending_tasks.pop(0)()
+    _assert(probe.last_data["portfolio"]["AAA"]["price"] == 21.0, "the latest generation should update quotes")
+    _assert(probe.last_data["charts"] == {"SPY": "chart"}, "quote merge should preserve Dashboard charts")
+    _assert(probe.last_data["chart_options"] == {"SPY": ["option"]}, "quote merge should preserve options")
+    _assert(probe.last_data["news"] == [{"title": "kept"}], "quote merge should preserve news")
+    _assert(probe.last_data["targets"] == [{"ticker": "AAA", "target": 50.0}], "quote merge should preserve targets")
+    _assert(probe.p4_refresh_holdings_btn.isEnabled(), "the refresh action should recover after the queued run")
+
+
+def test_hidden_holdings_completion_defers_one_render() -> None:
+    _qt_app()
+    probe = _DeferredPortfolioProbe()
+    probe._p4_refresh_holdings()
+    probe.visible = False
+    probe.pending_tasks.pop(0)()
+
+    _assert(probe.render_count == 0, "a hidden Portfolio page must not render worker results")
+    _assert(probe.last_data["portfolio"]["AAA"]["price"] == 11.0, "hidden completion should still cache current quotes")
+    probe.visible = True
+    probe._p4_render_deferred_subtab()
+    _assert(probe.render_count == 1, "returning to Portfolio should render cached data exactly once")
+    probe._p4_render_deferred_subtab()
+    _assert(probe.render_count == 1, "a clean sub-tab should not render again")
+
+
+def test_portfolio_switch_queues_new_context_and_rejects_old_result() -> None:
+    _qt_app()
+    probe = _DeferredPortfolioProbe()
+    probe._p4_refresh_holdings()
+
+    probe.active_portfolio_id = "secondary"
+    probe.tickers = ["CCC"]
+    probe.tracker_data = {"CCC": {"shares": 3.0, "avg_price": 7.0}}
+    probe.last_data["portfolio"]["CCC"] = {"price": 7.0, "change": 0.0}
+    probe._p4_refresh_holdings()
+
+    probe.pending_tasks.pop(0)()
+    _assert(probe.last_data["portfolio"]["AAA"]["price"] == 10.0, "old portfolio quotes must be rejected")
+    _assert(len(probe.pending_tasks) == 1, "portfolio switch should retain one newest rerun")
+
+    probe.pending_tasks.pop(0)()
+    _assert(probe.last_data["portfolio"]["CCC"]["price"] == 21.0, "new portfolio quotes should apply")
+
+
+def test_shutdown_rejects_late_holdings_completion() -> None:
+    _qt_app()
+    probe = _DeferredPortfolioProbe()
+    previous = dict(probe.last_data["portfolio"]["AAA"])
+    probe._p4_refresh_holdings()
+    probe._refresh_shutdown = True
+    probe._refresh_coordinator.clear()
+
+    probe.pending_tasks.pop(0)()
+
+    _assert(probe.render_count == 0, "shutdown must not render a late holdings result")
+    _assert(probe.last_data["portfolio"]["AAA"] == previous, "shutdown must not merge a late quote payload")
+
+
+def test_momentum_cache_key_tracks_share_changes() -> None:
+    _qt_app()
+    probe = _PortfolioProbe()
+    first_key = probe._p4_momentum_cache_key("1mo")
+    probe.tracker_data["AAA"]["shares"] = 3.0
+    second_key = probe._p4_momentum_cache_key("1mo")
+    _assert(first_key != second_key, "momentum cache keys must change when share counts change")
+
+
+def test_failed_and_empty_holdings_refreshes_recover_cleanly() -> None:
+    _qt_app()
+    failed = _DeferredPortfolioProbe()
+    previous = dict(failed.last_data["portfolio"]["AAA"])
+    failed._data_service_client.fetch_portfolio_quotes = lambda _tickers: {
+        "portfolio": {},
+        "_market_data_meta": {"freshness": "failed", "failure_reason": "offline"},
+    }
+    failed._p4_refresh_holdings()
+    failed.pending_tasks.pop(0)()
+    _assert(failed.last_data["portfolio"]["AAA"] == previous, "failed quotes should preserve previous values")
+    _assert(failed.p4_refresh_holdings_btn.isEnabled(), "failed refresh should restore its button")
+
+    empty = _DeferredPortfolioProbe()
+    empty.tickers = []
+    empty.tracker_data = {}
+    empty._p4_refresh_holdings()
+    empty.pending_tasks.pop(0)()
+    _assert(empty.p4_refresh_holdings_btn.isEnabled(), "empty portfolio refresh should restore its button")
+
+    rejected = _DeferredPortfolioProbe()
+
+    def reject_submission(_work) -> None:
+        raise RuntimeError("executor unavailable")
+
+    rejected._p4_submit_background_task = reject_submission
+    rejected._p4_refresh_holdings()
+    _assert(rejected.p4_refresh_holdings_btn.isEnabled(), "worker submission failure should restore its button")
+    _assert(
+        rejected._refresh_coordinator.active_token("portfolio.holdings") is None,
+        "worker submission failure should clear coordinator state",
+    )
+
+
+def test_large_positions_table_finishes_batched_render() -> None:
+    app = _qt_app()
+    probe = _PortfolioProbe()
+    probe.tickers = [f"T{index:03d}" for index in range(120)]
+    probe.tracker_data = {
+        ticker: {"shares": 1.0, "avg_price": 10.0, "include_in_weight": True}
+        for ticker in probe.tickers
+    }
+    probe.last_data = {
+        "portfolio": {
+            ticker: {"price": float(index + 10), "change": 0.0}
+            for index, ticker in enumerate(probe.tickers)
+        }
+    }
+    probe.update_page4(probe.last_data)
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        handle = getattr(probe, "_budget_terminal_batched_render_handles", {}).get("portfolio.positions.rows")
+        if handle is None:
+            break
+    _assert(probe.p4_table.rowCount() == 120, "batched Portfolio render should create every row")
+    _assert(set(_symbols(probe)) == set(probe.tickers), "batched Portfolio render should preserve every holding")
 
 
 def test_pie_chart_data_excludes_unticked_positions_and_keeps_cash() -> None:
@@ -442,6 +662,13 @@ def main() -> None:
     test_incomplete_position_entry_does_not_fetch_or_move()
     test_complete_position_entry_waits_for_manual_refresh()
     test_weight_checkbox_filters_only_requested_views()
+    test_holdings_refresh_is_single_flight_and_preserves_dashboard_payload()
+    test_hidden_holdings_completion_defers_one_render()
+    test_portfolio_switch_queues_new_context_and_rejects_old_result()
+    test_shutdown_rejects_late_holdings_completion()
+    test_momentum_cache_key_tracks_share_changes()
+    test_failed_and_empty_holdings_refreshes_recover_cleanly()
+    test_large_positions_table_finishes_batched_render()
     test_pie_chart_data_excludes_unticked_positions_and_keeps_cash()
     test_all_positions_unchecked_leaves_cash_at_full_weight()
     test_cash_only_refresh_keeps_stock_pnl()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.workers.ipo_calendar import (
     CompletedIpoWorker,
     IPO_CALENDAR_CACHE_TTL_SECONDS,
@@ -45,6 +46,13 @@ class _P21SortableTableWidgetItem(QTableWidgetItem):
 
 
 class IpoPageMixin:
+    def _p21_page_is_visible(self) -> bool:
+        """Return whether IPO is the active page in the full application."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page21', None)))
+        return True
+
     def init_page21(self) -> None:
         """Build the IPO calendar page UI."""
         self._p21_ipo_rows: list[dict[str, Any]] = []
@@ -60,6 +68,11 @@ class IpoPageMixin:
         self._p21_completed_source = IPO_COMPLETED_SOURCE_NAME
         self._p21_completed_fetched_at = ''
         self._p21_completed_year = datetime.date.today().year
+        self._p21_ipo_pending_payload: tuple[dict[str, Any], bool] | None = None
+        self._p21_completed_pending_payload: tuple[dict[str, Any], bool] | None = None
+        self._p21_ipo_render_pending = False
+        self._p21_completed_render_pending = False
+        self._p21_render_generations = {'upcoming': 0, 'completed': 0}
         self._p21_panel_widgets: list[QFrame] = []
 
         layout = QVBoxLayout(self.page21)
@@ -198,6 +211,24 @@ class IpoPageMixin:
         self._p21_restore_cached_ipo_calendar()
         self._apply_ipo_theme()
 
+    def _p21_on_show(self) -> None:
+        """Apply each newest completed worker payload once after returning to IPO."""
+        completed_pending = getattr(self, '_p21_completed_pending_payload', None)
+        if isinstance(completed_pending, tuple) and len(completed_pending) == 2:
+            self._p21_completed_pending_payload = None
+            self._p21_apply_completed_payload(completed_pending[0], restored=completed_pending[1])
+        elif getattr(self, '_p21_completed_render_pending', False):
+            self._p21_completed_render_pending = False
+            self._p21_render_completed_rows(self._p21_completed_rows)
+
+        upcoming_pending = getattr(self, '_p21_ipo_pending_payload', None)
+        if isinstance(upcoming_pending, tuple) and len(upcoming_pending) == 2:
+            self._p21_ipo_pending_payload = None
+            self._p21_apply_ipo_payload(upcoming_pending[0], restored=upcoming_pending[1])
+        elif getattr(self, '_p21_ipo_render_pending', False):
+            self._p21_ipo_render_pending = False
+            self._p21_render_ipo_rows(self._p21_ipo_rows)
+
     def _p21_restore_cached_ipo_calendar(self) -> bool:
         """Load cached IPO rows without starting a network refresh."""
         cached = IpoCalendarWorker.load_cached_payload(allow_stale=True)
@@ -266,7 +297,7 @@ class IpoPageMixin:
         self._p21_update_refresh_button_state()
         self._p21_apply_ipo_payload(payload, restored=False)
         row_count = len(getattr(self, '_p21_ipo_rows', []) or [])
-        if hasattr(self, 'status_bar'):
+        if self._p21_page_is_visible() and hasattr(self, 'status_bar'):
             self.set_status_text(
                 self.status_bar,
                 f'IPO calendar refreshed: {row_count} row(s).',
@@ -285,7 +316,7 @@ class IpoPageMixin:
             self._p21_set_status(f'Refresh failed; showing stale cache. {text}', 'warning')
         else:
             self._p21_set_status(f'IPO refresh failed: {text}', 'negative')
-        if hasattr(self, 'status_bar'):
+        if self._p21_page_is_visible() and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, f'IPO refresh failed: {text}', status='negative')
 
     def _p21_on_completed_ready(self, payload: Any) -> None:
@@ -322,6 +353,11 @@ class IpoPageMixin:
         self._p21_ipo_loaded = True
         self._p21_ipo_source = str(data.get('source') or IPO_CALENDAR_SOURCE_NAME).strip()
         self._p21_ipo_fetched_at = str(data.get('fetched_at') or '').strip()
+        if not self._p21_page_is_visible():
+            self._p21_ipo_pending_payload = (dict(data), bool(restored))
+            return
+        self._p21_ipo_pending_payload = None
+        self._p21_ipo_render_pending = False
         self._p21_render_ipo_rows(rows)
 
         source = self._p21_ipo_source or IPO_CALENDAR_SOURCE_NAME
@@ -354,6 +390,11 @@ class IpoPageMixin:
         self._p21_completed_source = str(data.get('source') or IPO_COMPLETED_SOURCE_NAME).strip()
         self._p21_completed_fetched_at = str(data.get('fetched_at') or '').strip()
         self._p21_completed_year = int(data.get('year') or self._p21_completed_year or datetime.date.today().year)
+        if not self._p21_page_is_visible():
+            self._p21_completed_pending_payload = (dict(data), bool(restored))
+            return
+        self._p21_completed_pending_payload = None
+        self._p21_completed_render_pending = False
         self._p21_render_completed_rows(rows)
 
         source = self._p21_completed_source or IPO_COMPLETED_SOURCE_NAME
@@ -380,13 +421,11 @@ class IpoPageMixin:
         )
 
     def _p21_render_ipo_rows(self, rows: list[dict[str, Any]]) -> None:
-        table = self.p21_ipo_table
-        table.setSortingEnabled(False)
         normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
         self._p21_ipo_rows = normalized_rows
-        table.setRowCount(len(normalized_rows))
-        for row_index, row in enumerate(normalized_rows):
-            values = (
+
+        def _values(row: dict[str, Any]) -> tuple[str, ...]:
+            return (
                 self._p21_display_date(row),
                 str(row.get('symbol') or '--').upper(),
                 str(row.get('company') or '--'),
@@ -397,7 +436,9 @@ class IpoPageMixin:
                 str(row.get('market_cap') or '--'),
                 str(row.get('revenue') or '--'),
             )
-            sort_values = (
+
+        def _sort_values(row: dict[str, Any], values: tuple[str, ...]) -> tuple[Any, ...]:
+            return (
                 str(row.get('date') or ''),
                 values[1],
                 values[2].casefold(),
@@ -408,26 +449,23 @@ class IpoPageMixin:
                 self._p21_numeric_sort_value(values[7]),
                 self._p21_numeric_sort_value(values[8]),
             )
-            for column, value in enumerate(values):
-                item = _P21SortableTableWidgetItem(value)
-                item.setData(_P21_SORT_ROLE, sort_values[column])
-                if column in (0, 1, 3):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                elif column >= 4:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                else:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(0, Qt.SortOrder.AscendingOrder)
+
+        self._p21_render_table_rows(
+            self.p21_ipo_table,
+            normalized_rows,
+            render_key='upcoming',
+            value_builder=_values,
+            sort_builder=_sort_values,
+            center_columns={0, 1, 3},
+            right_columns=set(range(4, len(_P21_HEADERS))),
+            default_sort_order=Qt.SortOrder.AscendingOrder,
+        )
 
     def _p21_render_completed_rows(self, rows: list[dict[str, Any]]) -> None:
-        table = self.p21_completed_table
-        table.setSortingEnabled(False)
         normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
         self._p21_completed_rows = normalized_rows
-        table.setRowCount(len(normalized_rows))
-        for row_index, row in enumerate(normalized_rows):
+
+        def _values(row: dict[str, Any]) -> tuple[str, ...]:
             values = (
                 self._p21_display_date(row),
                 str(row.get('symbol') or '--').upper(),
@@ -436,7 +474,10 @@ class IpoPageMixin:
                 str(row.get('current_price') or '--'),
                 str(row.get('return') or '--'),
             )
-            sort_values = (
+            return values
+
+        def _sort_values(row: dict[str, Any], values: tuple[str, ...]) -> tuple[Any, ...]:
+            return (
                 str(row.get('date') or ''),
                 values[1],
                 values[2].casefold(),
@@ -444,18 +485,117 @@ class IpoPageMixin:
                 self._p21_numeric_sort_value(values[4]),
                 self._p21_percent_sort_value(values[5]),
             )
+
+        self._p21_render_table_rows(
+            self.p21_completed_table,
+            normalized_rows,
+            render_key='completed',
+            value_builder=_values,
+            sort_builder=_sort_values,
+            center_columns={0, 1},
+            right_columns={3, 4, 5},
+            default_sort_order=Qt.SortOrder.DescendingOrder,
+        )
+
+    def _p21_render_table_rows(
+        self,
+        table: QTableWidget,
+        rows: list[dict[str, Any]],
+        *,
+        render_key: str,
+        value_builder: Any,
+        sort_builder: Any,
+        center_columns: set[int],
+        right_columns: set[int],
+        default_sort_order: Qt.SortOrder,
+    ) -> None:
+        """Render an IPO table in bounded slices and abandon it after navigation."""
+        header = table.horizontalHeader()
+        sorting_enabled = table.isSortingEnabled()
+        sort_column = header.sortIndicatorSection() if sorting_enabled else 0
+        sort_order = header.sortIndicatorOrder() if sorting_enabled else default_sort_order
+        if sort_column < 0:
+            sort_column = 0
+            sort_order = default_sort_order
+        selected_key = None
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_key = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in range(min(3, table.columnCount()))
+            )
+        previous_updates = table.updatesEnabled()
+        previous_signals = table.signalsBlocked()
+        generations = self._p21_render_generations
+        generations[render_key] = int(generations.get(render_key, 0)) + 1
+        generation = generations[render_key]
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal prepared
+            prepared = True
+            table.blockSignals(True)
+            table.setUpdatesEnabled(False)
+            table.setSortingEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
+            values = value_builder(row)
+            sort_values = sort_builder(row, values)
             for column, value in enumerate(values):
                 item = _P21SortableTableWidgetItem(value)
                 item.setData(_P21_SORT_ROLE, sort_values[column])
-                if column in (0, 1):
+                if column in center_columns:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                elif column >= 3:
+                elif column in right_columns:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 else:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, column, item)
-        table.setSortingEnabled(True)
-        table.sortItems(0, Qt.SortOrder.DescendingOrder)
+
+        def _finish() -> None:
+            is_current = generation == self._p21_render_generations.get(render_key)
+            if is_current and not self._p21_page_is_visible():
+                setattr(self, f'_p21_{"ipo" if render_key == "upcoming" else "completed"}_render_pending', True)
+            if not prepared:
+                return
+            table.setSortingEnabled(sorting_enabled)
+            if sorting_enabled and table.rowCount():
+                table.sortItems(sort_column, sort_order)
+            table.blockSignals(previous_signals)
+            table.setUpdatesEnabled(previous_updates)
+            if selected_key is not None:
+                for row_index in range(table.rowCount()):
+                    row_key = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in range(min(3, table.columnCount()))
+                    )
+                    if row_key == selected_key:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not callable(getattr(self, '_is_current_page', None)):
+            _prepare()
+            try:
+                for row_index, row in enumerate(rows):
+                    _apply(row_index, row)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            f'ipo-{render_key}',
+            rows,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p21_render_generations.get(render_key),
+            is_visible=self._p21_page_is_visible,
+        )
 
     def _p21_display_date(self, row: dict[str, Any]) -> str:
         display = str(row.get('date_display') or '').strip()

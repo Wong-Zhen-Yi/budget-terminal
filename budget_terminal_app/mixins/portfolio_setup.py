@@ -85,8 +85,9 @@ class PortfolioSetupMixin:
         """Run one Portfolio background task through the bounded page executor."""
         executor = getattr(self, '_portfolio_task_executor', None)
         if executor is None:
-            max_workers = int(getattr(self, '_PORTFOLIO_TASK_MAX_WORKERS', 4) or 4)
-            executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+            # Portfolio workers can create their own bounded per-ticker pools. Keep
+            # one outer task active so completions cannot pile up on the Qt thread.
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='PortfolioRefresh')
             self._portfolio_task_executor = executor
         executor.submit(fn)
 
@@ -832,16 +833,26 @@ class PortfolioSetupMixin:
 
     def _p4_on_show(self) -> None:
         """Refresh page-4 table widths when the Portfolio tab becomes visible."""
+        # Lazy-page rollback/re-entrancy can briefly expose the provisional
+        # page widget before Portfolio controls exist.  Treat that as not yet
+        # renderable instead of scheduling work against missing tables.
+        if not hasattr(self, 'p4_table'):
+            return
+        if hasattr(self, '_dashboard_apply_pending_page_data'):
+            self._dashboard_apply_pending_page_data('portfolio')
         if getattr(self, '_p4_options_fetch_deferred', False) and hasattr(self, '_reload_options_table'):
             self._p4_options_fetch_deferred = False
             self._reload_options_table()
         self._p4_apply_portfolio_table_widths()
-        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
-            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+        if hasattr(self, '_p4_render_deferred_subtab'):
+            self._p4_render_deferred_subtab()
 
     def _p4_on_content_tab_changed(self, index: int) -> None:
         """Refresh the visible Portfolio sub-tab after a tab switch."""
         if not hasattr(self, 'p4_content_tabs'):
+            return
+        if hasattr(self, '_p4_render_deferred_subtab'):
+            QTimer.singleShot(0, self._p4_render_deferred_subtab)
             return
         widget = self.p4_content_tabs.widget(index)
         if widget is getattr(self, 'p4_positions_page', None):
@@ -891,8 +902,8 @@ class PortfolioSetupMixin:
             self.update_page4(self.last_data)
             fetched = set(self.last_data.get('portfolio', {}).keys())
             active_tickers = set(self._p4_active_tickers()) if hasattr(self, '_p4_active_tickers') else set()
-            if active_tickers - fetched and hasattr(self, 'refresh_data'):
-                self.refresh_data()
+            if active_tickers - fetched and hasattr(self, '_p4_refresh_holdings'):
+                self._p4_refresh_holdings()
         elif hasattr(self, 'p4_table'):
             self.p4_table.blockSignals(True)
             self.p4_table.setRowCount(0)
@@ -1221,8 +1232,15 @@ class PortfolioSetupMixin:
                     normalized[symbol] = float(value)
         cache[cache_key] = normalized
         self._p4_heatmap_return_cache = cache
-        if str(interval_key or '').strip().lower() == str(getattr(self, '_p4_heatmap_interval_key', 'live')).strip().lower():
+        if (
+            str(interval_key or '').strip().lower() == str(getattr(self, '_p4_heatmap_interval_key', 'live')).strip().lower()
+            and getattr(self, '_p4_page_visible', lambda: True)()
+            and getattr(self, '_p4_active_content_key', lambda: 'heatmap')() == 'heatmap'
+        ):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+        else:
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('heatmap')
 
     def _p4_heatmap_sector_lookup(self) -> dict[str, str]:
         """Return a symbol-to-sector lookup based on the app's sector universe."""
@@ -1298,6 +1316,13 @@ class PortfolioSetupMixin:
     def _p4_refresh_portfolio_heatmap_view(self, *, reset_view: bool=False) -> None:
         """Render the active portfolio heatmap from the latest quote snapshot."""
         if not hasattr(self, 'p4_heatmap'):
+            return
+        if hasattr(self, 'p4_content_tabs') and (
+            not getattr(self, '_p4_page_visible', lambda: True)()
+            or getattr(self, '_p4_active_content_key', lambda: 'heatmap')() != 'heatmap'
+        ):
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('heatmap')
             return
         data = getattr(self, 'last_data', None)
         portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
@@ -1723,6 +1748,8 @@ class PortfolioSetupMixin:
         self.p4_refresh_holdings_btn.setMinimumHeight(24)
         self.set_theme_variant(self.p4_refresh_holdings_btn, 'accent')
         self.p4_refresh_holdings_btn.clicked.connect(self._p4_refresh_holdings)
+        self.p4_refresh_holdings_status_lbl = QLabel('')
+        self.set_theme_role(self.p4_refresh_holdings_status_lbl, 'muted')
         export_llm_btn = QPushButton('Export for LLM')
         export_llm_btn.setMinimumHeight(24)
         export_llm_btn.clicked.connect(self._p4_export_for_llm)
@@ -1736,6 +1763,8 @@ class PortfolioSetupMixin:
         stock_header_layout.addWidget(self.p4_remove_stock_btn)
         stock_header_layout.addSpacing(6)
         stock_header_layout.addWidget(self.p4_refresh_holdings_btn)
+        stock_header_layout.addSpacing(6)
+        stock_header_layout.addWidget(self.p4_refresh_holdings_status_lbl)
         stock_header_layout.addSpacing(6)
         stock_header_layout.addWidget(export_llm_btn)
         stock_header_layout.addSpacing(6)

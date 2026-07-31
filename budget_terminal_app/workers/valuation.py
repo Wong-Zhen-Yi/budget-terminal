@@ -497,6 +497,69 @@ def _build_peer_rows(symbol: str, info: dict[str, Any], custom_peers: Any=None) 
     return rows, peer_warnings
 
 
+def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, include_peers: bool=True) -> dict[str, Any]:
+    """Fetch the reusable company-analysis payload used by Valuation and teaching tools."""
+    symbol = str(ticker or '').upper().strip()
+    if not symbol:
+        raise ValueError('Enter a ticker to load valuation data.')
+    normalized_custom_peers = _normalize_peer_symbols(custom_peers, current_symbol=symbol)
+    ticker_obj = yf.Ticker(symbol)
+    info = _load_info(symbol, ticker_obj)
+    price_history = _optional_value('price history', symbol, lambda: ticker_obj.history(period='5y', interval='1mo'))
+    financials = _optional_value('financials', symbol, lambda: ticker_obj.financials)
+    cashflow = _optional_value('cashflow', symbol, lambda: ticker_obj.cashflow)
+    balance_sheet = _optional_value('balance sheet', symbol, lambda: ticker_obj.balance_sheet)
+    quarterly_financials = _optional_value('quarterly financials', symbol, lambda: ticker_obj.quarterly_financials)
+    quarterly_cashflow = _optional_value('quarterly cashflow', symbol, lambda: ticker_obj.quarterly_cashflow)
+    quarterly_balance_sheet = _optional_value('quarterly balance sheet', symbol, lambda: ticker_obj.quarterly_balance_sheet)
+    metrics = _extract_metrics(
+        symbol,
+        info,
+        financials,
+        cashflow,
+        balance_sheet,
+        quarterly_financials,
+        quarterly_cashflow,
+        quarterly_balance_sheet,
+        price_history,
+    )
+    if metrics.get('price') is None:
+        raise ValueError(f"No quote data found for '{symbol}'. Check the ticker symbol.")
+    peer_rows, peer_warnings = _build_peer_rows(symbol, info, normalized_custom_peers) if include_peers else ([], [])
+    trends = _build_trends(financials, cashflow, metrics)
+    suggestions = derive_valuation_suggestions(metrics, trends, metrics.get('basis_type'))
+    suggested_assumptions = {
+        key: detail.get('value')
+        for key, detail in suggestions.get('fields', {}).items()
+        if isinstance(detail, dict) and detail.get('value') is not None
+    }
+    return {
+        'ticker': symbol,
+        'info': info,
+        'metrics': metrics,
+        'price_history': price_history,
+        'financials': financials,
+        'cashflow': cashflow,
+        'balance_sheet': balance_sheet,
+        'quarterly_financials': quarterly_financials,
+        'quarterly_cashflow': quarterly_cashflow,
+        'quarterly_balance_sheet': quarterly_balance_sheet,
+        'trends': trends,
+        'valuation_suggestions': suggestions,
+        'assumption_suggestions': suggestions,
+        'suggested_assumptions': suggested_assumptions,
+        'peer_rows': peer_rows,
+        'peer_warnings': peer_warnings,
+        'fetched_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
+        'sources': {
+            'quote': 'yfinance quote/history',
+            'statements': 'yfinance financial statements',
+            'computed': 'Computed from quote, statements, and assumptions',
+            'suggestions': 'Consecutive annual statements and quote metadata; required return is a transparent heuristic',
+        },
+    }
+
+
 class ValuationWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -508,64 +571,8 @@ class ValuationWorker(QObject):
 
     def run(self) -> None:
         try:
-            if not self.ticker:
-                self.error.emit('Enter a ticker to load valuation data.')
-                return
-            ticker_obj = yf.Ticker(self.ticker)
-            info = _load_info(self.ticker, ticker_obj)
-            price_history = _optional_value('price history', self.ticker, lambda: ticker_obj.history(period='5y', interval='1mo'))
-            financials = _optional_value('financials', self.ticker, lambda: ticker_obj.financials)
-            cashflow = _optional_value('cashflow', self.ticker, lambda: ticker_obj.cashflow)
-            balance_sheet = _optional_value('balance sheet', self.ticker, lambda: ticker_obj.balance_sheet)
-            quarterly_financials = _optional_value('quarterly financials', self.ticker, lambda: ticker_obj.quarterly_financials)
-            quarterly_cashflow = _optional_value('quarterly cashflow', self.ticker, lambda: ticker_obj.quarterly_cashflow)
-            quarterly_balance_sheet = _optional_value('quarterly balance sheet', self.ticker, lambda: ticker_obj.quarterly_balance_sheet)
-            metrics = _extract_metrics(
-                self.ticker,
-                info,
-                financials,
-                cashflow,
-                balance_sheet,
-                quarterly_financials,
-                quarterly_cashflow,
-                quarterly_balance_sheet,
-                price_history,
-            )
-            if metrics.get('price') is None:
-                self.error.emit(f"No quote data found for '{self.ticker}'. Check the ticker symbol.")
-                return
-            peer_rows, peer_warnings = _build_peer_rows(self.ticker, info, self.custom_peers)
-            trends = _build_trends(financials, cashflow, metrics)
-            suggestions = derive_valuation_suggestions(metrics, trends, metrics.get('basis_type'))
-            suggested_assumptions = {
-                key: detail.get('value')
-                for key, detail in suggestions.get('fields', {}).items()
-                if isinstance(detail, dict) and detail.get('value') is not None
-            }
-            self.finished.emit({
-                'ticker': self.ticker,
-                'info': info,
-                'metrics': metrics,
-                'price_history': price_history,
-                'financials': financials,
-                'cashflow': cashflow,
-                'balance_sheet': balance_sheet,
-                'quarterly_financials': quarterly_financials,
-                'quarterly_cashflow': quarterly_cashflow,
-                'quarterly_balance_sheet': quarterly_balance_sheet,
-                'trends': trends,
-                'valuation_suggestions': suggestions,
-                'assumption_suggestions': suggestions,
-                'suggested_assumptions': suggested_assumptions,
-                'peer_rows': peer_rows,
-                'peer_warnings': peer_warnings,
-                'fetched_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
-                'sources': {
-                    'quote': 'yfinance quote/history',
-                    'statements': 'yfinance financial statements',
-                    'computed': 'Computed from quote, statements, and assumptions',
-                    'suggestions': 'Consecutive annual statements and quote metadata; required return is a transparent heuristic',
-                },
-            })
+            self.finished.emit(fetch_company_analysis_payload(self.ticker, self.custom_peers, include_peers=True))
+        except ValueError as exc:
+            self.error.emit(str(exc))
         except Exception as exc:
             self.error.emit(f'Error fetching valuation data: {exc}')

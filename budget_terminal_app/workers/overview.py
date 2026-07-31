@@ -119,16 +119,19 @@ class TradingVolumeWorker(QObject):
                 'name': str(quote.get('longName') or quote.get('shortName') or quote.get('displayName') or symbol),
                 'sector': str(quote.get('sectorDisp') or quote.get('sector') or 'N/A'),
                 'market_cap': market_cap,
+                'market_cap_estimate_history': [],
                 'one_day_dollar_volume': one_day_dollar_volume,
                 'five_day_avg_dollar_volume': price * avg_share_volume if avg_share_volume else None,
                 'thirty_day_avg_dollar_volume': None,
                 'ytd_avg_dollar_volume': None,
                 'one_year_avg_dollar_volume': None,
+                'three_year_avg_dollar_volume': None,
                 'one_day_price_return_pct': self._price_return_pct(previous_close, price),
                 'five_day_price_return_pct': None,
                 'thirty_day_price_return_pct': None,
                 'ytd_price_return_pct': None,
                 'one_year_price_return_pct': None,
+                'three_year_price_return_pct': None,
                 '_avg_share_volume': avg_share_volume,
                 '_price': price,
                 '_previous_close': previous_close,
@@ -139,11 +142,12 @@ class TradingVolumeWorker(QObject):
         symbols = [str(row.get('ticker') or '').strip() for row in rows if str(row.get('ticker') or '').strip()]
         if not symbols:
             return
+        history_start = (pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=3)).date()
         try:
             with YF_LOCK:
                 history = yf.download(
                     tickers=symbols,
-                    period='1y',
+                    start=history_start,
                     interval='1d',
                     group_by='ticker',
                     auto_adjust=False,
@@ -162,6 +166,7 @@ class TradingVolumeWorker(QObject):
                     continue
                 if value is not None:
                     row[key] = value
+            row['market_cap_estimate_history'] = self._market_cap_estimate_history(frame, row.get('market_cap'))
 
     def _history_frame_for_symbol(self, history: Any, symbol: str, symbol_count: int) -> Any:
         if history is None or getattr(history, 'empty', True):
@@ -188,11 +193,13 @@ class TradingVolumeWorker(QObject):
             'thirty_day_avg_dollar_volume': None,
             'ytd_avg_dollar_volume': None,
             'one_year_avg_dollar_volume': None,
+            'three_year_avg_dollar_volume': None,
             'one_day_price_return_pct': None,
             'five_day_price_return_pct': None,
             'thirty_day_price_return_pct': None,
             'ytd_price_return_pct': None,
             'one_year_price_return_pct': None,
+            'three_year_price_return_pct': None,
         }
         if frame is None or getattr(frame, 'empty', True):
             return metrics
@@ -216,22 +223,59 @@ class TradingVolumeWorker(QObject):
                 dollar_volume = dollar_volume[pd.notna(dollar_volume.index)]
             ytd_start = pd.Timestamp(datetime.date.today().replace(month=1, day=1))
             one_year_start = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=365))
+            three_year_start = pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=3)
             if dollar_volume is not None and not getattr(dollar_volume, 'empty', True):
                 metrics['five_day_avg_dollar_volume'] = self._mean_dollar_volume(dollar_volume.tail(5))
                 metrics['thirty_day_avg_dollar_volume'] = self._mean_dollar_volume(dollar_volume.tail(30))
                 metrics['ytd_avg_dollar_volume'] = self._mean_dollar_volume(dollar_volume[dollar_volume.index >= ytd_start])
                 metrics['one_year_avg_dollar_volume'] = self._mean_dollar_volume(dollar_volume[dollar_volume.index >= one_year_start])
+                metrics['three_year_avg_dollar_volume'] = self._mean_dollar_volume(
+                    dollar_volume[dollar_volume.index >= three_year_start]
+                )
             if not getattr(close, 'empty', True):
                 metrics['one_day_price_return_pct'] = self._trailing_price_return_pct(close, 1)
                 metrics['five_day_price_return_pct'] = self._trailing_price_return_pct(close, 5)
                 metrics['thirty_day_price_return_pct'] = self._trailing_price_return_pct(close, 30)
                 ytd_close = close[close.index >= ytd_start]
                 one_year_close = close[close.index >= one_year_start]
+                three_year_close = close[close.index >= three_year_start]
                 metrics['ytd_price_return_pct'] = self._window_price_return_pct(ytd_close)
                 metrics['one_year_price_return_pct'] = self._window_price_return_pct(one_year_close)
+                metrics['three_year_price_return_pct'] = self._window_price_return_pct(three_year_close)
         except Exception:
             return metrics
         return metrics
+
+    def _market_cap_estimate_history(self, frame: Any, current_market_cap: Any) -> list[dict[str, Any]]:
+        """Scale historical closes to today's market cap using a constant-share estimate."""
+        market_cap = self._first_number(current_market_cap)
+        if frame is None or getattr(frame, 'empty', True) or market_cap is None or market_cap <= 0:
+            return []
+        try:
+            close = pd.to_numeric(frame.get('Close'), errors='coerce').dropna()
+            if getattr(close, 'empty', True):
+                return []
+            close.index = pd.DatetimeIndex(pd.to_datetime(close.index, errors='coerce')).tz_localize(None)
+            close = close[pd.notna(close.index)]
+            close = close[close > 0]
+            close = close[~close.index.duplicated(keep='last')].sort_index()
+            if getattr(close, 'empty', True):
+                return []
+            latest_close = float(close.iloc[-1])
+            if not math.isfinite(latest_close) or latest_close <= 0:
+                return []
+            estimates: list[dict[str, Any]] = []
+            for timestamp, close_value in close.items():
+                value = market_cap * float(close_value) / latest_close
+                if not math.isfinite(value) or value <= 0:
+                    continue
+                estimates.append({
+                    'date': pd.Timestamp(timestamp).date().isoformat(),
+                    'value': float(value),
+                })
+            return estimates
+        except Exception:
+            return []
 
     def _trailing_price_return_pct(self, close: Any, periods: int) -> float | None:
         if getattr(close, 'empty', True):

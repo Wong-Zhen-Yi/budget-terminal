@@ -213,6 +213,61 @@ class DataWorker(QObject):
                 portfolio_info[symbol] = payload
         return portfolio_info
 
+    def fetch_portfolio_quotes(self) -> dict[str, Any]:
+        """Return only current quote snapshots for the requested portfolio symbols."""
+        symbols = self._dedupe_symbols(self.tickers)
+        if not symbols:
+            return attach_market_data_result(
+                {
+                    'portfolio': {},
+                    '_portfolio_quote_meta': {'fetch_ticker_signature': []},
+                },
+                meta=make_market_data_meta(source='yfinance', freshness='fresh'),
+                errors=[],
+            )
+        started = time.perf_counter()
+        try:
+            batch_data = self._download_batch_data(symbols)
+        except Exception as exc:
+            logger.info('Portfolio quote batch failed; trying per-symbol history: %s', exc)
+            batch_data = pd.DataFrame()
+        portfolio_info = self._collect_portfolio_quotes(batch_data, symbols)
+        missing = [symbol for symbol in symbols if symbol not in portfolio_info]
+        errors = [
+            make_market_data_error(
+                source='yfinance',
+                reason=f'Quote data was unavailable for {symbol}.',
+                operation='portfolio_quotes',
+                symbol=symbol,
+            )
+            for symbol in missing
+        ]
+        if not portfolio_info:
+            freshness = 'failed'
+            failure_reason = 'Holdings quote data could not be loaded.'
+        elif missing:
+            freshness = 'partial'
+            failure_reason = f'{len(missing)} holding quote(s) were unavailable.'
+        else:
+            freshness = 'fresh'
+            failure_reason = ''
+        return attach_market_data_result(
+            {
+                'portfolio': portfolio_info,
+                '_portfolio_quote_meta': {
+                    'fetch_ticker_signature': symbols,
+                    'missing_tickers': missing,
+                    'elapsed_ms': round((time.perf_counter() - started) * 1000.0, 1),
+                },
+            },
+            meta=make_market_data_meta(
+                source='yfinance',
+                freshness=freshness,
+                failure_reason=failure_reason,
+            ),
+            errors=errors,
+        )
+
     def _collect_market_quotes(self, batch_data: Any, all_symbols: list[str]) -> dict[str, dict[str, float]]:
         market_data = {}
         idx_map = {'SPY': 'SPY', 'DX-Y.NYB': 'DXY', '^VIX': 'VIX', 'GLD': 'GLD', 'CL=F': 'WTI'}

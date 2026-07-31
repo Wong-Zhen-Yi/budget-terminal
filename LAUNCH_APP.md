@@ -42,7 +42,8 @@ This creates a local Python environment for the app.
 Run this command once:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
 ```
 
 This downloads and installs everything Budget Terminal needs.
@@ -71,7 +72,8 @@ python budget_terminal.py
 - If the app says a dependency is missing, run this again:
 
   ```powershell
-  .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+  .\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+  .\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
   ```
 
 - If the app does not open, launch it from PowerShell instead of double-clicking files. PowerShell will keep the error message visible.

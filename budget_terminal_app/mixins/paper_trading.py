@@ -14,6 +14,7 @@ from budget_terminal_app.paper_trading import (
     format_share_quantity,
 )
 from budget_terminal_app.services.chart_data import ChartDataService
+from budget_terminal_app.widgets.batched_render import run_batched
 
 
 P31_SYMBOL_CHART_RANGES = {
@@ -52,6 +53,18 @@ class PaperTradingMixin:
         self._p31_chart_frame = None
         self._p31_chart_data_service = None
         self._p31_owns_chart_data_service = False
+        self._p31_view_request_seq = 0
+        self._p31_view_refresh_running = False
+        self._p31_view_refresh_context = None
+        self._p31_view_refresh_pending = None
+        self._p31_view_cache = {}
+        self._p31_table_render_generations: dict[int, int] = {}
+        self._p31_accounts_request_seq = 0
+        self._p31_accounts_refresh_running = False
+        self._p31_accounts_refresh_context = ""
+        self._p31_accounts_refresh_pending: str | None = None
+        self._p31_accounts: list[dict[str, Any]] = []
+        self._p31_active_account_snapshot: dict[str, Any] | None = None
 
         page_layout.addWidget(self._p31_build_header())
         page_layout.addWidget(self._p31_build_empty_state())
@@ -580,6 +593,7 @@ class PaperTradingMixin:
         tabs.addTab(self.p31_fills_table, "Fills")
         tabs.addTab(self._p31_build_journal_tab(), "Journal")
         tabs.addTab(self._p31_build_performance_tab(), "Performance")
+        tabs.currentChanged.connect(lambda _index: self._p31_refresh_all())
         return tabs
 
     def _p31_build_journal_tab(self) -> QWidget:
@@ -647,7 +661,7 @@ class PaperTradingMixin:
             self._p31_engine_timer.start()
             self._p31_mark_timer.start()
             self._p31_run_engine_cycle(mark=True, force=True)
-        self._p31_refresh_all()
+        self._p31_refresh_accounts(self._p31_active_account_id)
 
     def _p31_stop(self) -> None:
         for timer_name in ("_p31_engine_timer", "_p31_mark_timer"):
@@ -655,6 +669,9 @@ class PaperTradingMixin:
             if timer is not None:
                 timer.stop()
         self._p31_chart_request_id = int(getattr(self, "_p31_chart_request_id", 0)) + 1
+        self._p31_accounts_request_seq = int(getattr(self, "_p31_accounts_request_seq", 0)) + 1
+        self._p31_accounts_refresh_running = False
+        self._p31_accounts_refresh_pending = None
         executor = getattr(self, "_p31_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -666,8 +683,83 @@ class PaperTradingMixin:
             self._p31_owns_chart_data_service = False
 
     def _p31_refresh_accounts(self, select_account_id: str | None = None) -> None:
-        accounts = self._p31_store.list_accounts(include_archived=True)
         desired = str(select_account_id or self._p31_active_account_id or "")
+        if getattr(self, "_p31_accounts_refresh_running", False):
+            active_desired = str(getattr(self, "_p31_accounts_refresh_context", "") or "")
+            if desired == active_desired:
+                self._p31_accounts_refresh_pending = None
+            elif desired != getattr(self, "_p31_accounts_refresh_pending", None):
+                self._p31_accounts_refresh_pending = desired
+            return
+        self._p31_start_accounts_refresh(desired)
+
+    def _p31_start_accounts_refresh(self, desired: str) -> None:
+        """Load the Paper account selector without blocking Qt's event loop."""
+        executor = getattr(self, "_p31_executor", None)
+        dispatcher = getattr(self, "_invoke_main", None)
+        has_window_runtime = executor is not None and callable(getattr(dispatcher, "emit", None))
+        self._p31_accounts_request_seq = int(getattr(self, "_p31_accounts_request_seq", 0)) + 1
+        request_id = self._p31_accounts_request_seq
+        self._p31_accounts_refresh_running = True
+        self._p31_accounts_refresh_context = str(desired or "")
+
+        def _work() -> list[dict[str, Any]]:
+            return [dict(account) for account in self._p31_store.list_accounts(include_archived=True)]
+
+        if not has_window_runtime:
+            try:
+                accounts = _work()
+                error = ""
+            except Exception as exc:
+                accounts = []
+                error = str(exc)
+            self._p31_complete_accounts_refresh(request_id, desired, accounts, error)
+            return
+
+        future = executor.submit(_work)
+
+        def _complete(done: Any) -> None:
+            try:
+                accounts = done.result()
+                error = ""
+            except Exception as exc:
+                accounts = []
+                error = str(exc)
+            try:
+                self._invoke_main.emit(
+                    lambda rid=request_id, selected=desired, rows=accounts, message=error: self._p31_complete_accounts_refresh(
+                        rid, selected, rows, message
+                    )
+                )
+            except RuntimeError:
+                return
+
+        future.add_done_callback(_complete)
+
+    def _p31_complete_accounts_refresh(
+        self,
+        request_id: int,
+        desired: str,
+        accounts: Any,
+        error: str,
+    ) -> None:
+        if request_id != int(getattr(self, "_p31_accounts_request_seq", 0)):
+            return
+        self._p31_accounts_refresh_running = False
+        self._p31_accounts_refresh_context = ""
+        pending = getattr(self, "_p31_accounts_refresh_pending", None)
+        self._p31_accounts_refresh_pending = None
+        if pending is not None and pending != desired:
+            self._p31_start_accounts_refresh(pending)
+            return
+        if error:
+            self._p31_set_status(f"Paper accounts could not be refreshed: {error}", "negative")
+            return
+        self._p31_apply_accounts(accounts, desired)
+
+    def _p31_apply_accounts(self, accounts: Any, desired: str) -> None:
+        accounts = [dict(account) for account in list(accounts or []) if isinstance(account, dict)]
+        self._p31_accounts = accounts
         self.p31_account_combo.blockSignals(True)
         self.p31_account_combo.clear()
         selected_index = -1
@@ -683,6 +775,10 @@ class PaperTradingMixin:
         self.p31_account_combo.setCurrentIndex(selected_index)
         self.p31_account_combo.blockSignals(False)
         self._p31_active_account_id = str(self.p31_account_combo.currentData() or "")
+        self._p31_active_account_snapshot = next(
+            (dict(account) for account in accounts if str(account.get("id") or "") == self._p31_active_account_id),
+            None,
+        )
         has_accounts = bool(accounts)
         self.p31_empty_state.setVisible(not has_accounts)
         self.p31_workspace.setVisible(has_accounts)
@@ -692,18 +788,20 @@ class PaperTradingMixin:
 
     def _p31_on_account_changed(self, _index: int) -> None:
         self._p31_active_account_id = str(self.p31_account_combo.currentData() or "")
+        self._p31_active_account_snapshot = next(
+            (
+                dict(account)
+                for account in getattr(self, "_p31_accounts", [])
+                if str(account.get("id") or "") == self._p31_active_account_id
+            ),
+            None,
+        )
         self._p31_clear_journal_editor()
         self._p31_update_account_controls()
         self._p31_refresh_all()
 
     def _p31_update_account_controls(self) -> None:
-        account_id = str(getattr(self, "_p31_active_account_id", "") or "")
-        account = None
-        if account_id:
-            try:
-                account = self._p31_store.get_account(account_id)
-            except ValueError:
-                account = None
+        account = getattr(self, "_p31_active_account_snapshot", None)
         archived = bool(account and account["status"] == "archived")
         self.p31_edit_account_btn.setEnabled(account is not None)
         self.p31_archive_account_btn.setEnabled(account is not None)
@@ -967,7 +1065,11 @@ class PaperTradingMixin:
         )
         self._p31_journal_entry_id = entry["id"]
         self._p31_set_status("Journal entry saved.", "positive")
-        self._p31_refresh_journal()
+        if self._p31_has_window_refresh_runtime():
+            self._p31_refresh_all()
+        else:
+            rows = [dict(row) for row in self._p31_store.list_journal(self._p31_active_account_id)]
+            self._p31_refresh_journal(rows)
 
     def _p31_clear_journal_editor(self) -> None:
         self._p31_journal_entry_id = ""
@@ -995,29 +1097,158 @@ class PaperTradingMixin:
         self.p31_journal_tags.setText(", ".join(map(str, tags)))
 
     def _p31_refresh_all(self) -> None:
+        """Refresh the summary and visible Paper tab without reading SQLite on the UI thread."""
         if not getattr(self, "_p31_active_account_id", ""):
             return
+        account_id = str(self._p31_active_account_id)
+        tab_index = int(self.p31_tabs.currentIndex()) if hasattr(self, "p31_tabs") else 0
+        order_filter = str(self.p31_order_filter.currentData() or "all") if hasattr(self, "p31_order_filter") else "all"
+        context = (account_id, tab_index, order_filter)
+        cached = getattr(self, "_p31_view_cache", {}).get(context)
+        if isinstance(cached, dict):
+            self._p31_apply_view_snapshot(context, cached)
+        if getattr(self, "_p31_view_refresh_running", False):
+            if context != getattr(self, "_p31_view_refresh_context", None):
+                self._p31_view_refresh_pending = context
+            return
+        self._p31_start_view_refresh(context)
+
+    def _p31_has_window_refresh_runtime(self) -> bool:
+        """Return whether the full window can marshal refresh results to Qt's UI thread."""
+        dispatcher = getattr(self, "_invoke_main", None)
+        return callable(getattr(dispatcher, "emit", None)) and callable(
+            getattr(self, "_is_current_page", None)
+        )
+
+    def _p31_page_is_visible(self) -> bool:
+        """Treat isolated widget probes as visible while preserving real-window guards."""
+        is_current_page = getattr(self, "_is_current_page", None)
+        if not callable(is_current_page):
+            return True
+        return bool(is_current_page(getattr(self, "page31", None)))
+
+    def _p31_start_view_refresh(self, context: tuple[str, int, str]) -> None:
+        executor = getattr(self, "_p31_executor", None)
+        has_window_runtime = self._p31_has_window_refresh_runtime()
+        if executor is None and has_window_runtime:
+            return
+        self._p31_view_request_seq += 1
+        request_id = self._p31_view_request_seq
+        self._p31_view_refresh_running = True
+        self._p31_view_refresh_context = context
+
+        def _work() -> dict[str, Any]:
+            account_id, tab_index, order_filter = context
+            snapshot: dict[str, Any] = {
+                "summary": dict(self._p31_store.account_summary(account_id)),
+                "tab_index": tab_index,
+            }
+            if tab_index == 0:
+                snapshot["positions"] = [dict(row) for row in self._p31_store.list_positions(account_id)]
+            elif tab_index == 1:
+                snapshot["orders"] = [dict(row) for row in self._p31_store.list_orders(account_id, status=order_filter)]
+            elif tab_index == 2:
+                snapshot["fills"] = [dict(row) for row in self._p31_store.list_fills(account_id)]
+            elif tab_index == 3:
+                snapshot["journal"] = [dict(row) for row in self._p31_store.list_journal(account_id)]
+            elif tab_index == 4:
+                snapshot["performance"] = [dict(row) for row in self._p31_store.list_equity_snapshots(account_id)]
+            return snapshot
+
+        if not has_window_runtime:
+            try:
+                payload = _work()
+                error = ""
+            except Exception as exc:
+                payload = None
+                error = str(exc)
+            self._p31_complete_view_refresh(request_id, context, payload, error)
+            return
+
+        future = executor.submit(_work)
+
+        def _complete(done: Any) -> None:
+            try:
+                payload = done.result()
+                error = ""
+            except Exception as exc:
+                payload = None
+                error = str(exc)
+            try:
+                self._invoke_main.emit(
+                    lambda rid=request_id, ctx=context, data=payload, message=error: self._p31_complete_view_refresh(
+                        rid, ctx, data, message
+                    )
+                )
+            except RuntimeError:
+                return
+
+        future.add_done_callback(_complete)
+
+    def _p31_complete_view_refresh(
+        self,
+        request_id: int,
+        context: tuple[str, int, str],
+        payload: Any,
+        error: str,
+    ) -> None:
+        if request_id != getattr(self, "_p31_view_request_seq", 0):
+            return
+        self._p31_view_refresh_running = False
+        self._p31_view_refresh_context = None
+        if isinstance(payload, dict):
+            self._p31_view_cache[context] = payload
+            self._p31_apply_view_snapshot(context, payload)
+        elif error and self._p31_page_is_visible():
+            self._p31_set_status(f"Paper view refresh failed: {error}", "negative")
+        pending = self._p31_view_refresh_pending
+        self._p31_view_refresh_pending = None
+        if pending is not None and pending != context:
+            self._p31_start_view_refresh(pending)
+
+    def _p31_current_view_context(self) -> tuple[str, int, str]:
+        return (
+            str(getattr(self, "_p31_active_account_id", "") or ""),
+            int(self.p31_tabs.currentIndex()) if hasattr(self, "p31_tabs") else 0,
+            str(self.p31_order_filter.currentData() or "all") if hasattr(self, "p31_order_filter") else "all",
+        )
+
+    def _p31_apply_view_snapshot(self, context: tuple[str, int, str], payload: dict[str, Any]) -> None:
+        if context != self._p31_current_view_context():
+            return
+        if not self._p31_page_is_visible():
+            return
         try:
-            self._p31_refresh_summary()
-            self._p31_refresh_positions()
-            self._p31_refresh_orders()
-            self._p31_refresh_fills()
-            self._p31_refresh_journal()
-            self._p31_refresh_performance()
+            self._p31_refresh_summary(payload.get("summary", {}))
+            tab_index = int(payload.get("tab_index", context[1]))
+            if tab_index == 0:
+                self._p31_refresh_positions(payload.get("positions", []))
+            elif tab_index == 1:
+                self._p31_refresh_orders(rows=payload.get("orders", []))
+            elif tab_index == 2:
+                self._p31_refresh_fills(payload.get("fills", []))
+            elif tab_index == 3:
+                self._p31_refresh_journal(payload.get("journal", []))
+            elif tab_index == 4:
+                self._p31_refresh_performance(payload.get("performance", []))
         except Exception as exc:
             logger.exception("Paper page refresh failed.")
             self._p31_set_status(f"Paper view refresh failed: {exc}", "negative")
 
-    def _p31_refresh_summary(self) -> None:
-        summary = self._p31_store.account_summary(self._p31_active_account_id)
+    def _p31_refresh_summary(self, summary: Any = None) -> None:
+        if summary is None:
+            self._p31_refresh_all()
+            return
         for key, label in self.p31_summary_labels.items():
             value = float(summary.get(key, 0.0) or 0.0)
             label.setText(f"${value:,.2f}")
             if key.endswith("pnl"):
                 self.set_theme_role(label, "positive" if value > 0 else "negative" if value < 0 else "section_title")
 
-    def _p31_refresh_positions(self) -> None:
-        rows = self._p31_store.list_positions(self._p31_active_account_id)
+    def _p31_refresh_positions(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p31_refresh_all()
+            return
         values = []
         for item in rows:
             quantity = float(item["quantity"])
@@ -1035,11 +1266,12 @@ class PaperTradingMixin:
             ])
         self._p31_fill_table(self.p31_positions_table, values)
 
-    def _p31_refresh_orders(self, *_: Any) -> None:
+    def _p31_refresh_orders(self, *_: Any, rows: Any = None) -> None:
         if not getattr(self, "_p31_active_account_id", ""):
             return
-        status = str(self.p31_order_filter.currentData() or "all")
-        rows = self._p31_store.list_orders(self._p31_active_account_id, status=status)
+        if rows is None:
+            self._p31_refresh_all()
+            return
         values = [[
             self._p31_format_time(item["submitted_at"]),
             item["symbol"],
@@ -1053,16 +1285,17 @@ class PaperTradingMixin:
             item["rejection_reason"] or item["last_evaluation"] or "—",
             item["id"],
         ] for item in rows]
-        self._p31_fill_table(self.p31_orders_table, values)
-        self._p31_update_cancel_button()
+        self._p31_fill_table(self.p31_orders_table, values, on_complete=self._p31_update_cancel_button)
 
     def _p31_update_cancel_button(self) -> None:
         selected = self.p31_orders_table.currentRow()
         status_item = self.p31_orders_table.item(selected, 8) if selected >= 0 else None
         self.p31_cancel_order_btn.setEnabled(bool(status_item and status_item.text() == "Pending"))
 
-    def _p31_refresh_fills(self) -> None:
-        rows = self._p31_store.list_fills(self._p31_active_account_id)
+    def _p31_refresh_fills(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p31_refresh_all()
+            return
         values = [[
             self._p31_format_time(item["filled_at"]),
             item["symbol"],
@@ -1077,8 +1310,10 @@ class PaperTradingMixin:
         ] for item in rows]
         self._p31_fill_table(self.p31_fills_table, values)
 
-    def _p31_refresh_journal(self) -> None:
-        rows = self._p31_store.list_journal(self._p31_active_account_id)
+    def _p31_refresh_journal(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p31_refresh_all()
+            return
         values = []
         for item in rows:
             try:
@@ -1094,8 +1329,10 @@ class PaperTradingMixin:
             ])
         self._p31_fill_table(self.p31_journal_table, values)
 
-    def _p31_refresh_performance(self) -> None:
-        rows = self._p31_store.list_equity_snapshots(self._p31_active_account_id)
+    def _p31_refresh_performance(self, rows: Any = None) -> None:
+        if rows is None:
+            self._p31_refresh_all()
+            return
         self.p31_performance_plot.clear()
         if not rows:
             self.p31_performance_hint.setText("No equity snapshots yet. Submit an order or refresh account marks.")
@@ -1113,14 +1350,80 @@ class PaperTradingMixin:
             f"{len(rows)} snapshot(s) · latest equity ${values[-1]:,.2f} · stale marks {stale}"
         )
 
-    @staticmethod
-    def _p31_fill_table(table: QTableWidget, rows: list[list[str]]) -> None:
-        table.setUpdatesEnabled(False)
-        table.setRowCount(len(rows))
-        for row_index, values in enumerate(rows):
+    def _p31_fill_table(
+        self,
+        table: QTableWidget,
+        rows: list[list[str]],
+        *,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
+        table_key = id(table)
+        generation = self._p31_table_render_generations.get(table_key, 0) + 1
+        self._p31_table_render_generations[table_key] = generation
+        selected_signature = ()
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_signature = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in range(table.columnCount())
+            )
+        previous_updates = True
+        previous_signals = False
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            prepared = True
+            table.setUpdatesEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _apply(row_index: int, values: list[str]) -> None:
             for column, value in enumerate(values):
                 table.setItem(row_index, column, QTableWidgetItem(str(value)))
-        table.setUpdatesEnabled(True)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            table.blockSignals(previous_signals)
+            current = generation == self._p31_table_render_generations.get(table_key)
+            visible = self._p31_page_is_visible()
+            if current and selected_signature:
+                for row_index in range(table.rowCount()):
+                    signature = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in range(table.columnCount())
+                    )
+                    if signature == selected_signature:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+            if current and visible and callable(on_complete):
+                on_complete()
+
+        if not self._p31_has_window_refresh_runtime():
+            _prepare()
+            try:
+                for row_index, values in enumerate(rows):
+                    _apply(row_index, values)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            ('paper-table', table_key),
+            list(rows),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p31_table_render_generations.get(table_key),
+            is_visible=self._p31_page_is_visible,
+        )
 
     @staticmethod
     def _p31_optional_price(value: Any) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..compat import *
+from budget_terminal_app.widgets.batched_render import LABEL_MAX_ITEMS, run_batched
 from budget_terminal_app.workers.price_screen import PriceScreenWorker
 
 
@@ -37,6 +38,17 @@ class _P30MarketCapAxisItem(pg.AxisItem):
 
 
 class PricePageMixin:
+    def _p30_has_page_visibility_api(self) -> bool:
+        """Return whether the host provides the real window visibility guard."""
+        return callable(getattr(self, '_is_current_page', None))
+
+    def _p30_page_is_visible(self) -> bool:
+        """Treat small standalone probes as visible while guarding the real app."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page30', None)))
+        return True
+
     def init_page30(self) -> None:
         """Build the Price market-screener page."""
         self._p30_fetching = False
@@ -46,6 +58,7 @@ class PricePageMixin:
         self._p30_selection_scatter = None
         self._p30_label_items: list[Any] = []
         self._p30_plot_points: list[tuple[float, float, str]] = []
+        self._p30_render_generation = 0
 
         layout = QVBoxLayout(self.page30)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -243,11 +256,32 @@ class PricePageMixin:
             self.set_status_text(self.status_bar, f'Price screen failed: {error_text}', status='negative')
 
     def _p30_render_rows(self) -> None:
+        if not self._p30_page_is_visible():
+            return
         table = self.p30_table
-        table.setSortingEnabled(False)
-        table.clearContents()
-        table.setRowCount(len(self._p30_rows))
-        for row_index, row in enumerate(self._p30_rows):
+        self._p30_render_generation += 1
+        generation = self._p30_render_generation
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+        selected_ticker = ''
+        selected_row = table.currentRow()
+        if selected_row >= 0 and table.item(selected_row, 1) is not None:
+            selected_ticker = table.item(selected_row, 1).text()
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = table.updatesEnabled()
+            previous_signals = table.blockSignals(True)
+            sorting_enabled = bool(table.isSortingEnabled())
+            prepared = True
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
+            table.clearContents()
+            table.setRowCount(len(self._p30_rows))
+
+        def _apply(row_index: int, row: dict[str, Any]) -> None:
             rank = row_index + 1
             price = self._p30_numeric_value(row.get('price'))
             market_cap = self._p30_numeric_value(row.get('market_cap'))
@@ -257,9 +291,52 @@ class PricePageMixin:
             table.setItem(row_index, 3, QTableWidgetItem(str(row.get('exchange') or 'N/A')))
             table.setItem(row_index, 4, self._p30_numeric_item(f'${price:,.2f}', price))
             table.setItem(row_index, 5, self._p30_numeric_item(self._p30_format_compact_currency(market_cap), market_cap))
-        table.setSortingEnabled(True)
-        table.sortItems(5, Qt.SortOrder.DescendingOrder)
-        self._p30_render_plot()
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled:
+                table.setSortingEnabled(True)
+                table.sortItems(5, Qt.SortOrder.DescendingOrder)
+            table.blockSignals(previous_signals)
+            render_current = generation == self._p30_render_generation and self._p30_page_is_visible()
+            if render_current:
+                self._p30_render_plot()
+            if selected_ticker:
+                for row_index in range(table.rowCount()):
+                    ticker_item = table.item(row_index, 1)
+                    if ticker_item is not None and ticker_item.text() == selected_ticker:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not self._p30_has_page_visibility_api():
+            _prepare()
+            try:
+                for row_index, row in enumerate(self._p30_rows):
+                    _apply(row_index, row)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            'price-table',
+            list(self._p30_rows),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p30_render_generation,
+            is_visible=self._p30_page_is_visible,
+        )
+
+    def _p30_on_show(self) -> None:
+        """Render the latest cached screen once when returning to Price."""
+        if self._p30_rows:
+            self._p30_render_rows()
 
     @staticmethod
     def _p30_numeric_item(text: str, value: float) -> _P30NumericTableWidgetItem:
@@ -311,12 +388,27 @@ class PricePageMixin:
         plot.addItem(scatter)
         self._p30_scatter = scatter
         label_color = self.theme_color('text_primary') if hasattr(self, 'theme_color') else '#e5e7eb'
-        for price, log_market_cap, ticker in self._p30_plot_points:
+        def _apply_label(_index: int, point: tuple[float, float, str]) -> None:
+            price, log_market_cap, ticker = point
             label = pg.TextItem(text=ticker, color=label_color, anchor=(0.5, 1.15))
             label.setPos(price, log_market_cap)
             label.setZValue(5)
             plot.addItem(label)
             self._p30_label_items.append(label)
+        if self._p30_has_page_visibility_api():
+            run_batched(
+                self,
+                'price-labels',
+                list(self._p30_plot_points),
+                _apply_label,
+                generation=self._p30_render_generation,
+                is_current=lambda value: value == self._p30_render_generation,
+                is_visible=self._p30_page_is_visible,
+                max_items=LABEL_MAX_ITEMS,
+            )
+        else:
+            for point_index, point in enumerate(self._p30_plot_points):
+                _apply_label(point_index, point)
         self._p30_selection_scatter = pg.ScatterPlotItem(
             size=15,
             brush=pg.mkBrush(0, 0, 0, 0),

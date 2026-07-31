@@ -186,6 +186,11 @@ def test_price_page_render_validation_hover_and_selection() -> None:
         selected_row = probe.p30_table.selectedRanges()[0].topRow()
         assert probe.p30_table.item(selected_row, 1).text() == 'BIG'
 
+        probe._p30_on_ready({'rows': list(reversed(rows)), 'candidate_count': 24, 'source': 'Test'})
+        app.processEvents()
+        selected_row = probe.p30_table.selectedRanges()[0].topRow()
+        assert probe.p30_table.item(selected_row, 1).text() == 'BIG'
+
         probe.p30_table.sortItems(4)
         assert probe.p30_table.item(0, 1).text() == 'MID'
 

@@ -819,10 +819,35 @@ class FundamentalsSetupMixin:
         context = self._p2_request_contexts.pop(request_id, {})
         if request_id != getattr(self, '_p2_active_request_id', 0):
             return
+        if not self._p2_page_is_visible():
+            self._p2_pending_result = (data, context)
+            self.p2_analyze_btn.setEnabled(True)
+            return
         self.update_page2(
             data,
             update_collection_info=bool(context.get('update_collection_info', True)),
         )
+
+    def _p2_page_is_visible(self) -> bool:
+        page = getattr(self, 'page2', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _p2_on_show(self) -> None:
+        pending = getattr(self, '_p2_pending_result', None)
+        if isinstance(pending, tuple) and len(pending) == 2:
+            self._p2_pending_result = None
+            data, context = pending
+            self.update_page2(
+                data,
+                update_collection_info=bool(context.get('update_collection_info', True)),
+            )
+        self._p2_relayout_charts()
 
     def _page2_error(self, request_id: Any, msg: Any=None) -> None:
         """Handle Fundamentals fetch errors."""

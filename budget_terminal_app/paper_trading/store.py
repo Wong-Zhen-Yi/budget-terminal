@@ -17,6 +17,7 @@ from .models import (
     OrderStatus,
     PaperOrderRequest,
     PaperQuote,
+    RecurringKind,
     RecurringRunStatus,
     RecurringScheduleSpec,
     RecurringStatus,
@@ -652,8 +653,15 @@ class PaperTradingStore:
             row = connection.execute("SELECT * FROM recurring_runs WHERE id = ?", (run_id,)).fetchone()
         return dict(row)
 
-    def apply_scheduled_funding(self, run_id: str, *, completed_at: str | None = None) -> dict[str, Any]:
-        timestamp = completed_at or iso_utc()
+    def apply_scheduled_funding(
+        self,
+        run_id: str,
+        *,
+        completed_at: str | None = None,
+        effective_at: str | None = None,
+    ) -> dict[str, Any]:
+        completion_timestamp = completed_at or iso_utc()
+        event_timestamp = effective_at or completion_timestamp
         with self._maintenance_lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -676,13 +684,13 @@ class PaperTradingStore:
             connection.execute(
                 """INSERT INTO cash_events (id, account_id, fill_id, event_type, amount, created_at)
                    VALUES (?, ?, NULL, 'deposit', ?, ?)""",
-                (event_id, row["account_id"], amount, timestamp),
+                (event_id, row["account_id"], amount, event_timestamp),
             )
             connection.execute(
                 """UPDATE recurring_runs
                    SET status = 'success', cash_event_id = ?, message = ?, completed_at = ?
                    WHERE id = ?""",
-                (event_id, f"Deposited ${amount:,.2f}.", timestamp, run_id),
+                (event_id, f"Deposited ${amount:,.2f}.", completion_timestamp, run_id),
             )
             event = connection.execute("SELECT * FROM cash_events WHERE id = ?", (event_id,)).fetchone()
         return dict(event)
@@ -696,6 +704,47 @@ class PaperTradingStore:
                     (schedule_id, max(1, int(limit))),
                 )
             )
+
+    def get_recurring_run(self, run_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM recurring_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise ValueError("Recurring run was not found.")
+        return dict(row)
+
+    def reopen_skipped_recurring_run(self, run_id: str, *, started_at: str) -> tuple[dict[str, Any], str]:
+        """Reopen one unfilled skipped buy while preserving its prior message for the audit trail."""
+        with self._maintenance_lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT run.*, schedule.kind, schedule.status AS schedule_status,
+                          account.status AS account_status
+                   FROM recurring_runs run
+                   JOIN recurring_schedules schedule ON schedule.id = run.schedule_id
+                   JOIN accounts account ON account.id = run.account_id
+                   WHERE run.id = ?""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Recurring run was not found.")
+            if row["kind"] != RecurringKind.BUY:
+                raise ValueError("Only skipped recurring buys can be replayed.")
+            if row["status"] != RecurringRunStatus.SKIPPED:
+                raise ValueError("Only a skipped recurring run can be replayed.")
+            if row["order_id"] or row["cash_event_id"]:
+                raise ValueError("A recurring run with ledger activity cannot be replayed.")
+            if row["schedule_status"] != RecurringStatus.ACTIVE or row["account_status"] != AccountStatus.ACTIVE:
+                raise ValueError("Restore the active account and schedule before replaying this run.")
+            prior_message = str(row["message"] or "Skipped without a recorded reason.")
+            connection.execute(
+                """UPDATE recurring_runs
+                   SET status = 'running', quantity = NULL, reference_price = NULL,
+                       message = ?, started_at = ?, completed_at = NULL
+                   WHERE id = ?""",
+                (f"Replay started after: {prior_message}"[:500], started_at, run_id),
+            )
+            reopened = connection.execute("SELECT * FROM recurring_runs WHERE id = ?", (run_id,)).fetchone()
+        return dict(reopened), prior_message
 
     def archive_account(self, account_id: str) -> None:
         now = iso_utc()
@@ -754,12 +803,13 @@ class PaperTradingStore:
         expires_at: dt.datetime | None,
         reserved_cash: float,
         recurring_run_id: str | None = None,
+        submitted_at: dt.datetime | None = None,
     ) -> dict[str, Any]:
         normalized = request.normalized()
         account = self.get_account(normalized.account_id)
         if account["status"] != AccountStatus.ACTIVE:
             raise ValueError("Archived accounts cannot place orders.")
-        now = iso_utc()
+        now = iso_utc(submitted_at)
         order_id = str(uuid.uuid4())
         with self._connect() as connection:
             connection.execute(
@@ -1014,8 +1064,9 @@ class PaperTradingStore:
         *,
         fill_price: float,
         reference_price: float,
+        executed_at: dt.datetime | None = None,
     ) -> dict[str, Any]:
-        now = iso_utc()
+        now = iso_utc(executed_at)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             order_row = connection.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()

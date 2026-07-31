@@ -49,6 +49,7 @@ DEFAULT_PAGE_LABELS: tuple[tuple[int, str], ...] = (
     (21, 'DATAROMA'),
     (23, 'Institutions'),
     (16, 'YouTube'),
+    (37, 'Dictionary'),
     (17, 'Settings'),
     (18, 'Roll'),
     (19, 'Trading Volumes'),

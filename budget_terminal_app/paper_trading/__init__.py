@@ -21,6 +21,7 @@ from .models import (
 from .quotes import YahooPaperQuoteService
 from .recurring import (
     RecurringTradingService,
+    recurring_due_occurrences,
     next_recurring_run,
     recurring_due_window,
     recurring_timezone,
@@ -41,6 +42,7 @@ __all__ = [
     "RecurringScheduleSpec",
     "RecurringStatus",
     "RecurringTradingService",
+    "recurring_due_occurrences",
     "PaperTradingEngine",
     "PaperTradingStore",
     "TimeInForce",

@@ -98,6 +98,7 @@ class WindowSetupMixin:
         30: 'Paper',
         31: 'Virtual',
         33: 'News',
+        37: 'Dictionary',
     }
 
     @staticmethod
@@ -204,6 +205,8 @@ class WindowSetupMixin:
         self.btn_page24.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
         self.btn_page16.setCheckable(True)
+        self.btn_page38 = QPushButton('Dictionary')
+        self.btn_page38.setCheckable(True)
         self.btn_page9 = QPushButton('Settings')
         self.btn_page9.setCheckable(True)
         self.btn_page10 = QPushButton('Charts')
@@ -253,6 +256,7 @@ class WindowSetupMixin:
             self.btn_page22,
             self.btn_page15,
             self.btn_page16,
+            self.btn_page38,
             self.btn_page9,
         ]
         self._top_refresh_default_text = 'Reload (F5)'
@@ -985,6 +989,10 @@ class WindowSetupMixin:
             {'index': 31, 'page_attr': 'page32', 'init_method': 'init_page32', 'theme_hook': '_apply_virtual_trading_theme', 'rollback_hook': '_p32_stop'},
             {'index': 32, 'page_attr': '_retired_page32', 'placeholder_only': True},
             {'index': 33, 'page_attr': 'page34', 'init_method': 'init_page34', 'theme_hook': '_apply_news_theme', 'hydrate_hook': '_hydrate_lazy_page34'},
+            {'index': 34, 'page_attr': '_retired_page34', 'placeholder_only': True},
+            {'index': 35, 'page_attr': '_retired_page35', 'placeholder_only': True},
+            {'index': 36, 'page_attr': '_retired_page36', 'placeholder_only': True},
+            {'index': 37, 'page_attr': 'page38', 'init_method': 'init_page38', 'theme_hook': '_apply_dictionary_theme'},
         )
 
     def _startup_page_labels(self) -> tuple[tuple[int, str], ...]:

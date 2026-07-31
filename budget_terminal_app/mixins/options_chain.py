@@ -33,7 +33,13 @@ from ..compat import (
     serialize_session_value,
     yf,
 )
-from budget_terminal_app.widgets.table_render import render_table_rows
+from budget_terminal_app.widgets.batched_render import (
+    DEFAULT_MAX_BATCH_MS,
+    DEFAULT_MAX_ITEMS,
+    cancel_batched,
+    run_batched,
+)
+from budget_terminal_app.widgets.table_render import render_table_row, render_table_rows
 from budget_terminal_app.mixins.options_chain_presenters import (
     build_chain_rows,
     build_option_summary_rows,
@@ -84,6 +90,10 @@ class OptionsChainMixin:
     _P5_TOP_VOLUME_GRID_COLUMNS = 3
     _P5_STRIKE_TAB_LABEL = 'Options by Strike'
     _P5_STRIKE_MATCH_TOLERANCE = 0.0001
+    _P5_BATCH_ROW_THRESHOLD = DEFAULT_MAX_ITEMS
+    _P5_EXPIRY_COMPLETION_KEY = 'chain-expiries'
+    _P5_CHAIN_COMPLETION_KEY = 'chain'
+    _P5_STRIKE_COMPLETION_KEY = 'strike'
 
     def init_page5(self) -> None:
         """Build the Options page UI."""
@@ -110,13 +120,19 @@ class OptionsChainMixin:
         self._p5_strike_latest_request_id = 0
         self._p5_strike_payload = self._p5_empty_strike_payload()
         self._p5_strike_available_strikes = []
+        self._p5_completion_sequence = 0
+        self._p5_completion_cache: dict[str, dict[str, Any]] = {}
+        self._p5_completion_applied_versions: dict[str, int] = {}
+        self._p5_completion_applying_versions: dict[str, int] = {}
+        self._p5_render_generations: dict[Any, int] = {}
         shared_controls = QHBoxLayout()
         self.p5_shared_ticker_input = QLineEdit()
         self.p5_shared_ticker_input.setPlaceholderText('Enter Ticker (e.g. AAPL)')
         self.p5_shared_ticker_input.setMinimumWidth(140)
         self.p5_shared_ticker_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.p5_shared_ticker_input.returnPressed.connect(self._p5_load_active_subtab)
-        shared_load_btn = QPushButton('Load All')
+        shared_load_btn = QPushButton('Load Current Tab')
+        self.p5_shared_load_btn = shared_load_btn
         self.set_theme_variant(shared_load_btn, 'accent')
         shared_load_btn.clicked.connect(self._p5_load_active_subtab)
         self.p5_export_top_volume_btn = QPushButton('Export Options by Top Volume')
@@ -137,7 +153,456 @@ class OptionsChainMixin:
             self.p5_tabs.addTab(self._p5_build_top_volume_tab(view_key, tab_label, bucket_config), tab_label)
             self._p5_top_volume_tab_order.append(view_key)
         self.p5_tabs.addTab(self._p5_build_strike_tab(), self._P5_STRIKE_TAB_LABEL)
+        self.p5_tabs.currentChanged.connect(self._p5_on_subtab_changed)
         layout.addWidget(self.p5_tabs, 1)
+        page_entry = getattr(self, '_pages', {}).get(11) if isinstance(getattr(self, '_pages', {}), dict) else None
+        if isinstance(page_entry, dict):
+            page_entry['on_show'] = self._p5_on_show
+
+    def _p5_has_page_visibility_api(self) -> bool:
+        """Return whether this host exposes the real main-window page guard."""
+        return callable(getattr(self, '_is_current_page', None))
+
+    def _p5_page_is_visible(self) -> bool:
+        """Treat standalone presenter probes as visible while guarding the app."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page5', None)))
+        return True
+
+    @staticmethod
+    def _p5_top_volume_completion_key(view_key: str) -> str:
+        return f'top-volume:{str(view_key or "").strip()}'
+
+    def _p5_active_subtab_key(self) -> str:
+        tabs = getattr(self, 'p5_tabs', None)
+        active_index = int(tabs.currentIndex()) if tabs is not None else 0
+        top_volume_order = list(getattr(self, '_p5_top_volume_tab_order', []))
+        if active_index <= 0:
+            return self._P5_CHAIN_COMPLETION_KEY
+        top_volume_index = active_index - 1
+        if 0 <= top_volume_index < len(top_volume_order):
+            return self._p5_top_volume_completion_key(top_volume_order[top_volume_index])
+        return self._P5_STRIKE_COMPLETION_KEY
+
+    def _p5_completion_is_visible(self, completion_key: str) -> bool:
+        if not self._p5_has_page_visibility_api():
+            return True
+        if not self._p5_page_is_visible():
+            return False
+        active_key = self._p5_active_subtab_key()
+        if completion_key == self._P5_EXPIRY_COMPLETION_KEY:
+            completion_key = self._P5_CHAIN_COMPLETION_KEY
+        return completion_key == active_key
+
+    def _p5_chain_is_visible(self) -> bool:
+        return self._p5_completion_is_visible(self._P5_CHAIN_COMPLETION_KEY)
+
+    def _p5_strike_is_visible(self) -> bool:
+        return self._p5_completion_is_visible(self._P5_STRIKE_COMPLETION_KEY)
+
+    def _p5_top_volume_is_visible(self, view_key: str) -> bool:
+        return self._p5_completion_is_visible(self._p5_top_volume_completion_key(view_key))
+
+    def _p5_on_show(self) -> None:
+        """Apply only the cached completion belonging to the visible subtab."""
+        self._p5_apply_visible_cached_result()
+
+    def _p5_on_subtab_changed(self, *_: Any) -> None:
+        """Apply a deferred completion on tab selection without another fetch."""
+        self._p5_apply_visible_cached_result()
+
+    def _p5_apply_visible_cached_result(self) -> None:
+        """Apply the newest deferred completion for the active Options subtab."""
+        if not self._p5_page_is_visible():
+            return
+        active_key = self._p5_active_subtab_key()
+        if active_key == self._P5_CHAIN_COMPLETION_KEY:
+            self._p5_apply_cached_completion(self._P5_EXPIRY_COMPLETION_KEY)
+            self._p5_apply_cached_completion(self._P5_CHAIN_COMPLETION_KEY)
+            return
+        self._p5_apply_cached_completion(active_key)
+
+    def _p5_cache_completion(self, completion_key: str, **payload: Any) -> dict[str, Any]:
+        if not isinstance(getattr(self, '_p5_completion_cache', None), dict):
+            self._p5_completion_cache = {}
+        if not isinstance(getattr(self, '_p5_completion_applied_versions', None), dict):
+            self._p5_completion_applied_versions = {}
+        if not isinstance(getattr(self, '_p5_completion_applying_versions', None), dict):
+            self._p5_completion_applying_versions = {}
+        self._p5_completion_sequence = int(getattr(self, '_p5_completion_sequence', 0) or 0) + 1
+        record = dict(payload)
+        record['version'] = self._p5_completion_sequence
+        self._p5_completion_cache[completion_key] = record
+        return record
+
+    def _p5_finish_completion_apply(self, completion_key: str, version: int, completed: bool) -> None:
+        applying_versions = getattr(self, '_p5_completion_applying_versions', {})
+        if applying_versions.get(completion_key) == version:
+            applying_versions.pop(completion_key, None)
+        current = getattr(self, '_p5_completion_cache', {}).get(completion_key, {})
+        if completed and int(current.get('version', 0) or 0) == int(version):
+            self._p5_completion_applied_versions[completion_key] = int(version)
+
+    def _p5_completion_still_current(self, completion_key: str, record: dict[str, Any]) -> bool:
+        ticker = str(record.get('ticker', '') or '').upper().strip()
+        if ticker and ticker != self._p5_shared_ticker():
+            return False
+        request_id = int(record.get('request_id', 0) or 0)
+        if completion_key == self._P5_EXPIRY_COMPLETION_KEY:
+            return request_id == int(getattr(self, '_p5_expiry_latest_request_id', 0) or 0)
+        if completion_key == self._P5_CHAIN_COMPLETION_KEY:
+            return request_id == int(getattr(self, '_p5_chain_latest_request_id', 0) or 0)
+        if completion_key == self._P5_STRIKE_COMPLETION_KEY:
+            request_kind = str(record.get('request_kind', '') or '')
+            if request_kind == 'strike-values':
+                return request_id == int(getattr(self, '_p5_strike_values_latest_request_id', 0) or 0)
+            return request_id == int(getattr(self, '_p5_strike_latest_request_id', 0) or 0)
+        if completion_key.startswith('top-volume:'):
+            view_key = completion_key.partition(':')[2]
+            return request_id == int(getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0) or 0)
+        return False
+
+    def _p5_apply_cached_completion(self, completion_key: str) -> bool:
+        if not isinstance(getattr(self, '_p5_completion_applied_versions', None), dict):
+            self._p5_completion_applied_versions = {}
+        if not isinstance(getattr(self, '_p5_completion_applying_versions', None), dict):
+            self._p5_completion_applying_versions = {}
+        record = getattr(self, '_p5_completion_cache', {}).get(completion_key)
+        if not isinstance(record, dict) or not self._p5_completion_is_visible(completion_key):
+            return False
+        version = int(record.get('version', 0) or 0)
+        if version <= 0:
+            return False
+        if self._p5_completion_applied_versions.get(completion_key) == version:
+            return False
+        if self._p5_completion_applying_versions.get(completion_key) == version:
+            return False
+        if not self._p5_completion_still_current(completion_key, record):
+            self._p5_completion_applied_versions[completion_key] = version
+            return False
+        self._p5_completion_applying_versions[completion_key] = version
+        try:
+            if completion_key == self._P5_EXPIRY_COMPLETION_KEY:
+                self._p5_apply_expiry_completion(completion_key, record)
+            elif completion_key == self._P5_CHAIN_COMPLETION_KEY:
+                self._p5_apply_chain_completion(completion_key, record)
+            elif completion_key == self._P5_STRIKE_COMPLETION_KEY:
+                self._p5_apply_strike_completion(completion_key, record)
+            elif completion_key.startswith('top-volume:'):
+                self._p5_apply_top_volume_completion(completion_key, record)
+            else:
+                self._p5_finish_completion_apply(completion_key, version, False)
+                return False
+        except Exception:
+            self._p5_finish_completion_apply(completion_key, version, False)
+            raise
+        return True
+
+    def _p5_render_table_groups(
+        self,
+        render_key: Any,
+        groups: list[tuple[Any, Any]],
+        *,
+        is_visible: Any,
+        on_terminal: Any=None,
+    ) -> None:
+        """Render related tables together, batching only genuinely large results."""
+        batched_key = ('options', render_key)
+        cancel_batched(self, batched_key)
+        normalized_groups = [(table, list(rows or [])) for table, rows in groups if table is not None]
+        flat_rows = [
+            (table, row_index, row)
+            for table, rows in normalized_groups
+            for row_index, row in enumerate(rows)
+        ]
+        table_states = []
+        prepared = False
+        applied_count = 0
+
+        def _selection_signature(table: Any, row_index: int) -> tuple[Any, ...] | None:
+            if row_index < 0:
+                return None
+            column_count = int(table.columnCount())
+            if column_count == len(self._P5_CHAIN_COLUMNS):
+                identity_columns = (0,)
+            elif column_count == len(self._P5_TOP_VOLUME_COLUMNS):
+                identity_columns = (0, 1, 2, 3)
+            else:
+                identity_columns = tuple(range(column_count))
+            return tuple(
+                table.item(row_index, column).text() if table.item(row_index, column) is not None else None
+                for column in identity_columns
+            )
+
+        for table, rows in normalized_groups:
+            selected_row = int(table.currentRow()) if hasattr(table, 'currentRow') else -1
+            selected_column = int(table.currentColumn()) if hasattr(table, 'currentColumn') else -1
+            selected_signature = _selection_signature(table, selected_row)
+            table_states.append({
+                'table': table,
+                'row_count': len(rows),
+                'updates': True,
+                'signals': False,
+                'sorting': False,
+                'selected_column': selected_column,
+                'selected_signature': selected_signature,
+            })
+
+        def _prepare() -> None:
+            nonlocal prepared
+            for state in table_states:
+                table = state['table']
+                state['updates'] = bool(table.updatesEnabled())
+                state['signals'] = table.blockSignals(True)
+                state['sorting'] = bool(table.isSortingEnabled()) if hasattr(table, 'isSortingEnabled') else False
+                if state['sorting']:
+                    table.setSortingEnabled(False)
+                table.setUpdatesEnabled(False)
+                table.setRowCount(state['row_count'])
+            prepared = True
+
+        def _apply(_item_index: int, item: tuple[Any, int, Any]) -> None:
+            nonlocal applied_count
+            table, row_index, row = item
+            render_table_row(table, row_index, row)
+            applied_count += 1
+
+        def _finish() -> None:
+            completed = prepared and applied_count == len(flat_rows)
+            for state in table_states:
+                table = state['table']
+                if not prepared:
+                    continue
+                table.setUpdatesEnabled(state['updates'])
+                if state['sorting']:
+                    table.setSortingEnabled(True)
+                selected_signature = state['selected_signature']
+                if selected_signature is not None:
+                    for row_index in range(table.rowCount()):
+                        candidate = _selection_signature(table, row_index)
+                        if candidate == selected_signature:
+                            table.setCurrentCell(row_index, max(0, state['selected_column']))
+                            break
+                table.blockSignals(state['signals'])
+                if state['updates']:
+                    table.viewport().update()
+            if callable(on_terminal):
+                on_terminal(completed)
+
+        if not isinstance(getattr(self, '_p5_render_generations', None), dict):
+            self._p5_render_generations = {}
+        self._p5_render_generations[render_key] = int(self._p5_render_generations.get(render_key, 0) or 0) + 1
+        generation = self._p5_render_generations[render_key]
+        if not self._p5_has_page_visibility_api() or len(flat_rows) <= self._P5_BATCH_ROW_THRESHOLD:
+            if not bool(is_visible()):
+                if callable(on_terminal):
+                    on_terminal(False)
+                return
+            _prepare()
+            try:
+                for item_index, item in enumerate(flat_rows):
+                    _apply(item_index, item)
+            finally:
+                _finish()
+            return
+        run_batched(
+            self,
+            batched_key,
+            flat_rows,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p5_render_generations.get(render_key),
+            is_visible=is_visible,
+            max_batch_ms=DEFAULT_MAX_BATCH_MS,
+            max_items=DEFAULT_MAX_ITEMS,
+        )
+
+    def _p5_apply_expiry_completion(self, completion_key: str, record: dict[str, Any]) -> None:
+        version = int(record.get('version', 0) or 0)
+        if not bool(record.get('ok', False)):
+            self.set_status_text(self.p5_status_lbl, f"Error: {record.get('message', '')}", status='negative')
+            self._p5_finish_completion_apply(completion_key, version, True)
+            return
+        chain_record = getattr(self, '_p5_completion_cache', {}).get(self._P5_CHAIN_COMPLETION_KEY, {})
+        chain_version = int(chain_record.get('version', 0) or 0) if isinstance(chain_record, dict) else 0
+        chain_is_pending = (
+            chain_version > 0
+            and self._p5_completion_applied_versions.get(self._P5_CHAIN_COMPLETION_KEY) != chain_version
+            and self._p5_completion_still_current(self._P5_CHAIN_COMPLETION_KEY, chain_record)
+        )
+        price = record.get('price')
+        self._p5_chain_spot_price = float(price or 0.0)
+        self._p5_populate_expiries(
+            record.get('expiries'),
+            preferred_expiry=str(record.get('preferred_expiry', '') or ''),
+            load_chain=not chain_is_pending,
+        )
+        self.p5_price_lbl.setText(f'${float(price):.2f}' if price else '')
+        self._p5_finish_completion_apply(completion_key, version, True)
+
+    def _p5_apply_chain_completion(self, completion_key: str, record: dict[str, Any]) -> None:
+        version = int(record.get('version', 0) or 0)
+        if not bool(record.get('ok', False)):
+            self.set_status_text(self.p5_status_lbl, f"Error: {record.get('message', '')}", status='negative')
+            self._p5_finish_completion_apply(completion_key, version, True)
+            return
+        self._p5_update_chain_view(
+            str(record.get('ticker', '') or ''),
+            record.get('df'),
+            str(record.get('expiry', '') or ''),
+            float(record.get('spot_price', 0.0) or 0.0),
+            dict(record.get('greek_inputs', {}) or {}),
+            on_render_complete=lambda completed: self._p5_finish_completion_apply(
+                completion_key,
+                version,
+                completed,
+            ),
+        )
+
+    def _p5_apply_top_volume_completion(self, completion_key: str, record: dict[str, Any]) -> None:
+        version = int(record.get('version', 0) or 0)
+        view_key = completion_key.partition(':')[2]
+        view = self._p5_top_volume_view(view_key)
+        status_lbl = view.get('status_lbl')
+        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
+        if not bool(record.get('ok', False)):
+            if status_lbl is not None:
+                self.set_status_text(
+                    status_lbl,
+                    f"Error loading {tab_label.lower()} for {record.get('ticker', '')}: {record.get('message', '')}",
+                    status='negative',
+                )
+            self._p5_finish_completion_apply(completion_key, version, True)
+            return
+        payload = record.get('payload', {}) if isinstance(record.get('payload', {}), dict) else {}
+        bucket_config = self._p5_build_dynamic_top_volume_bucket_config(payload.get('bucket_order', []))
+        if tuple(self._p5_top_volume_buckets(view_key)) != tuple(bucket_config):
+            self._p5_set_top_volume_bucket_config(view_key, bucket_config)
+        records = payload.get('records', {}) if isinstance(payload.get('records', {}), dict) else {}
+        expirations = payload.get('expirations', {}) if isinstance(payload.get('expirations', {}), dict) else {}
+
+        def _complete(completed: bool) -> None:
+            if completed:
+                row_total = sum(len(rows) for rows in records.values())
+                expiry_count = len(payload.get('bucket_order', []))
+                populated_count = sum(1 for rows in records.values() if rows)
+                if status_lbl is not None:
+                    if expiry_count <= 0:
+                        text = f"No listed options expirations were available for {payload.get('ticker', '')}."
+                        status = 'warning'
+                    elif row_total <= 0:
+                        text = (
+                            f"No {tab_label.lower()} data was available for {payload.get('ticker', '')} "
+                            f'across {expiry_count} expirations.'
+                        )
+                        status = 'warning'
+                    else:
+                        type_label = self._p5_top_volume_type_label(payload.get('type_filter', 'both'))
+                        text = (
+                            f"{tab_label} ({type_label}) updated for {payload.get('ticker', '')} "
+                            f"at {datetime.datetime.now().strftime('%H:%M:%S')}"
+                            f' | {row_total} rows across {expiry_count} expirations'
+                        )
+                        if populated_count < expiry_count:
+                            text += f' | {expiry_count - populated_count} expirations returned no ranked rows'
+                        status = 'positive' if populated_count == expiry_count else 'warning'
+                    self.set_status_text(status_lbl, text, status=status)
+                self._p5_save_session_snapshot()
+            self._p5_finish_completion_apply(completion_key, version, completed)
+
+        self._p5_render_top_volume_tables(
+            view_key,
+            str(payload.get('ticker', '') or ''),
+            records,
+            expirations,
+            on_complete=_complete,
+        )
+
+    def _p5_apply_strike_completion(self, completion_key: str, record: dict[str, Any]) -> None:
+        version = int(record.get('version', 0) or 0)
+        status_lbl = getattr(self, 'p5_strike_status_lbl', None)
+        request_kind = str(record.get('request_kind', '') or '')
+        if not bool(record.get('ok', False)):
+            if status_lbl is not None:
+                action = 'strikes' if request_kind == 'strike-values' else 'options by strike'
+                self.set_status_text(
+                    status_lbl,
+                    f"Error loading {action} for {record.get('ticker', '')}: {record.get('message', '')}",
+                    status='negative',
+                )
+            self._p5_finish_completion_apply(completion_key, version, True)
+            return
+        payload = record.get('payload', {}) if isinstance(record.get('payload', {}), dict) else {}
+        self._p5_strike_available_strikes = list(payload.get('available_strikes', []) or [])
+        selected_strike = payload.get('selected_strike')
+        self._p5_reset_strike_combo(selected_strike)
+        bucket_config = self._p5_build_dynamic_top_volume_bucket_config(payload.get('bucket_order', []))
+        if tuple(self._p5_strike_buckets()) != tuple(bucket_config):
+            self._p5_set_strike_bucket_config(bucket_config)
+        if request_kind == 'strike-values':
+            self._p5_clear_strike_tables()
+            expiry_count = len(bucket_config)
+            strike_count = len(self._p5_strike_available_strikes)
+            if status_lbl is not None:
+                ticker = str(payload.get('ticker', '') or '')
+                if expiry_count <= 0:
+                    text = f'No listed options expirations were available for {ticker}.'
+                    status = 'warning'
+                elif strike_count <= 0:
+                    text = f'No strikes were available for {ticker} across {expiry_count} expirations.'
+                    status = 'warning'
+                elif selected_strike is None:
+                    text = f'Loaded {strike_count} strikes for {ticker}. Choose a strike, then load options by strike.'
+                    status = 'positive'
+                else:
+                    text = f'Loaded {strike_count} strikes for {ticker}. Selected strike {float(selected_strike):g}.'
+                    status = 'positive'
+                self.set_status_text(status_lbl, text, status=status)
+            self._p5_save_session_snapshot()
+            self._p5_finish_completion_apply(completion_key, version, True)
+            return
+        records = payload.get('records', {}) if isinstance(payload.get('records', {}), dict) else {}
+        expirations = payload.get('expirations', {}) if isinstance(payload.get('expirations', {}), dict) else {}
+
+        def _complete(completed: bool) -> None:
+            if completed:
+                ticker = str(payload.get('ticker', '') or '')
+                row_total = sum(len(rows) for rows in records.values())
+                expiry_count = len(payload.get('bucket_order', []))
+                populated_count = sum(1 for rows in records.values() if rows)
+                if status_lbl is not None:
+                    if expiry_count <= 0:
+                        text = f'No listed options expirations were available for {ticker}.'
+                        status = 'warning'
+                    elif row_total <= 0:
+                        text = (
+                            f'No options by strike data was available for {ticker} at strike '
+                            f'{float(selected_strike):g} across {expiry_count} expirations.'
+                        )
+                        status = 'warning'
+                    else:
+                        text = (
+                            f"Options by Strike updated for {ticker} strike {float(selected_strike):g} "
+                            f"at {datetime.datetime.now().strftime('%H:%M:%S')}"
+                            f' | {row_total} rows across {expiry_count} expirations'
+                        )
+                        if populated_count < expiry_count:
+                            text += f' | {expiry_count - populated_count} expirations returned no matching rows'
+                        status = 'positive' if populated_count == expiry_count else 'warning'
+                    self.set_status_text(status_lbl, text, status=status)
+                self._p5_save_session_snapshot()
+            self._p5_finish_completion_apply(completion_key, version, completed)
+
+        self._p5_render_strike_tables(
+            str(payload.get('ticker', '') or ''),
+            selected_strike,
+            records,
+            expirations,
+            on_complete=_complete,
+        )
 
     def _p5_build_chain_tab(self) -> Any:
         """Build the Chain subtab content."""
@@ -933,19 +1398,23 @@ class OptionsChainMixin:
         """Hydrate Options from the last session, then refresh it in the background."""
         restored = self._p5_restore_session_snapshot(snapshot)
         if restored and self._p5_shared_ticker():
-            self._p5_load_expiries()
-            for view_key in list(getattr(self, '_p5_top_volume_tab_order', [])):
-                self._p5_load_top_volume(view_key)
-            if self._p5_selected_strike() is not None:
-                self._p5_load_options_by_strike()
-            else:
-                self._p5_load_strike_values()
+            self._p5_load_active_subtab()
 
     def _p5_load_active_subtab(self) -> None:
-        """Load all Options subtabs using the shared ticker."""
-        self._p5_load_expiries()
-        for view_key in list(getattr(self, '_p5_top_volume_tab_order', [])):
-            self._p5_load_top_volume(view_key)
+        """Load only the visible Options subtab using the shared ticker."""
+        tabs = getattr(self, 'p5_tabs', None)
+        active_index = int(tabs.currentIndex()) if tabs is not None else 0
+        top_volume_order = list(getattr(self, '_p5_top_volume_tab_order', []))
+        if active_index <= 0:
+            self._p5_load_expiries()
+            return
+        top_volume_index = active_index - 1
+        if 0 <= top_volume_index < len(top_volume_order):
+            self._p5_load_top_volume(top_volume_order[top_volume_index])
+            return
+        if self._p5_selected_strike() is not None:
+            self._p5_load_options_by_strike()
+            return
         self._p5_load_strike_values()
 
     def _p5_top_volume_view(self, view_key: str) -> dict[str, Any]:
@@ -1006,8 +1475,6 @@ class OptionsChainMixin:
         self._p5_top_volume_request_seq += 1
         request_id = self._p5_top_volume_request_seq
         self._p5_top_volume_latest_request_ids[view_key] = request_id
-        self._p5_set_top_volume_bucket_config(view_key, ())
-        self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload((), ticker=ticker)
         if status_lbl is not None:
             self.set_status_text(status_lbl, f'Loading {tab_label.lower()} ({type_label}) for {ticker} across all available expirations...', status='warning')
 
@@ -1158,10 +1625,6 @@ class OptionsChainMixin:
         request_id = self._p5_strike_values_request_seq
         self._p5_strike_values_latest_request_id = request_id
         self._p5_strike_latest_request_id = 0
-        self._p5_strike_available_strikes = []
-        self._p5_reset_strike_combo()
-        self._p5_set_strike_bucket_config(())
-        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker)
         if hasattr(self, 'p5_strike_status_lbl'):
             self.set_status_text(self.p5_strike_status_lbl, f'Loading strikes for {ticker} across all available expirations...', status='warning')
 
@@ -1217,23 +1680,20 @@ class OptionsChainMixin:
                 if abs(float(strike_value) - float(selected_strike)) <= self._P5_STRIKE_MATCH_TOLERANCE:
                     selected = float(strike_value)
                     break
-        self._p5_reset_strike_combo(selected)
-        self._p5_set_strike_bucket_config(bucket_config)
-        self._p5_clear_strike_tables()
-        self._p5_strike_payload = self._p5_empty_strike_payload(bucket_config, ticker=ticker, selected_strike=selected)
-        self._p5_save_session_snapshot()
-        expiry_count = len(bucket_config)
-        strike_count = len(self._p5_strike_available_strikes)
-        if not hasattr(self, 'p5_strike_status_lbl'):
-            return
-        if expiry_count <= 0:
-            self.set_status_text(self.p5_strike_status_lbl, f'No listed options expirations were available for {ticker}.', status='warning')
-        elif strike_count <= 0:
-            self.set_status_text(self.p5_strike_status_lbl, f'No strikes were available for {ticker} across {expiry_count} expirations.', status='warning')
-        elif selected is None:
-            self.set_status_text(self.p5_strike_status_lbl, f'Loaded {strike_count} strikes for {ticker}. Choose a strike, then load options by strike.', status='positive')
-        else:
-            self.set_status_text(self.p5_strike_status_lbl, f'Loaded {strike_count} strikes for {ticker}. Selected strike {selected:g}.', status='positive')
+        payload = self._p5_normalize_strike_payload(
+            self._p5_empty_strike_payload(bucket_config, ticker=ticker, selected_strike=selected),
+            ticker=ticker,
+        )
+        self._p5_strike_payload = payload
+        self._p5_cache_completion(
+            self._P5_STRIKE_COMPLETION_KEY,
+            ok=True,
+            request_kind='strike-values',
+            request_id=request_id,
+            ticker=ticker,
+            payload=payload,
+        )
+        self._p5_apply_cached_completion(self._P5_STRIKE_COMPLETION_KEY)
 
     def _p5_handle_strike_values_error(self, request_id: int, ticker: str, message: str) -> None:
         """Render a strike-list load failure if the request is still current."""
@@ -1241,13 +1701,17 @@ class OptionsChainMixin:
             return
         if ticker != self._p5_shared_ticker():
             return
-        self._p5_strike_available_strikes = []
-        self._p5_reset_strike_combo()
-        self._p5_set_strike_bucket_config(())
-        self._p5_clear_strike_tables()
-        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker)
-        if hasattr(self, 'p5_strike_status_lbl'):
-            self.set_status_text(self.p5_strike_status_lbl, f'Error loading strikes for {ticker}: {message}', status='negative')
+        payload = getattr(self, '_p5_strike_payload', {})
+        self._p5_cache_completion(
+            self._P5_STRIKE_COMPLETION_KEY,
+            ok=False,
+            request_kind='strike-values',
+            request_id=request_id,
+            ticker=ticker,
+            payload=payload,
+            message=message,
+        )
+        self._p5_apply_cached_completion(self._P5_STRIKE_COMPLETION_KEY)
 
     def _p5_load_options_by_strike(self, *_: Any) -> None:
         """Fetch and render all contracts matching the selected strike across expirations."""
@@ -1267,8 +1731,6 @@ class OptionsChainMixin:
         self._p5_strike_request_seq += 1
         request_id = self._p5_strike_request_seq
         self._p5_strike_latest_request_id = request_id
-        self._p5_set_strike_bucket_config(())
-        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker, selected_strike=selected_strike)
         if hasattr(self, 'p5_strike_status_lbl'):
             self.set_status_text(self.p5_strike_status_lbl, f'Loading options by strike {selected_strike:g} for {ticker}...', status='warning')
 
@@ -1327,7 +1789,6 @@ class OptionsChainMixin:
             return
         if ticker != self._p5_shared_ticker():
             return
-        self._p5_set_strike_bucket_config(bucket_config)
         normalized_payload = self._p5_normalize_strike_payload(
             {
                 'ticker': ticker,
@@ -1339,27 +1800,16 @@ class OptionsChainMixin:
             },
             ticker=ticker,
         )
-        normalized_records = normalized_payload.get('records', {}) if isinstance(normalized_payload.get('records', {}), dict) else {}
-        normalized_expirations = normalized_payload.get('expirations', {}) if isinstance(normalized_payload.get('expirations', {}), dict) else {}
         self._p5_strike_payload = normalized_payload
-        self._p5_save_session_snapshot()
-        self._p5_render_strike_tables(ticker, selected_strike, normalized_records, normalized_expirations)
-        row_total = sum(len(records) for records in normalized_records.values())
-        expiry_count = len(normalized_payload.get('bucket_order', []))
-        populated_count = sum(1 for records in normalized_records.values() if records)
-        if not hasattr(self, 'p5_strike_status_lbl'):
-            return
-        if expiry_count <= 0:
-            self.set_status_text(self.p5_strike_status_lbl, f'No listed options expirations were available for {ticker}.', status='warning')
-            return
-        if row_total <= 0:
-            self.set_status_text(self.p5_strike_status_lbl, f'No options by strike data was available for {ticker} at strike {selected_strike:g} across {expiry_count} expirations.', status='warning')
-            return
-        status_text = f"Options by Strike updated for {ticker} strike {selected_strike:g} at {datetime.datetime.now().strftime('%H:%M:%S')}"
-        status_text += f' | {row_total} rows across {expiry_count} expirations'
-        if populated_count < expiry_count:
-            status_text += f' | {expiry_count - populated_count} expirations returned no matching rows'
-        self.set_status_text(self.p5_strike_status_lbl, status_text, status='positive' if populated_count == expiry_count else 'warning')
+        self._p5_cache_completion(
+            self._P5_STRIKE_COMPLETION_KEY,
+            ok=True,
+            request_kind='strike-view',
+            request_id=request_id,
+            ticker=ticker,
+            payload=normalized_payload,
+        )
+        self._p5_apply_cached_completion(self._P5_STRIKE_COMPLETION_KEY)
 
     def _p5_handle_strike_error(self, request_id: int, ticker: str, selected_strike: float, message: str) -> None:
         """Render an Options by Strike load failure if the request is still current."""
@@ -1367,15 +1817,30 @@ class OptionsChainMixin:
             return
         if ticker != self._p5_shared_ticker():
             return
-        self._p5_set_strike_bucket_config(())
-        self._p5_clear_strike_tables()
-        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker, selected_strike=selected_strike)
-        if hasattr(self, 'p5_strike_status_lbl'):
-            self.set_status_text(self.p5_strike_status_lbl, f'Error loading options by strike for {ticker}: {message}', status='negative')
+        payload = getattr(self, '_p5_strike_payload', {})
+        self._p5_cache_completion(
+            self._P5_STRIKE_COMPLETION_KEY,
+            ok=False,
+            request_kind='strike-view',
+            request_id=request_id,
+            ticker=ticker,
+            payload=payload,
+            message=message,
+        )
+        self._p5_apply_cached_completion(self._P5_STRIKE_COMPLETION_KEY)
 
-    def _p5_render_strike_tables(self, ticker: str, selected_strike: float | None, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+    def _p5_render_strike_tables(
+        self,
+        ticker: str,
+        selected_strike: float | None,
+        bucket_records: dict[str, list[dict[str, Any]]],
+        bucket_expirations: dict[str, str],
+        *,
+        on_complete: Any=None,
+    ) -> None:
         """Render strike-matched records into the UI tables."""
         sections = getattr(self, 'p5_strike_sections', {}) if isinstance(getattr(self, 'p5_strike_sections', {}), dict) else {}
+        groups = []
         for bucket_key, _bucket_label, _days_out in self._p5_strike_buckets():
             section = sections.get(bucket_key, {})
             table = section.get('table')
@@ -1386,7 +1851,7 @@ class OptionsChainMixin:
                 continue
             strike_text = f'{selected_strike:g}' if selected_strike is not None else 'unselected'
             table.setToolTip(f'Using expiration {expiry_display} and strike {strike_text}' if expiry_display else f'No expiration available for strike {strike_text}')
-            render_table_rows(
+            groups.append((
                 table,
                 build_option_summary_rows(
                     bucket_records.get(bucket_key, []),
@@ -1396,16 +1861,20 @@ class OptionsChainMixin:
                     negative_color=self.theme_color('accent_negative'),
                     pd_module=pd,
                 ),
-            )
+            ))
+        self._p5_render_table_groups(
+            'strike-tables',
+            groups,
+            is_visible=(self._p5_strike_is_visible if callable(on_complete) else lambda: True),
+            on_terminal=on_complete,
+        )
 
     def _p5_update_top_volume_view(self, view_key: str, request_id: int, ticker: str, bucket_config: tuple[tuple[str, str, int], ...], bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
         """Store and render the latest all-expiry top-volume payload."""
         if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
             return
-        view = self._p5_top_volume_view(view_key)
-        status_lbl = view.get('status_lbl')
-        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
-        self._p5_set_top_volume_bucket_config(view_key, bucket_config)
+        if ticker != self._p5_shared_ticker():
+            return
         normalized_payload = self._p5_normalize_top_volume_payload(
             {
                 'ticker': ticker,
@@ -1416,47 +1885,44 @@ class OptionsChainMixin:
             },
             ticker=ticker,
         )
-        normalized_records = normalized_payload.get('records', {}) if isinstance(normalized_payload.get('records', {}), dict) else {}
-        normalized_expirations = normalized_payload.get('expirations', {}) if isinstance(normalized_payload.get('expirations', {}), dict) else {}
         self._p5_top_volume_payloads[view_key] = normalized_payload
-        self._p5_save_session_snapshot()
-        self._p5_render_top_volume_tables(view_key, ticker, normalized_records, normalized_expirations)
-        row_total = sum(len(records) for records in normalized_records.values())
-        expiry_count = len(normalized_payload.get('bucket_order', []))
-        populated_count = sum(1 for records in normalized_records.values() if records)
-        if expiry_count <= 0:
-            if status_lbl is not None:
-                self.set_status_text(status_lbl, f'No listed options expirations were available for {ticker}.', status='warning')
-            return
-        if row_total <= 0:
-            status_text = f'No {tab_label.lower()} data was available for {ticker} across {expiry_count} expirations.'
-            if status_lbl is not None:
-                self.set_status_text(status_lbl, status_text, status='warning')
-            return
-        status_text = f"{tab_label} ({self._p5_top_volume_type_label()}) updated for {ticker} at {datetime.datetime.now().strftime('%H:%M:%S')}"
-        status_text += f' | {row_total} rows across {expiry_count} expirations'
-        if populated_count < expiry_count:
-            status_text += f' | {expiry_count - populated_count} expirations returned no ranked rows'
-        if status_lbl is not None:
-            self.set_status_text(status_lbl, status_text, status='positive' if populated_count == expiry_count else 'warning')
+        completion_key = self._p5_top_volume_completion_key(view_key)
+        self._p5_cache_completion(
+            completion_key,
+            ok=True,
+            request_id=request_id,
+            ticker=ticker,
+            payload=normalized_payload,
+        )
+        self._p5_apply_cached_completion(completion_key)
 
     def _p5_handle_top_volume_error(self, view_key: str, request_id: int, ticker: str, message: str) -> None:
         """Render a top-volume load failure if the request is still current."""
         if request_id != getattr(self, '_p5_top_volume_latest_request_ids', {}).get(view_key, 0):
             return
-        view = self._p5_top_volume_view(view_key)
-        status_lbl = view.get('status_lbl')
-        tab_label = str(view.get('tab_label', 'Top Options') or 'Top Options')
-        self._p5_set_top_volume_bucket_config(view_key, ())
-        self._p5_clear_top_volume_tables(view_key)
-        self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload((), ticker=ticker)
-        if status_lbl is not None:
-            self.set_status_text(status_lbl, f'Error loading {tab_label.lower()} for {ticker}: {message}', status='negative')
+        completion_key = self._p5_top_volume_completion_key(view_key)
+        self._p5_cache_completion(
+            completion_key,
+            ok=False,
+            request_id=request_id,
+            ticker=ticker,
+            message=message,
+        )
+        self._p5_apply_cached_completion(completion_key)
 
-    def _p5_render_top_volume_tables(self, view_key: str, ticker: str, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+    def _p5_render_top_volume_tables(
+        self,
+        view_key: str,
+        ticker: str,
+        bucket_records: dict[str, list[dict[str, Any]]],
+        bucket_expirations: dict[str, str],
+        *,
+        on_complete: Any=None,
+    ) -> None:
         """Render the cached top-volume bucket records into the UI tables."""
         view = self._p5_top_volume_view(view_key)
         sections = view.get('sections', {}) if isinstance(view.get('sections', {}), dict) else {}
+        groups = []
         for bucket_key, _bucket_label, _days_out in self._p5_top_volume_buckets(view_key):
             section = sections.get(bucket_key, {})
             table = section.get('table')
@@ -1466,7 +1932,7 @@ class OptionsChainMixin:
             if table is None:
                 continue
             table.setToolTip(f'Using expiration {expiry_display}' if expiry_display else 'No expiration available')
-            render_table_rows(
+            groups.append((
                 table,
                 build_option_summary_rows(
                     bucket_records.get(bucket_key, []),
@@ -1480,8 +1946,25 @@ class OptionsChainMixin:
                     low_volume_highlight_backgrounds=self._p5_low_volume_highlight_backgrounds(),
                     pd_module=pd,
                 ),
-            )
-        self._p5_apply_top_volume_sort(view_key)
+            ))
+
+        def _complete(completed: bool) -> None:
+            if completed:
+                self._p5_apply_top_volume_sort(view_key)
+            if callable(on_complete):
+                on_complete(completed)
+
+        visibility_guard = (
+            (lambda: self._p5_top_volume_is_visible(view_key))
+            if callable(on_complete)
+            else (lambda: True)
+        )
+        self._p5_render_table_groups(
+            ('top-volume-tables', view_key),
+            groups,
+            is_visible=visibility_guard,
+            on_terminal=_complete,
+        )
 
     def _p5_blend_colors(self, base_color: str, accent_color: str, amount: float) -> str:
         """Blend two colors and return a hex color string."""
@@ -1539,9 +2022,6 @@ class OptionsChainMixin:
         request_id = self._p5_expiry_request_seq
         self._p5_expiry_latest_request_id = request_id
         self.set_status_text(self.p5_status_lbl, f'Fetching expiries for {ticker}...', status='warning')
-        self.p5_expiry_combo.blockSignals(True)
-        self.p5_expiry_combo.clear()
-        self.p5_expiry_combo.blockSignals(False)
 
         def _run() -> None:
             """Fetch expiries and current spot."""
@@ -1566,7 +2046,13 @@ class OptionsChainMixin:
                 )
             except Exception as e:
                 logger.error(f'P5 expiry fetch failed for {ticker}: {e}')
-                self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_expiry_error(rid, message))
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, message=str(e): self._p5_handle_expiry_error(
+                        rid,
+                        message,
+                        ticker=symbol,
+                    )
+                )
         self._submit_options_fetch(_run)
 
     def _p5_handle_loaded_expiries(
@@ -1583,20 +2069,34 @@ class OptionsChainMixin:
             return
         if ticker != self._p5_shared_ticker():
             return
-        self._p5_chain_spot_price = float(price or 0.0)
-        self._p5_populate_expiries(exps, preferred_expiry=preferred_expiry)
-        if price:
-            self.p5_price_lbl.setText(f'${float(price):.2f}')
-        else:
-            self.p5_price_lbl.setText('')
+        self._p5_cache_completion(
+            self._P5_EXPIRY_COMPLETION_KEY,
+            ok=True,
+            request_id=request_id,
+            ticker=ticker,
+            expiries=list(exps or []),
+            price=price,
+            preferred_expiry=preferred_expiry,
+        )
+        self._p5_apply_cached_completion(self._P5_EXPIRY_COMPLETION_KEY)
 
-    def _p5_handle_expiry_error(self, request_id: int, message: str) -> None:
+    def _p5_handle_expiry_error(self, request_id: int, message: str, *, ticker: str='') -> None:
         """Show an expiry-fetch failure only when it is still current."""
         if request_id != getattr(self, '_p5_expiry_latest_request_id', 0):
             return
-        self.set_status_text(self.p5_status_lbl, f'Error: {message}', status='negative')
+        symbol = str(ticker or self._p5_shared_ticker()).upper().strip()
+        if ticker and symbol != self._p5_shared_ticker():
+            return
+        self._p5_cache_completion(
+            self._P5_EXPIRY_COMPLETION_KEY,
+            ok=False,
+            request_id=request_id,
+            ticker=symbol,
+            message=message,
+        )
+        self._p5_apply_cached_completion(self._P5_EXPIRY_COMPLETION_KEY)
 
-    def _p5_populate_expiries(self, exps: Any, *, preferred_expiry: str='') -> None:
+    def _p5_populate_expiries(self, exps: Any, *, preferred_expiry: str='', load_chain: bool=True) -> None:
         """Populate the expiry selector."""
         live_exps = self._p5_filter_live_expiries(exps)
         if not live_exps:
@@ -1623,7 +2123,8 @@ class OptionsChainMixin:
         self.p5_expiry_combo.setCurrentIndex(preferred_index if preferred_index >= 0 else 0)
         self.p5_expiry_combo.blockSignals(False)
         self.set_status_text(self.p5_status_lbl, 'Expiries loaded.', status='positive')
-        self._p5_load_chain()
+        if load_chain:
+            self._p5_load_chain()
 
     def _p5_load_chain(self) -> None:
         """Load and render the selected options chain."""
@@ -1675,7 +2176,13 @@ class OptionsChainMixin:
                 )
             except Exception as e:
                 logger.error(f'P5 chain load failed for {ticker} {expiry}: {e}')
-                self._invoke_main.emit(lambda rid=request_id, message=str(e): self._p5_handle_chain_error(rid, message))
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, message=str(e): self._p5_handle_chain_error(
+                        rid,
+                        message,
+                        ticker=symbol,
+                    )
+                )
         self._submit_options_fetch(_run)
 
     def _p5_handle_loaded_chain(
@@ -1692,13 +2199,33 @@ class OptionsChainMixin:
             return
         if ticker != self._p5_shared_ticker():
             return
-        self._p5_update_chain_view(ticker, df, expiry, spot_price, greek_inputs)
+        self._p5_cache_completion(
+            self._P5_CHAIN_COMPLETION_KEY,
+            ok=True,
+            request_id=request_id,
+            ticker=ticker,
+            df=df.copy() if hasattr(df, 'copy') else df,
+            expiry=expiry,
+            spot_price=spot_price,
+            greek_inputs=dict(greek_inputs or {}),
+        )
+        self._p5_apply_cached_completion(self._P5_CHAIN_COMPLETION_KEY)
 
-    def _p5_handle_chain_error(self, request_id: int, message: str) -> None:
+    def _p5_handle_chain_error(self, request_id: int, message: str, *, ticker: str='') -> None:
         """Show a chain-load failure only when it is still current."""
         if request_id != getattr(self, '_p5_chain_latest_request_id', 0):
             return
-        self.set_status_text(self.p5_status_lbl, f'Error: {message}', status='negative')
+        symbol = str(ticker or self._p5_shared_ticker()).upper().strip()
+        if ticker and symbol != self._p5_shared_ticker():
+            return
+        self._p5_cache_completion(
+            self._P5_CHAIN_COMPLETION_KEY,
+            ok=False,
+            request_id=request_id,
+            ticker=symbol,
+            message=message,
+        )
+        self._p5_apply_cached_completion(self._P5_CHAIN_COMPLETION_KEY)
 
     def _p5_enrich_chain(self, df: Any, expiry: str, spot_price: float, risk_free_rate: float, dividend_yield: float) -> Any:
         """Add UI-ready market and Greek columns to the raw chain data."""
@@ -1754,7 +2281,16 @@ class OptionsChainMixin:
             enriched[col] = greeks[col] if col in greeks else None
         return enriched
 
-    def _p5_update_chain_view(self, ticker: str, df: Any, expiry: str, spot_price: float, greek_inputs: dict[str, Any]) -> None:
+    def _p5_update_chain_view(
+        self,
+        ticker: str,
+        df: Any,
+        expiry: str,
+        spot_price: float,
+        greek_inputs: dict[str, Any],
+        *,
+        on_render_complete: Any=None,
+    ) -> None:
         """Store the latest spot value and redraw the chain tables."""
         self._p5_chain_ticker = str(ticker or '').upper().strip()
         self._p5_chain_spot_price = spot_price or 0.0
@@ -1764,8 +2300,20 @@ class OptionsChainMixin:
         self._p5_chain_dividend_source = str(greek_inputs.get('dividend_source', 'default') or 'default')
         if spot_price:
             self.p5_price_lbl.setText(f'${spot_price:.2f}')
-        self._p5_populate_tables(df, expiry)
-        self._p5_save_session_snapshot()
+        self._p5_populate_tables(
+            df,
+            expiry,
+            on_complete=lambda completed: self._p5_finish_chain_render(
+                completed,
+                on_render_complete,
+            ),
+        )
+
+    def _p5_finish_chain_render(self, completed: bool, callback: Any=None) -> None:
+        if completed:
+            self._p5_save_session_snapshot()
+        if callable(callback):
+            callback(completed)
 
     def _p5_escape_markdown_cell(self, value: Any) -> str:
         """Sanitize plain values for Markdown table cells."""
@@ -2069,32 +2617,81 @@ class OptionsChainMixin:
         if not getattr(self, '_p5_chain_df', pd.DataFrame()).empty:
             self._p5_populate_tables(self._p5_chain_df, self._p5_chain_expiry)
 
-    def _p5_populate_tables(self, df: Any, expiry: str) -> Any:
+    def _p5_populate_tables(self, df: Any, expiry: str, *, on_complete: Any=None) -> Any:
         """Render calls and puts tables, including strategy highlights."""
         self._p5_chain_df = df.copy() if df is not None else pd.DataFrame()
         self._p5_chain_expiry = expiry
-        render_table_rows(self.p5_calls_table, ())
-        render_table_rows(self.p5_puts_table, ())
         if df is None or df.empty:
-            self.set_status_text(self.p5_status_lbl, 'No chain data available.', status='muted')
+            def _empty_complete(completed: bool) -> None:
+                if completed:
+                    self.set_status_text(self.p5_status_lbl, 'No chain data available.', status='muted')
+                if callable(on_complete):
+                    on_complete(completed)
+
+            self._p5_render_table_groups(
+                'chain-tables',
+                [(self.p5_calls_table, ()), (self.p5_puts_table, ())],
+                is_visible=(self._p5_chain_is_visible if callable(on_complete) else lambda: True),
+                on_terminal=_empty_complete,
+            )
             return
         calls = df[df['type'] == 'Call'].sort_values('strike').reset_index(drop=True)
         puts = df[df['type'] == 'Put'].sort_values('strike').reset_index(drop=True)
         strategy = self.p5_strategy_combo.currentText()
         call_ranks, call_details = self._p5_rank_strategy_rows(calls, strategy)
         put_ranks, put_details = self._p5_rank_strategy_rows(puts, strategy)
-        self._p5_fill_chain_table(self.p5_calls_table, calls, call_ranks, call_details)
-        self._p5_fill_chain_table(self.p5_puts_table, puts, put_ranks, put_details)
-        status_text = f"Chain updated at {datetime.datetime.now().strftime('%H:%M:%S')}"
-        status_text += f" | r {self._p5_chain_rate * 100:.2f}% ({self._p5_chain_rate_source}) | q {self._p5_chain_dividend_yield * 100:.2f}% ({self._p5_chain_dividend_source})"
-        strategy_count = len(call_ranks if strategy == 'Covered Call' else put_ranks if strategy == 'Cash Secured Put' else {})
-        if strategy != 'None' and strategy_count:
-            side = 'call' if strategy == 'Covered Call' else 'put'
-            status_text += f' | {strategy}: highlighted top {strategy_count} {side} candidates'
-            top_details = self._p5_best_strategy_details(strategy, call_details, put_details)
-            if top_details:
-                status_text += f" | #1: {top_details}"
-        self.set_status_text(self.p5_status_lbl, status_text, status='positive')
+        call_rows = build_chain_rows(
+            calls,
+            self._P5_CHAIN_COLUMNS,
+            call_ranks,
+            call_details,
+            strategy_tooltip=self._p5_strategy_tooltip,
+            strategy_bg=self._p5_strategy_bg,
+            positive_color=self.theme_color('accent_positive'),
+            negative_color=self.theme_color('accent_negative'),
+            muted_color=self.theme_color('text_muted'),
+            pd_module=pd,
+        )
+        put_rows = build_chain_rows(
+            puts,
+            self._P5_CHAIN_COLUMNS,
+            put_ranks,
+            put_details,
+            strategy_tooltip=self._p5_strategy_tooltip,
+            strategy_bg=self._p5_strategy_bg,
+            positive_color=self.theme_color('accent_positive'),
+            negative_color=self.theme_color('accent_negative'),
+            muted_color=self.theme_color('text_muted'),
+            pd_module=pd,
+        )
+
+        def _complete(completed: bool) -> None:
+            if completed:
+                status_text = f"Chain updated at {datetime.datetime.now().strftime('%H:%M:%S')}"
+                status_text += f" | r {self._p5_chain_rate * 100:.2f}% ({self._p5_chain_rate_source}) | q {self._p5_chain_dividend_yield * 100:.2f}% ({self._p5_chain_dividend_source})"
+                strategy_count = len(
+                    call_ranks
+                    if strategy == 'Covered Call'
+                    else put_ranks
+                    if strategy == 'Cash Secured Put'
+                    else {}
+                )
+                if strategy != 'None' and strategy_count:
+                    side = 'call' if strategy == 'Covered Call' else 'put'
+                    status_text += f' | {strategy}: highlighted top {strategy_count} {side} candidates'
+                    top_details = self._p5_best_strategy_details(strategy, call_details, put_details)
+                    if top_details:
+                        status_text += f" | #1: {top_details}"
+                self.set_status_text(self.p5_status_lbl, status_text, status='positive')
+            if callable(on_complete):
+                on_complete(completed)
+
+        self._p5_render_table_groups(
+            'chain-tables',
+            [(self.p5_calls_table, call_rows), (self.p5_puts_table, put_rows)],
+            is_visible=(self._p5_chain_is_visible if callable(on_complete) else lambda: True),
+            on_terminal=_complete,
+        )
 
     def _p5_fill_chain_table(self, table: Any, data: Any, ranks: dict[int, int], details: dict[int, dict[str, Any]]) -> None:
         """Populate a single chain table with optional recommendation styling."""

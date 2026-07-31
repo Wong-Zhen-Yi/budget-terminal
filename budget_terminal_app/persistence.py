@@ -41,6 +41,7 @@ DEFAULT_CHART_PAGE_SETTINGS = {
     'drawings_by_context': {},
     'compare_interval_label': '1 Day',
     'compare_range_label': '5Y',
+    'compare_interval_labels_enabled': True,
     'watchlist': [],
     'compare_symbols': [],
     'compare_presets': [],
@@ -114,7 +115,7 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 30, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 21, 15, 16, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 30, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 21, 15, 16, 37, 17]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': [21, 30]}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
@@ -809,6 +810,8 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.insert(order.index(30) + 1, page_index)
             elif page_index == 33 and 5 in order:
                 order.insert(order.index(5) + 1, page_index)
+            elif page_index == 37 and SETTINGS_PAGE_INDEX in order:
+                order.insert(order.index(SETTINGS_PAGE_INDEX), page_index)
             else:
                 order.append(page_index)
     hidden_pages = []
@@ -1709,6 +1712,15 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
     compare_range_label = str(saved.get('compare_range_label', DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']) or DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']).strip().upper()
     if compare_range_label not in {'5Y', '3Y', '1Y', 'YTD', '3M', '1M'}:
         compare_range_label = DEFAULT_CHART_PAGE_SETTINGS['compare_range_label']
+    compare_interval_labels_value = saved.get(
+        'compare_interval_labels_enabled',
+        DEFAULT_CHART_PAGE_SETTINGS['compare_interval_labels_enabled'],
+    )
+    compare_interval_labels_enabled = (
+        bool(compare_interval_labels_value)
+        if isinstance(compare_interval_labels_value, bool | int)
+        else DEFAULT_CHART_PAGE_SETTINGS['compare_interval_labels_enabled']
+    )
     raw_watchlist = saved.get('watchlist', [])
     if not isinstance(raw_watchlist, list):
         raw_watchlist = []
@@ -1753,6 +1765,7 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         'drawings_by_context': drawings_by_context,
         'compare_interval_label': compare_interval_label,
         'compare_range_label': compare_range_label,
+        'compare_interval_labels_enabled': compare_interval_labels_enabled,
         'watchlist': watchlist,
         'compare_symbols': compare_symbols,
         'compare_presets': compare_presets,

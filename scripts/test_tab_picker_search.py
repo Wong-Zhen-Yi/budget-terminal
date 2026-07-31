@@ -23,7 +23,7 @@ from budget_terminal_app.persistence import DEFAULT_NAVIGATION_PAGE_ORDER, norma
 
 EXPECTED_DEFAULT_NAVIGATION_ORDER = [
     0, 25, 1, 30, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8,
-    22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 21, 15, 16, 17,
+    22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 21, 15, 16, 37, 17,
 ]
 
 
@@ -67,6 +67,17 @@ def test_default_navigation_order_and_normalization() -> None:
     migrated = normalize_navigation_settings({"page_order": pre_news_order, "hidden_pages": []})
     assert migrated["page_order"].index(33) == migrated["page_order"].index(5) + 1
 
+    stale_game_order = [
+        *[page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index not in {37, 17}],
+        34,
+        35,
+        36,
+        17,
+    ]
+    migrated = normalize_navigation_settings({"page_order": stale_game_order, "hidden_pages": [34, 35, 36]})
+    assert migrated["page_order"] == EXPECTED_DEFAULT_NAVIGATION_ORDER
+    assert migrated["hidden_pages"] == []
+
     legacy_news_order = [0, 25, 1, 5, 4, 32, 33, 3, 17]
     migrated = normalize_navigation_settings({"page_order": legacy_news_order, "hidden_pages": [4, 32]})
     assert 4 not in migrated["page_order"] and 32 not in migrated["page_order"]
@@ -85,10 +96,17 @@ def _build_window():
     WindowLifecycleMixin._start_lazy_warmup = lambda self: None
     try:
         window = BudgetTerminalApp()
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # Keep every smoke that reuses this helper deterministic: navigation
+        # must not restart production's deferred page warmup after the class
+        # monkeypatch below is restored.
+        window._start_lazy_warmup = lambda: None
 
         def close_event(event):
-            window._stop_recurring_scheduler()
-            event.accept()
+            # Exercise the same worker, timer, batched-render, and executor
+            # cleanup as the real window. A minimal test-only close leaves Qt
+            # resources alive and can race interpreter shutdown on Windows.
+            WindowLifecycleMixin.closeEvent(window, event)
 
         window.closeEvent = close_event
         window.navigation_state = normalize_navigation_settings(
@@ -140,6 +158,7 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
         assert "Valuation > Peers" in labels
         assert "Valuation > Notes" in labels
         assert "Valuation > Sources" in labels
+        assert "Charts > Cheat Sheet" in labels
         assert "Projections" in labels
         assert "Cards" in labels
         assert "Price" in labels
@@ -147,6 +166,13 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
         assert "Paper" not in labels
         assert window.btn_page31.isHidden()
         assert "Virtual" in labels
+        assert "Ticker Detective" not in labels
+        assert "Chart Lab" not in labels
+        assert "Analyst Academy" not in labels
+        assert "Dictionary" in labels
+        assert labels.index("Dictionary") == labels.index("YouTube") + 1
+        assert labels.index("Settings") == labels.index("Dictionary") + 1
+        assert not window.btn_page38.isHidden()
         assert "Options > Options by Top Volume" in labels
         assert "ETF > Holdings" in labels
         assert "ETF > Arbitrage" in labels
@@ -163,6 +189,10 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
         window._filter_tab_picker_items("arbitrage")
         assert window._tab_picker_list.count() == 1
         assert window._tab_picker_list.item(0).text() == "ETF > Arbitrage"
+
+        window._filter_tab_picker_items("dictionary")
+        assert window._tab_picker_list.count() == 1
+        assert window._tab_picker_list.item(0).text() == "Dictionary"
 
         window._filter_tab_picker_items("allocation")
         assert window._tab_picker_list.count() == 1
@@ -262,6 +292,31 @@ def test_news_page_is_lazy_hydrated_and_refreshable() -> None:
     finally:
         window.close()
         app.processEvents()
+
+
+def test_tab_picker_activates_charts_cheat_sheet() -> None:
+    app, window = _build_window()
+    try:
+        assert not window._page_initialized(index=9)
+        window._refresh_main_tab_picker_items()
+        window._filter_tab_picker_items("chart patterns")
+        assert window._tab_picker_list.count() == 1
+        item = window._tab_picker_list.currentItem()
+        assert item is not None
+        assert item.text() == "Charts > Cheat Sheet"
+
+        window._activate_tab_picker_item(item)
+        app.processEvents()
+
+        assert window.stacked_widget.currentIndex() == 9
+        assert window._page_initialized(index=9)
+        assert window.p10_tabs.currentWidget() is window.p10_cheat_tab
+        assert window._p10_active_subtab_key() == "cheatsheet"
+        assert "Offline reference" in window.status_bar.text()
+    finally:
+        window.close()
+        app.processEvents()
+
 
 def test_paper_page_is_lazy_and_engine_continues_when_hidden() -> None:
     app, window = _build_window()
@@ -388,6 +443,7 @@ if __name__ == "__main__":
     test_default_navigation_order_and_normalization()
     test_tab_picker_indexes_visible_pages_and_subpages()
     test_tab_picker_activates_lazy_subpage()
+    test_tab_picker_activates_charts_cheat_sheet()
     test_price_page_is_lazy_and_refreshable()
     test_news_page_is_lazy_hydrated_and_refreshable()
     test_paper_page_is_lazy_and_engine_continues_when_hidden()
@@ -396,4 +452,11 @@ if __name__ == "__main__":
     test_backtick_opens_and_refocuses_from_input()
     print("tab picker search smoke passed")
     sys.stdout.flush()
-    os._exit(0)
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is not None:
+        app.closeAllWindows()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        app.quit()

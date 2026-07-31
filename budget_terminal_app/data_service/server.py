@@ -17,6 +17,10 @@ class DashboardRefreshRequest(BaseModel):
     allow_non_chart_reuse: bool = False
 
 
+class PortfolioQuotesRequest(BaseModel):
+    tickers: list[str] = Field(default_factory=list)
+
+
 class MonthReturnsRequest(BaseModel):
     tickers: list[str] = Field(default_factory=list)
     period: str = "1mo"
@@ -57,6 +61,11 @@ def create_app(coordinator: DashboardFetchCoordinator | None = None) -> FastAPI:
     @app.post("/dashboard/refresh")
     def refresh_dashboard(request: DashboardRefreshRequest) -> dict[str, Any]:
         payload = app.state.coordinator.fetch_dashboard(_model_payload(request))
+        return serialize_dashboard_payload(payload)
+
+    @app.post("/portfolio/quotes")
+    def portfolio_quotes(request: PortfolioQuotesRequest) -> dict[str, Any]:
+        payload = app.state.coordinator.fetch_portfolio_quotes(_model_payload(request))
         return serialize_dashboard_payload(payload)
 
     @app.post("/portfolio/month-returns")

@@ -24,6 +24,7 @@ from budget_terminal_app.data_service.client import (
 from budget_terminal_app.data_service.coordinator import DashboardFetchCoordinator
 from budget_terminal_app.data_service.serialization import serialize_dashboard_payload
 from budget_terminal_app.data_service.tasks import MarketDataTaskRunner
+from budget_terminal_app.workers.data import DataWorker
 
 
 class _Response:
@@ -60,6 +61,9 @@ class _EchoCoordinator:
     def fetch_dashboard(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._result("dashboard", request)
 
+    def fetch_portfolio_quotes(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._result("portfolio_quotes", request)
+
     def fetch_month_returns(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._result("month_returns", request)
 
@@ -85,6 +89,7 @@ class _LoopbackHttpxClient:
     def post(self, path: str, json: dict[str, Any]) -> _Response:
         handlers = {
             "/dashboard/refresh": self.coordinator.fetch_dashboard,
+            "/portfolio/quotes": self.coordinator.fetch_portfolio_quotes,
             "/portfolio/month-returns": self.coordinator.fetch_month_returns,
             "/portfolio/momentum": self.coordinator.fetch_portfolio_momentum,
             "/portfolio/analytics": self.coordinator.fetch_portfolio_analytics,
@@ -127,6 +132,7 @@ def test_transport_contract_parity() -> None:
             ["AAPL"], [("SPY", "1y", "1d")], request_id=7,
             refresh_reason="manual_refresh", allow_non_chart_reuse=True,
         ),
+        lambda client: client.fetch_portfolio_quotes(["AAPL", "MSFT"]),
         lambda client: client.fetch_month_returns(["AAPL"], period="3mo", interval="1d", start="2026-01-01"),
         lambda client: client.fetch_portfolio_momentum(
             ["AAPL"], {"AAPL": 2}, period="1y", interval="1d", cash_amount=10,
@@ -176,6 +182,16 @@ def test_identical_requests_are_coalesced() -> None:
     assert result_a["request_id"] == 1
     assert result_b["request_id"] == 2
     assert result_a["payload"] == result_b["payload"] == [1, 2, 3]
+
+
+def test_portfolio_quote_worker_excludes_dashboard_fanout() -> None:
+    worker = DataWorker(["AAPL"], [])
+    worker._download_batch_data = lambda _symbols: pd.DataFrame()
+    worker._load_close_series = lambda *_args: pd.Series([100.0, 102.0])
+    payload = worker.fetch_portfolio_quotes()
+
+    assert payload["portfolio"]["AAPL"]["price"] == 102.0
+    assert not ({"news", "targets", "market", "charts", "chart_options"} & payload.keys())
 
 
 def test_task_runner_reuses_executor_and_closes() -> None:
@@ -231,6 +247,7 @@ def test_inprocess_transport_avoids_serialization_overhead() -> None:
 if __name__ == "__main__":
     test_transport_contract_parity()
     test_identical_requests_are_coalesced()
+    test_portfolio_quote_worker_excludes_dashboard_fanout()
     test_task_runner_reuses_executor_and_closes()
     test_cache_supports_concurrent_readers_and_writers()
     test_inprocess_transport_avoids_serialization_overhead()

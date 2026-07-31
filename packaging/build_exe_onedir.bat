@@ -10,14 +10,18 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo Missing build environment: %VENV_DIR%
     echo Create it and install the build dependencies first:
     echo   python -m venv %VENV_DIR%
-    echo   %VENV_DIR%\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+    echo   %VENV_DIR%\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+    echo   %VENV_DIR%\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
     exit /b 1
 )
 
 call "%VENV_DIR%\Scripts\activate.bat"
 if errorlevel 1 exit /b 1
 
-python -m pip install -r requirements.txt pyinstaller
+python -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+if errorlevel 1 exit /b 1
+
+python -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
 for /f "delims=" %%i in ('python -c "from budget_terminal_app import __version__; print(__version__)"') do set "APP_VERSION=%%i"

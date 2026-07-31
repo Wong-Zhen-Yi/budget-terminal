@@ -17,6 +17,13 @@ P25_MAX_WORKERS = 2
 
 
 class BacktestPageMixin:
+    def _p25_page_is_visible(self) -> bool:
+        """Return whether the Backtest surface is currently visible."""
+        checker = getattr(self, "_is_current_page", None)
+        if callable(checker):
+            return bool(checker(getattr(self, "page25", None)))
+        return True
+
     def _get_backtest_data_service(self) -> BacktestDataService:
         """Return the window-scoped backtest data service."""
         service = getattr(self, "_backtest_data_service", None)
@@ -39,6 +46,12 @@ class BacktestPageMixin:
         self.p25_splitter_sizes = list(state.get("splitter_sizes", P25_DEFAULT_SPLITTER_SIZES))
         self._p25_request_seq = 0
         self._p25_active_request = 0
+        self._p25_fetching = False
+        self._p25_active_signature: tuple[Any, ...] | None = None
+        self._p25_queued_signature: tuple[Any, ...] | None = None
+        self._p25_result_cache: dict[tuple[Any, ...], tuple[dict[str, Any], str]] = {}
+        self._p25_pending_result: tuple[tuple[Any, ...], dict[str, Any], str] | None = None
+        self._p25_pending_error = ""
         self._p25_table_sync = False
         self._p25_interval_buttons = {}
         self._p25_range_buttons = {}
@@ -201,6 +214,16 @@ class BacktestPageMixin:
 
     def _p25_on_show(self) -> None:
         """Refresh light UI state when the Backtest page is shown."""
+        pending = getattr(self, "_p25_pending_result", None)
+        if isinstance(pending, tuple) and len(pending) == 3:
+            self._p25_pending_result = None
+            if pending[0] == self._p25_input_signature():
+                self._p25_render_result(pending[1], interval_label=pending[2])
+                self._p25_update_result_status(pending[1])
+        pending_error = str(getattr(self, "_p25_pending_error", "") or "")
+        if pending_error:
+            self._p25_pending_error = ""
+            self._p25_set_status(f"Backtest failed: {pending_error}", "negative")
         self._p25_update_weight_total()
         self._p25_update_button_styles()
         self._p25_sync_status_bar()
@@ -403,7 +426,29 @@ class BacktestPageMixin:
             "splitter_sizes": self.p25_splitter.sizes() if hasattr(self, "p25_splitter") else P25_DEFAULT_SPLITTER_SIZES,
         })
 
+    def _p25_input_signature(self) -> tuple[Any, ...]:
+        """Capture every user input that changes a Backtest result."""
+        rows = tuple(
+            (str(row.get("symbol", "") or "").upper().strip(), round(float(row.get("weight", 0.0) or 0.0), 8))
+            for row in self._p25_table_rows()
+        )
+        compare_input = getattr(self, "p25_compare_input", None)
+        compare = compare_input.text() if compare_input is not None else getattr(self, "p25_compare_symbol", "")
+        return (
+            rows,
+            str(compare or "").upper().strip(),
+            str(getattr(self, "p25_interval_label", "1D") or "1D"),
+            str(getattr(self, "p25_range_label", "Max") or "Max"),
+        )
+
     def _p25_run_backtest(self) -> None:
+        requested_signature = self._p25_input_signature()
+        if getattr(self, "_p25_fetching", False):
+            if requested_signature == getattr(self, "_p25_active_signature", None):
+                self._p25_queued_signature = None
+            else:
+                self._p25_queued_signature = requested_signature
+            return
         self._p25_on_compare_changed()
         rows = self._p25_table_rows()
         if not rows:
@@ -413,7 +458,10 @@ class BacktestPageMixin:
         self._p25_request_seq += 1
         request_id = self._p25_request_seq
         self._p25_active_request = request_id
+        self._p25_fetching = True
+        self._p25_active_signature = self._p25_input_signature()
         interval = BACKTEST_INTERVALS.get(self.p25_interval_label, "1d")
+        interval_label = self.p25_interval_label
         range_key = self.p25_range_label
         compare_symbol = self.p25_compare_symbol
         self.p25_run_btn.setEnabled(False)
@@ -427,7 +475,10 @@ class BacktestPageMixin:
                     interval=interval,
                     range_key=range_key,
                 )
-                self._invoke_main.emit(lambda payload=result, req=request_id: self._p25_apply_result(req, payload))
+                self._invoke_main.emit(
+                    lambda payload=result, req=request_id, label=interval_label:
+                    self._p25_apply_result(req, payload, interval_label=label)
+                )
             except Exception as exc:
                 self._invoke_main.emit(lambda message=str(exc), req=request_id: self._p25_handle_error(req, message))
 
@@ -437,13 +488,35 @@ class BacktestPageMixin:
             self._p25_executor = executor
         executor.submit(_run)
 
-    def _p25_apply_result(self, request_id: Any, result: Any) -> None:
+    def _p25_apply_result(self, request_id: Any, result: Any, *, interval_label: Any = None) -> None:
         if int(request_id) != int(getattr(self, "_p25_active_request", 0)):
             return
+        self._p25_fetching = False
         self.p25_run_btn.setEnabled(True)
-        self._p25_render_result(result)
-        stats = result.get("stats", {}) if isinstance(result, dict) else {}
-        compare_error = str(result.get("compare_error", "") or "") if isinstance(result, dict) else ""
+        label = str(interval_label or self.p25_interval_label)
+        payload = result if isinstance(result, dict) else {}
+        signature = getattr(self, "_p25_active_signature", None)
+        if isinstance(signature, tuple):
+            self._p25_result_cache[signature] = (payload, label)
+        self._p25_pending_error = ""
+        queued_signature = getattr(self, "_p25_queued_signature", None)
+        self._p25_queued_signature = None
+        current_signature = self._p25_input_signature()
+        if isinstance(queued_signature, tuple) and queued_signature == current_signature and queued_signature != signature:
+            self._p25_run_backtest()
+            return
+        if signature != current_signature:
+            return
+        if not self._p25_page_is_visible():
+            self._p25_pending_result = (signature, payload, label)
+            return
+        self._p25_pending_result = None
+        self._p25_render_result(payload, interval_label=label)
+        self._p25_update_result_status(payload)
+
+    def _p25_update_result_status(self, result: dict[str, Any]) -> None:
+        stats = result.get("stats", {})
+        compare_error = str(result.get("compare_error", "") or "")
         if compare_error:
             self._p25_set_status(f"Backtest loaded. {compare_error}", "warning")
         else:
@@ -454,10 +527,23 @@ class BacktestPageMixin:
     def _p25_handle_error(self, request_id: Any, message: Any) -> None:
         if int(request_id) != int(getattr(self, "_p25_active_request", 0)):
             return
+        self._p25_fetching = False
         self.p25_run_btn.setEnabled(True)
+        signature = getattr(self, "_p25_active_signature", None)
+        queued_signature = getattr(self, "_p25_queued_signature", None)
+        self._p25_queued_signature = None
+        current_signature = self._p25_input_signature()
+        if isinstance(queued_signature, tuple) and queued_signature == current_signature and queued_signature != signature:
+            self._p25_run_backtest()
+            return
+        if signature != current_signature:
+            return
+        if not self._p25_page_is_visible():
+            self._p25_pending_error = str(message)
+            return
         self._p25_set_status(f"Backtest failed: {message}", "negative")
 
-    def _p25_render_result(self, result: dict[str, Any]) -> None:
+    def _p25_render_result(self, result: dict[str, Any], *, interval_label: Any = None) -> None:
         portfolio_return = result.get("portfolio_return")
         if portfolio_return is None or getattr(portfolio_return, "empty", True):
             self.p25_empty_label.show()
@@ -465,7 +551,7 @@ class BacktestPageMixin:
             return
         dates = list(portfolio_return.index)
         x_values = list(range(len(dates)))
-        self.p25_axis.set_dates(dates, BACKTEST_INTERVALS.get(self.p25_interval_label, "1d"))
+        self.p25_axis.set_dates(dates, BACKTEST_INTERVALS.get(str(interval_label or self.p25_interval_label), "1d"))
         self.p25_plot.clear()
         self.p25_plot.plot(
             x_values,

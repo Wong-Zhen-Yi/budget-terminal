@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import hashlib
 import random
 import time
 from concurrent.futures import FIRST_COMPLETED, wait as wait_futures
@@ -60,6 +61,7 @@ class RandomStockWorker(QObject):
         self._cancel_event = threading.Event()
         self._history_frames: dict[str, Any] = {}
         self._pattern_contexts: dict[int, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self._active_pattern_signatures: dict[int, tuple[Any, ...]] = {}
         self._fetch_meta: dict[str, Any] = {
             'screen_cache_hit': False,
             'history_cache_hits': 0,
@@ -904,8 +906,8 @@ class RandomStockWorker(QObject):
         """Calculate indicators shared by selected pattern evaluators once per frame."""
         if frame is None or getattr(frame, 'empty', True):
             return {}
-        signature = self._history_signature(frame)
         cache_key = id(frame)
+        signature = self._active_pattern_signatures.get(cache_key) or self._history_signature(frame)
         cached = self._pattern_contexts.get(cache_key)
         if cached is not None and cached[0] == signature:
             return cached[1]
@@ -973,6 +975,40 @@ class RandomStockWorker(QObject):
         }
         self._pattern_contexts[cache_key] = (signature, context)
         return context
+
+    def _distinct_trough_indexes(
+        self,
+        indexes: Any,
+        low: Any,
+        *,
+        max_adjacent_gap: int = 4,
+    ) -> list[int]:
+        """Collapse adjacent swing-low marks into distinct trough zones."""
+        raw_indexes = list(indexes) if indexes is not None else []
+        ordered = sorted({int(index) for index in raw_indexes if int(index) >= 0})
+        if not ordered:
+            return []
+        zones: list[list[int]] = [[ordered[0]]]
+        for index in ordered[1:]:
+            if index - zones[-1][-1] <= max_adjacent_gap:
+                zones[-1].append(index)
+            else:
+                zones.append([index])
+
+        representatives = []
+        for zone in zones:
+            valid = [
+                (index, self._to_float(low.iloc[index]))
+                for index in zone
+                if index < len(low)
+            ]
+            valid = [(index, value) for index, value in valid if value is not None and value > 0]
+            if not valid:
+                continue
+            minimum = min(value for _index, value in valid)
+            near_minimum = [index for index, value in valid if value <= minimum * 1.001]
+            representatives.append(near_minimum[len(near_minimum) // 2])
+        return representatives
 
     def _evaluate_breakout_pattern(self, frame: Any) -> tuple[bool, float, list[str], dict[str, Any]]:
         if frame is None or getattr(frame, 'empty', True) or len(frame) < 70:
@@ -1058,25 +1094,40 @@ class RandomStockWorker(QObject):
         macd_long_ok = bool(macd_line is not None and (macd_line >= 0 or (macd_line_change_20 is not None and macd_line_change_20 > 0)))
         macd_ok = bool(macd_short_ok and (macd_intermediate_ok or macd_long_ok))
 
-        volume_ok = True
-        if vol20 is not None and vol50 is not None and vol50 > 0:
+        volume_ok = None
+        if vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0:
             volume_ok = vol20 >= vol50 * 0.85
-        if latest_volume is not None and vol20 is not None and vol20 > 0:
-            volume_ok = volume_ok or latest_volume >= vol20 * 0.9
-            volume_ok = volume_ok and latest_volume <= vol20 * 2.8
-        volume_short_ok = bool(latest_volume is None or vol20 is None or latest_volume >= vol20 * 0.75)
-        volume_intermediate_ok = bool(vol20 is None or vol50 is None or vol50 <= 0 or vol20 >= vol50 * 0.85)
-        volume_long_ok = bool(vol50 is None or vol120 is None or vol120 <= 0 or vol50 >= vol120 * 0.75)
+        if latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0:
+            latest_volume_ok = vol20 * 0.9 <= latest_volume <= vol20 * 2.8
+            volume_ok = latest_volume_ok if volume_ok is None else (volume_ok or latest_volume_ok)
+            if latest_volume > vol20 * 2.8:
+                volume_ok = False
+        volume_short_available = latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0
+        volume_intermediate_available = vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0
+        volume_long_available = vol50 is not None and vol50 > 0 and vol120 is not None and vol120 > 0
+        volume_short_not_adverse = not volume_short_available or latest_volume >= vol20 * 0.75
+        volume_intermediate_not_adverse = not volume_intermediate_available or vol20 >= vol50 * 0.85
+        volume_long_not_adverse = not volume_long_available or vol50 >= vol120 * 0.75
         volume_accumulation = bool(
             (vol20 is not None and vol50 is not None and vol50 > 0 and vol20 >= vol50 * 0.95)
             or (latest_volume is not None and vol20 is not None and vol20 > 0 and latest_volume >= vol20 * 1.05)
         )
 
-        short_timeframe_ok = bool((rsi_short_ok or macd_short_ok) and volume_short_ok)
-        intermediate_timeframe_ok = bool((rsi_intermediate_ok or macd_intermediate_ok) and volume_intermediate_ok)
-        long_timeframe_ok = bool((rsi_long_ok or macd_long_ok) and volume_long_ok)
+        short_timeframe_ok = bool((rsi_short_ok or macd_short_ok) and volume_short_not_adverse)
+        intermediate_timeframe_ok = bool((rsi_intermediate_ok or macd_intermediate_ok) and volume_intermediate_not_adverse)
+        long_timeframe_ok = bool((rsi_long_ok or macd_long_ok) and volume_long_not_adverse)
         timeframe_agreement_count = sum(1 for value in (short_timeframe_ok, intermediate_timeframe_ok, long_timeframe_ok) if value)
-        indicator_confirmations = sum(1 for value in (rsi_ok, macd_ok, volume_ok, timeframe_agreement_count >= 2) if value)
+        indicator_confirmations = sum(
+            1
+            for value in (
+                rsi_ok,
+                macd_ok,
+                volume_ok is True,
+                timeframe_agreement_count >= 2,
+                ma_stack_aligned and fast_ma_aligned,
+            )
+            if value
+        )
 
         timing_ok = pre_breakout or fresh_breakout
         if pre_breakout:
@@ -1124,7 +1175,7 @@ class RandomStockWorker(QObject):
         if volume_accumulation:
             score += 8
             reasons.append('volume accumulation')
-        if volume_ok:
+        if volume_ok is True:
             score += 4
             reasons.append('volume controlled')
         if timeframe_agreement_count >= 2:
@@ -1166,7 +1217,7 @@ class RandomStockWorker(QObject):
             'volume20': self._pattern_snapshot_value(vol20, 0),
             'volume50': self._pattern_snapshot_value(vol50, 0),
             'volume120': self._pattern_snapshot_value(vol120, 0),
-            'volume_state': 'accumulation' if volume_accumulation else ('controlled' if volume_ok else 'weak or disorderly'),
+            'volume_state': 'accumulation' if volume_accumulation else ('controlled' if volume_ok is True else ('weak or disorderly' if volume_ok is False else 'unavailable')),
             'short_timeframe_confirmed': short_timeframe_ok,
             'intermediate_timeframe_confirmed': intermediate_timeframe_ok,
             'long_timeframe_confirmed': long_timeframe_ok,
@@ -1235,12 +1286,13 @@ class RandomStockWorker(QObject):
         prior_60_close = self._latest_series_value(close, 60)
         decline_20 = (last_close - prior_20_close) / prior_20_close if prior_20_close else 0.0
         decline_60 = (last_close - prior_60_close) / prior_60_close if prior_60_close else 0.0
+        negative_trend_evidence = decline_20 <= -0.015 or decline_60 <= -0.03
         recent_20_high = self._to_float(high.tail(20).max())
         previous_20_high = self._to_float(high.iloc[-40:-20].max()) if len(high) >= 40 else None
         recent_20_low = self._to_float(low.tail(20).min())
         previous_20_low = self._to_float(low.iloc[-40:-20].min()) if len(low) >= 40 else None
         lower_highs = previous_20_high is not None and recent_20_high is not None and recent_20_high <= previous_20_high * 0.995
-        lower_lows = previous_20_low is not None and recent_20_low is not None and recent_20_low <= previous_20_low * 1.01
+        lower_lows = previous_20_low is not None and recent_20_low is not None and recent_20_low <= previous_20_low * 0.995
         below_daily_mas = last_close <= min(sma20, ema21) * 1.01 and last_close <= sma50 * 1.02
         bearish_stack = sma20 <= sma50 * 1.02 and (ema8 is None or ema8 <= ema21 * 1.01)
         if sma200 is not None:
@@ -1275,25 +1327,47 @@ class RandomStockWorker(QObject):
             up_volume_avg = self._to_float(recent_volume[recent_close >= recent_open].mean())
         except Exception:
             pass
+        latest_open = self._latest_series_value(context['open'])
+        latest_down_bar = latest_open is not None and last_close < latest_open
         downside_volume = bool(
-            (down_volume_avg is not None and up_volume_avg is not None and up_volume_avg > 0 and down_volume_avg >= up_volume_avg * 0.9)
-            or (latest_volume is not None and vol20 is not None and vol20 > 0 and latest_volume >= vol20 * 0.85)
+            (down_volume_avg is not None and down_volume_avg > 0 and up_volume_avg is not None and up_volume_avg > 0 and down_volume_avg >= up_volume_avg * 0.9)
+            or (
+                latest_down_bar
+                and latest_volume is not None
+                and latest_volume > 0
+                and vol20 is not None
+                and vol20 > 0
+                and latest_volume >= vol20 * 0.85
+            )
         )
-        volume_controlled = True
-        if latest_volume is not None and vol20 is not None and vol20 > 0:
+        volume_controlled = None
+        if latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0:
             volume_controlled = latest_volume <= vol20 * 3.2
-        volume_short_ok = bool(downside_volume or latest_volume is None or vol20 is None or latest_volume >= vol20 * 0.75)
-        volume_intermediate_ok = bool(vol20 is None or vol50 is None or vol50 <= 0 or vol20 >= vol50 * 0.75)
-        volume_long_ok = bool(vol50 is None or vol120 is None or vol120 <= 0 or vol50 >= vol120 * 0.65)
+        volume_short_available = latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0
+        volume_intermediate_available = vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0
+        volume_long_available = vol50 is not None and vol50 > 0 and vol120 is not None and vol120 > 0
+        volume_short_not_adverse = not volume_short_available or latest_volume >= vol20 * 0.75
+        volume_intermediate_not_adverse = not volume_intermediate_available or vol20 >= vol50 * 0.75
+        volume_long_not_adverse = not volume_long_available or vol50 >= vol120 * 0.65
 
         price_short_ok = bool(last_close <= sma20 * 1.01 or decline_20 <= -0.02)
         price_intermediate_ok = bool(last_close <= sma50 * 1.02 or decline_60 <= -0.04)
-        price_long_ok = bool(sma200 is None or last_close <= sma200 * 1.03 or decline_60 <= -0.06)
-        short_timeframe_ok = bool((price_short_ok or rsi_short_ok or macd_short_ok) and volume_short_ok)
-        intermediate_timeframe_ok = bool((price_intermediate_ok or rsi_intermediate_ok or macd_intermediate_ok) and volume_intermediate_ok)
-        long_timeframe_ok = bool((price_long_ok or rsi_long_ok or macd_long_ok) and volume_long_ok)
+        price_long_ok = bool((sma200 is not None and last_close <= sma200 * 1.03) or decline_60 <= -0.06)
+        short_timeframe_ok = bool((price_short_ok or rsi_short_ok or macd_short_ok) and volume_short_not_adverse)
+        intermediate_timeframe_ok = bool((price_intermediate_ok or rsi_intermediate_ok or macd_intermediate_ok) and volume_intermediate_not_adverse)
+        long_timeframe_ok = bool((price_long_ok or rsi_long_ok or macd_long_ok) and volume_long_not_adverse)
         timeframe_agreement_count = sum(1 for value in (short_timeframe_ok, intermediate_timeframe_ok, long_timeframe_ok) if value)
-        indicator_confirmations = sum(1 for value in (rsi_ok, macd_ok, downside_volume, timeframe_agreement_count >= 2) if value)
+        indicator_confirmations = sum(
+            1
+            for value in (
+                rsi_ok,
+                macd_ok,
+                downside_volume,
+                timeframe_agreement_count >= 2,
+                negative_trend_evidence and (bearish_stack or lower_highs or lower_lows),
+            )
+            if value
+        )
 
         score = 0.0
         reasons = []
@@ -1327,7 +1401,7 @@ class RandomStockWorker(QObject):
         if downside_volume:
             score += 8
             reasons.append('downside volume')
-        if volume_controlled:
+        if volume_controlled is True:
             score += 4
             reasons.append('volume controlled')
         if timeframe_agreement_count >= 2:
@@ -1345,6 +1419,7 @@ class RandomStockWorker(QObject):
             'setup_stage': 'Downtrend',
             'decline_20d_pct': self._pattern_snapshot_value(decline_20 * 100.0),
             'decline_60d_pct': self._pattern_snapshot_value(decline_60 * 100.0),
+            'negative_trend_evidence': negative_trend_evidence,
             'distance_to_sma20_pct': self._pattern_snapshot_value(distance_to_sma20 * 100.0),
             'distance_to_sma50_pct': self._pattern_snapshot_value(distance_to_sma50 * 100.0),
             'sma20': self._pattern_snapshot_value(sma20),
@@ -1365,14 +1440,16 @@ class RandomStockWorker(QObject):
             'volume20': self._pattern_snapshot_value(vol20, 0),
             'volume50': self._pattern_snapshot_value(vol50, 0),
             'volume120': self._pattern_snapshot_value(vol120, 0),
-            'volume_state': 'downside participation' if downside_volume else ('controlled' if volume_controlled else 'disorderly'),
+            'volume_state': 'downside participation' if downside_volume else ('controlled' if volume_controlled is True else ('disorderly' if volume_controlled is False else 'unavailable')),
             'short_timeframe_confirmed': short_timeframe_ok,
             'intermediate_timeframe_confirmed': intermediate_timeframe_ok,
             'long_timeframe_confirmed': long_timeframe_ok,
             'timeframe_agreement': f'{timeframe_agreement_count}/3',
+            'near_eligible': negative_trend_evidence,
         }
         matched = bool(
-            below_daily_mas
+            negative_trend_evidence
+            and below_daily_mas
             and (bearish_stack or lower_highs or lower_lows)
             and controlled_decline
             and indicator_confirmations >= 2
@@ -1405,36 +1482,58 @@ class RandomStockWorker(QObject):
         atr_contracting = atr20 <= atr60 * 0.85
         tight_range = range_pct <= 0.14
         inside_range = range_low * 1.01 <= last_close <= range_high * 0.99
-        orderly_volume = True
-        if vol20 is not None and vol60 is not None and vol60 > 0:
+        recent_closes = close.tail(20).dropna()
+        net_drift = 1.0
+        directional_efficiency = 1.0
+        if len(recent_closes) >= 10:
+            first_close = self._to_float(recent_closes.iloc[0])
+            last_recent_close = self._to_float(recent_closes.iloc[-1])
+            path_length = self._to_float(recent_closes.diff().abs().sum())
+            if first_close is not None and first_close > 0 and last_recent_close is not None:
+                net_change = last_recent_close - first_close
+                net_drift = abs(net_change) / first_close
+                directional_efficiency = abs(net_change) / path_length if path_length and path_length > 0 else 0.0
+        low_directional_drift = net_drift <= 0.04 and directional_efficiency <= 0.35
+        orderly_volume = None
+        if vol20 is not None and vol20 > 0 and vol60 is not None and vol60 > 0:
             orderly_volume = vol20 <= vol60 * 1.25
+        volume_disorderly = orderly_volume is False
 
         score = 0.0
         reasons = []
         if tight_range:
-            score += 35
+            score += 30
             reasons.append('tight 20D range')
         if atr_contracting:
-            score += 30
+            score += 25
             reasons.append('volatility contracted')
+        if low_directional_drift:
+            score += 25
+            reasons.append('low directional drift')
         if inside_range:
-            score += 20
+            score += 10
             reasons.append('inside range')
-        if orderly_volume:
-            score += 15
+        if orderly_volume is True:
+            score += 10
             reasons.append('orderly volume')
 
         snapshot = {
             'close': self._pattern_snapshot_value(last_close),
+            'setup_stage': 'Consolidation',
             'range_20d_high': self._pattern_snapshot_value(range_high),
             'range_20d_low': self._pattern_snapshot_value(range_low),
             'range_pct': self._pattern_snapshot_value(range_pct * 100.0),
+            'net_drift_pct': self._pattern_snapshot_value(net_drift * 100.0),
+            'directional_efficiency': self._pattern_snapshot_value(directional_efficiency, 3),
             'atr20': self._pattern_snapshot_value(atr20),
             'atr60': self._pattern_snapshot_value(atr60),
             'volume20': self._pattern_snapshot_value(vol20, 0),
             'volume60': self._pattern_snapshot_value(vol60, 0),
+            'volume_state': 'orderly' if orderly_volume is True else ('disorderly' if volume_disorderly else 'unavailable'),
+            'near_eligible': bool(low_directional_drift and not volume_disorderly),
         }
-        return bool(tight_range and atr_contracting and inside_range and orderly_volume), min(100.0, score), reasons, snapshot
+        matched = bool(tight_range and atr_contracting and inside_range and low_directional_drift and not volume_disorderly)
+        return matched, min(100.0, score), reasons, snapshot
 
     def _evaluate_double_bottom_pattern(self, frame: Any) -> tuple[bool, float, list[str], dict[str, Any]]:
         if frame is None or getattr(frame, 'empty', True) or len(frame) < 90:
@@ -1483,7 +1582,9 @@ class RandomStockWorker(QObject):
         macd_line_change_20 = self._series_change(macd_line_series, 20)
 
         lookback_start = max(0, len(low) - 120)
-        swing_lows = [index for index in context['swing_low_indexes'] if index >= lookback_start]
+        raw_swing_lows = [index for index in context['swing_low_indexes'] if index >= lookback_start]
+        swing_lows = self._distinct_trough_indexes(raw_swing_lows, low)
+        trough_zone_count = len(swing_lows)
 
         best_score = 0.0
         best_reasons: list[str] = []
@@ -1545,17 +1646,26 @@ class RandomStockWorker(QObject):
                     down_volume_avg = self._to_float(recent_volume[recent_close < recent_open].mean())
                 except Exception:
                     pass
+                latest_open = self._latest_series_value(context['open'])
+                latest_up_bar = latest_open is not None and last_close >= latest_open
                 constructive_volume = bool(
                     (up_volume_avg is not None and down_volume_avg is not None and down_volume_avg > 0 and up_volume_avg >= down_volume_avg * 0.9)
-                    or (latest_volume is not None and vol20 is not None and vol20 > 0 and latest_volume >= vol20 * 0.85)
+                    or (
+                        latest_up_bar
+                        and latest_volume is not None
+                        and latest_volume > 0
+                        and vol20 is not None
+                        and vol20 > 0
+                        and latest_volume >= vol20 * 0.85
+                    )
                 )
-                volume_controlled = True
-                if latest_volume is not None and vol20 is not None and vol20 > 0:
+                volume_controlled = None
+                if latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0:
                     volume_controlled = latest_volume <= vol20 * 3.0
-                volume_short_ok = bool(latest_volume is None or vol20 is None or latest_volume >= vol20 * 0.65)
-                volume_intermediate_ok = bool(vol20 is None or vol50 is None or vol50 <= 0 or vol20 >= vol50 * 0.70)
-                volume_long_ok = bool(vol50 is None or vol120 is None or vol120 <= 0 or vol50 >= vol120 * 0.60)
-                volume_ok = bool(volume_controlled and (constructive_volume or volume_intermediate_ok))
+                volume_short_ok = bool(latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0 and latest_volume >= vol20 * 0.65)
+                volume_intermediate_ok = bool(vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0 and vol20 >= vol50 * 0.70)
+                volume_long_ok = bool(vol50 is not None and vol50 > 0 and vol120 is not None and vol120 > 0 and vol50 >= vol120 * 0.60)
+                volume_ok = bool(constructive_volume and volume_controlled is not False)
 
                 rsi_above_ma = rsi is not None and rsi_ma is not None and rsi >= rsi_ma
                 rsi_recovering = bool(
@@ -1638,7 +1748,7 @@ class RandomStockWorker(QObject):
                 if constructive_volume:
                     score += 8
                     reasons.append('constructive volume')
-                if volume_controlled:
+                if volume_controlled is True:
                     score += 4
                     reasons.append('volume controlled')
                 if timeframe_agreement_count >= 2:
@@ -1664,6 +1774,7 @@ class RandomStockWorker(QObject):
                     'prior_decline_pct': self._pattern_snapshot_value(prior_decline * 100.0) if prior_decline is not None else None,
                     'days_between_bottoms': separation,
                     'days_since_second_bottom': days_since_second,
+                    'trough_zone_count': trough_zone_count,
                     'sma20': self._pattern_snapshot_value(sma20),
                     'sma50': self._pattern_snapshot_value(sma50),
                     'sma200': self._pattern_snapshot_value(sma200),
@@ -1678,11 +1789,12 @@ class RandomStockWorker(QObject):
                     'volume20': self._pattern_snapshot_value(vol20, 0),
                     'volume50': self._pattern_snapshot_value(vol50, 0),
                     'volume120': self._pattern_snapshot_value(vol120, 0),
-                    'volume_state': 'constructive' if constructive_volume else ('controlled' if volume_controlled else 'disorderly'),
+                    'volume_state': 'constructive' if constructive_volume else ('controlled' if volume_controlled is True else ('disorderly' if volume_controlled is False else 'unavailable')),
                     'short_timeframe_confirmed': short_timeframe_ok,
                     'intermediate_timeframe_confirmed': intermediate_timeframe_ok,
                     'long_timeframe_confirmed': long_timeframe_ok,
                     'timeframe_agreement': f'{timeframe_agreement_count}/3',
+                    'near_eligible': trough_zone_count >= 2,
                 }
                 matched = bool(
                     indicator_confirmations >= 2
@@ -1758,15 +1870,39 @@ class RandomStockWorker(QObject):
             if flag_days < 5 or flag_days > 25:
                 continue
             pole_high = self._to_float(high.iloc[pole_high_index])
-            pole_low_window = low.iloc[max(0, pole_high_index - 45):max(0, pole_high_index - 4)]
-            pole_low = self._to_float(pole_low_window.min()) if not pole_low_window.dropna().empty else None
+            local_peak_window = high.iloc[max(0, pole_high_index - 3):min(len(high), pole_high_index + 4)].dropna()
+            local_peak = self._to_float(local_peak_window.max()) if not local_peak_window.empty else None
+            if pole_high is None or local_peak is None or pole_high < local_peak * 0.997:
+                continue
+            pole_window_start = max(0, pole_high_index - 32)
+            pole_window_end = max(pole_window_start, pole_high_index - 4)
+            pole_low_window = low.iloc[pole_window_start:pole_window_end].dropna()
+            pole_low = self._to_float(pole_low_window.min()) if not pole_low_window.empty else None
             if pole_high is None or pole_low is None or pole_high <= 0 or pole_low <= 0:
+                continue
+            try:
+                pole_low_index = int(low.index.get_loc(pole_low_window.idxmin()))
+            except Exception:
+                continue
+            pole_days = pole_high_index - pole_low_index
+            if pole_days < 5 or pole_days > 32:
                 continue
             flagpole_gain = (pole_high - pole_low) / pole_low
             if flagpole_gain < 0.12:
                 continue
+            recent_impulse_index = max(pole_low_index, pole_high_index - 15)
+            recent_impulse_base = self._to_float(close.iloc[recent_impulse_index])
+            recent_impulse_gain = (
+                (pole_high - recent_impulse_base) / recent_impulse_base
+                if recent_impulse_base is not None and recent_impulse_base > 0
+                else 0.0
+            )
+            pole_daily_gain = flagpole_gain / max(pole_days, 1)
+            impulse_confirmed = pole_daily_gain >= 0.005 or recent_impulse_gain >= 0.08
+            if not impulse_confirmed:
+                continue
 
-            flag_high = high.iloc[pole_high_index + 1:]
+            flag_high = high.iloc[pole_high_index + 1:-1]
             flag_low_series = low.iloc[pole_high_index + 1:]
             if len(flag_high.dropna()) < 4 or len(flag_low_series.dropna()) < 4:
                 continue
@@ -1787,19 +1923,19 @@ class RandomStockWorker(QObject):
                 continue
             breakout = last_close >= flag_resistance * 1.002
             flag_close = close.iloc[pole_high_index + 1:]
-            flag_volume = volume.iloc[pole_high_index + 1:]
+            flag_volume = volume.iloc[pole_high_index + 1:-1]
             flag_vol_avg = self._to_float(flag_volume.mean())
-            pole_vol_avg = self._to_float(volume.iloc[max(0, pole_high_index - 20):pole_high_index + 1].mean())
-            orderly_volume = True
-            if flag_vol_avg is not None and pole_vol_avg is not None and pole_vol_avg > 0:
+            pole_vol_avg = self._to_float(volume.iloc[pole_low_index:pole_high_index + 1].mean())
+            orderly_volume = None
+            if flag_vol_avg is not None and flag_vol_avg > 0 and pole_vol_avg is not None and pole_vol_avg > 0:
                 orderly_volume = flag_vol_avg <= pole_vol_avg * 1.25
-            volume_controlled = True
-            if latest_volume is not None and vol20 is not None and vol20 > 0:
+            volume_controlled = None
+            if latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0:
                 volume_controlled = latest_volume <= vol20 * 2.7
-            volume_short_ok = bool(latest_volume is None or vol20 is None or latest_volume >= vol20 * 0.60)
-            volume_intermediate_ok = bool(vol20 is None or vol50 is None or vol50 <= 0 or vol20 >= vol50 * 0.70)
-            volume_long_ok = bool(vol50 is None or vol120 is None or vol120 <= 0 or vol50 >= vol120 * 0.65)
-            volume_ok = bool(orderly_volume and volume_controlled)
+            volume_short_ok = bool(latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0 and latest_volume >= vol20 * 0.60)
+            volume_intermediate_ok = bool(vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0 and vol20 >= vol50 * 0.70)
+            volume_long_ok = bool(vol50 is not None and vol50 > 0 and vol120 is not None and vol120 > 0 and vol50 >= vol120 * 0.65)
+            volume_ok = bool(orderly_volume is True and volume_controlled is not False)
 
             first_flag_high = self._to_float(flag_high.head(max(2, len(flag_high) // 2)).max())
             second_flag_high = self._to_float(flag_high.tail(max(2, len(flag_high) // 2)).max())
@@ -1883,10 +2019,10 @@ class RandomStockWorker(QObject):
             if macd_ok:
                 score += 8
                 reasons.append('MACD supportive')
-            if orderly_volume:
+            if orderly_volume is True:
                 score += 6
                 reasons.append('orderly volume')
-            if volume_controlled:
+            if volume_controlled is True:
                 score += 4
                 reasons.append('volume controlled')
             if timeframe_agreement_count >= 2:
@@ -1907,6 +2043,10 @@ class RandomStockWorker(QObject):
                 'distance_to_flag_resistance_pct': self._pattern_snapshot_value(distance_to_flag_resistance * 100.0),
                 'flag_resistance': self._pattern_snapshot_value(flag_resistance),
                 'flag_days': flag_days,
+                'pole_days': pole_days,
+                'pole_daily_gain_pct': self._pattern_snapshot_value(pole_daily_gain * 100.0, 3),
+                'recent_impulse_gain_pct': self._pattern_snapshot_value(recent_impulse_gain * 100.0),
+                'impulse_confirmed': impulse_confirmed,
                 'sma20': self._pattern_snapshot_value(sma20),
                 'sma50': self._pattern_snapshot_value(sma50),
                 'sma200': self._pattern_snapshot_value(sma200),
@@ -1921,11 +2061,12 @@ class RandomStockWorker(QObject):
                 'volume20': self._pattern_snapshot_value(vol20, 0),
                 'volume50': self._pattern_snapshot_value(vol50, 0),
                 'volume120': self._pattern_snapshot_value(vol120, 0),
-                'volume_state': 'orderly' if orderly_volume else ('controlled' if volume_controlled else 'disorderly'),
+                'volume_state': 'orderly' if orderly_volume is True else ('controlled' if volume_controlled is True else ('disorderly' if orderly_volume is False or volume_controlled is False else 'unavailable')),
                 'short_timeframe_confirmed': short_timeframe_ok,
                 'intermediate_timeframe_confirmed': intermediate_timeframe_ok,
                 'long_timeframe_confirmed': long_timeframe_ok,
                 'timeframe_agreement': f'{timeframe_agreement_count}/3',
+                'near_eligible': bool(impulse_confirmed and controlled_flag and still_supported),
             }
             matched = bool(
                 price_short_ok
@@ -1994,7 +2135,9 @@ class RandomStockWorker(QObject):
         macd_line_change_20 = self._series_change(macd_line_series, 20)
 
         lookback_start = max(0, len(low) - 110)
-        swing_lows = [index for index in context['swing_low_indexes'] if index >= lookback_start]
+        raw_swing_lows = [index for index in context['swing_low_indexes'] if index >= lookback_start]
+        swing_lows = self._distinct_trough_indexes(raw_swing_lows, low)
+        trough_zone_count = len(swing_lows)
 
         best_score = 0.0
         best_reasons: list[str] = []
@@ -2016,7 +2159,7 @@ class RandomStockWorker(QObject):
                     continue
                 price_low_change = (second_low - first_low) / first_low
                 rsi_divergence_points = second_rsi - first_rsi
-                if price_low_change > 0.02 or price_low_change < -0.18 or rsi_divergence_points < 4.0:
+                if price_low_change > -0.005 or price_low_change < -0.18 or rsi_divergence_points < 4.0:
                     continue
                 post_second_low = self._to_float(low.iloc[second_index + 1:].min()) if second_index + 1 < len(low) else None
                 if post_second_low is not None and post_second_low < second_low * 0.985:
@@ -2050,8 +2193,8 @@ class RandomStockWorker(QObject):
                     upside_volume_avg = self._to_float(recent_volume[recent_close >= recent_open].mean())
                 except Exception:
                     pass
-                volume_controlled = True
-                if latest_volume is not None and vol20 is not None and vol20 > 0:
+                volume_controlled = None
+                if latest_volume is not None and latest_volume > 0 and vol20 is not None and vol20 > 0:
                     volume_controlled = latest_volume <= vol20 * 3.0
                 selloff_disorderly = bool(
                     latest_volume is not None
@@ -2062,11 +2205,10 @@ class RandomStockWorker(QObject):
                 )
                 constructive_volume = bool(
                     (upside_volume_avg is not None and downside_volume_avg is not None and downside_volume_avg > 0 and upside_volume_avg >= downside_volume_avg * 0.8)
-                    or volume_controlled
                 )
-                volume_short_ok = bool(volume_controlled or latest_volume is None or vol20 is None)
-                volume_intermediate_ok = bool(vol20 is None or vol50 is None or vol50 <= 0 or vol20 >= vol50 * 0.60)
-                volume_long_ok = bool(vol50 is None or vol120 is None or vol120 <= 0 or vol50 >= vol120 * 0.55)
+                volume_short_ok = bool(volume_controlled is True)
+                volume_intermediate_ok = bool(vol20 is not None and vol20 > 0 and vol50 is not None and vol50 > 0 and vol20 >= vol50 * 0.60)
+                volume_long_ok = bool(vol50 is not None and vol50 > 0 and vol120 is not None and vol120 > 0 and vol50 >= vol120 * 0.55)
 
                 rsi_above_ma = rsi is not None and rsi_ma is not None and rsi >= rsi_ma
                 rsi_turning = bool(
@@ -2098,7 +2240,7 @@ class RandomStockWorker(QObject):
                 else:
                     score += 12
                     reasons.append('similar price low')
-                if rsi_divergence_points >= 8:
+                if rsi_divergence_points >= 7.5:
                     score += 20
                     reasons.append('strong RSI divergence')
                 else:
@@ -2118,6 +2260,9 @@ class RandomStockWorker(QObject):
                 if days_since_second <= 25:
                     score += 8
                     reasons.append('fresh divergence')
+                elif days_since_second <= 35:
+                    score += 6
+                    reasons.append('recent divergence')
                 else:
                     score += 4
                 if rsi_turning:
@@ -2129,7 +2274,7 @@ class RandomStockWorker(QObject):
                 if constructive_volume:
                     score += 6
                     reasons.append('volume stabilizing')
-                if volume_controlled:
+                if volume_controlled is True:
                     score += 4
                     reasons.append('volume controlled')
                 if timeframe_agreement_count >= 2:
@@ -2154,6 +2299,7 @@ class RandomStockWorker(QObject):
                     'rebound_from_second_pct': self._pattern_snapshot_value(rebound_from_second * 100.0),
                     'days_between_lows': separation,
                     'days_since_second_low': days_since_second,
+                    'trough_zone_count': trough_zone_count,
                     'sma20': self._pattern_snapshot_value(sma20),
                     'sma50': self._pattern_snapshot_value(sma50),
                     'sma200': self._pattern_snapshot_value(sma200),
@@ -2168,11 +2314,12 @@ class RandomStockWorker(QObject):
                     'volume20': self._pattern_snapshot_value(vol20, 0),
                     'volume50': self._pattern_snapshot_value(vol50, 0),
                     'volume120': self._pattern_snapshot_value(vol120, 0),
-                    'volume_state': 'stabilizing' if constructive_volume else ('controlled' if volume_controlled else 'disorderly'),
+                    'volume_state': 'stabilizing' if constructive_volume else ('controlled' if volume_controlled is True else ('disorderly' if volume_controlled is False else 'unavailable')),
                     'short_timeframe_confirmed': short_timeframe_ok,
                     'intermediate_timeframe_confirmed': intermediate_timeframe_ok,
                     'long_timeframe_confirmed': long_timeframe_ok,
                     'timeframe_agreement': f'{timeframe_agreement_count}/3',
+                    'near_eligible': trough_zone_count >= 2 and price_low_change <= -0.005,
                 }
                 matched = bool(
                     not selloff_disorderly
@@ -2198,12 +2345,18 @@ class RandomStockWorker(QObject):
         if frame is None or getattr(frame, 'empty', True):
             return ('unavailable',)
         try:
-            last_row = frame.iloc[-1]
+            columns = [column for column in ('Open', 'High', 'Low', 'Close', 'Volume') if column in frame.columns]
+            if not columns:
+                return ('unavailable',)
+            values = frame.loc[:, columns].apply(pd.to_numeric, errors='coerce')
+            row_hashes = pd.util.hash_pandas_object(values, index=True).values.tobytes()
+            digest = hashlib.blake2b(row_hashes, digest_size=12).hexdigest()
             return (
                 len(frame),
+                tuple(columns),
+                str(frame.index[0]),
                 str(frame.index[-1]),
-                self._pattern_snapshot_value(last_row.get('Close'), 6),
-                self._pattern_snapshot_value(last_row.get('Volume'), 0),
+                digest,
             )
         except Exception:
             return (len(frame),)
@@ -2224,26 +2377,31 @@ class RandomStockWorker(QObject):
         }
         signature = self._history_signature(frame)
         results = {}
-        for mode in sorted(self.pattern_modes):
-            self._raise_if_cancelled()
-            evaluator = evaluators.get(mode)
-            if evaluator is None:
-                continue
-            cache_key = (str(symbol or '').upper().strip(), mode, signature)
-            cached = self._cache_get(self._evaluation_cache, cache_key, self._EVALUATION_CACHE_TTL_SECONDS)
-            if cached is not None:
-                self._fetch_meta['evaluation_cache_hits'] += 1
-                results[mode] = cached
-                continue
-            result = evaluator(frame)
-            normalized_result = (
-                bool(result[0]),
-                float(result[1] or 0.0),
-                list(result[2] or []),
-                dict(result[3] or {}),
-            )
-            self._cache_put(self._evaluation_cache, cache_key, normalized_result)
-            results[mode] = normalized_result
+        frame_key = id(frame)
+        self._active_pattern_signatures[frame_key] = signature
+        try:
+            for mode in sorted(self.pattern_modes):
+                self._raise_if_cancelled()
+                evaluator = evaluators.get(mode)
+                if evaluator is None:
+                    continue
+                cache_key = (str(symbol or '').upper().strip(), mode, signature)
+                cached = self._cache_get(self._evaluation_cache, cache_key, self._EVALUATION_CACHE_TTL_SECONDS)
+                if cached is not None:
+                    self._fetch_meta['evaluation_cache_hits'] += 1
+                    results[mode] = cached
+                    continue
+                result = evaluator(frame)
+                normalized_result = (
+                    bool(result[0]),
+                    float(result[1] or 0.0),
+                    list(result[2] or []),
+                    dict(result[3] or {}),
+                )
+                self._cache_put(self._evaluation_cache, cache_key, normalized_result)
+                results[mode] = normalized_result
+        finally:
+            self._active_pattern_signatures.pop(frame_key, None)
         return results
 
     def _pattern_label(self, mode: str, snapshot: dict[str, Any], *, near: bool = False) -> str:
@@ -2266,12 +2424,47 @@ class RandomStockWorker(QObject):
         matched, score, _reasons, snapshot = result
         if matched or not snapshot:
             return False
+        if snapshot.get('near_eligible') is False:
+            return False
         threshold = 50.0 if mode == 'breakout' else 55.0
         if float(score or 0.0) < threshold:
             return False
         if mode == 'breakout' and str(snapshot.get('setup_stage') or '') in {'Late Breakout', 'No Breakout'}:
             return False
         return True
+
+    def _primary_pattern_mode(
+        self,
+        modes: list[str],
+        results: dict[str, tuple[bool, float, list[str], dict[str, Any]]],
+    ) -> str:
+        """Choose a deterministic primary mode without letting weak shapes outrank clear generic setups."""
+        eligible = [mode for mode in modes if mode in results]
+        if not eligible:
+            return ''
+        deterministic_order = {
+            'bullish_flag': 6,
+            'double_bottom': 5,
+            'bullish_rsi_divergence': 4,
+            'breakout': 3,
+            'consolidation': 2,
+            'downtrend': 1,
+        }
+        top_score = max(float(results[mode][1] or 0.0) for mode in eligible)
+        structural_modes = {'bullish_flag', 'double_bottom', 'bullish_rsi_divergence'}
+        close_structural = [
+            mode
+            for mode in eligible
+            if mode in structural_modes and float(results[mode][1] or 0.0) >= top_score - 6.0
+        ]
+        choice_pool = close_structural or eligible
+        return max(
+            choice_pool,
+            key=lambda mode: (
+                float(results[mode][1] or 0.0),
+                deterministic_order.get(mode, 0),
+            ),
+        )
 
     def _apply_pattern_analysis(self, candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.pattern_modes or not candidates:
@@ -2312,7 +2505,7 @@ class RandomStockWorker(QObject):
                 if mode in results and results[mode][3] and float(results[mode][1] or 0.0) > 0
             ]
             eligible_modes = strict_modes or near_modes or fallback_modes
-            best_mode = max(eligible_modes, key=lambda mode: float(results[mode][1] or 0.0)) if eligible_modes else ''
+            best_mode = self._primary_pattern_mode(eligible_modes, results)
             if best_mode:
                 _matched, pattern_score, pattern_reasons, best_snapshot = results[best_mode]
                 pattern_type = self._pattern_label(best_mode, best_snapshot, near=tier == 'near')
@@ -2933,7 +3126,7 @@ class RandomStockWorker(QObject):
                 'bullish_rsi_divergence': 'bullish RSI divergence',
             }
             mode_text = ' or '.join(mode_labels.get(mode, mode) for mode in sorted(self.pattern_modes))
-            screening_summary = f'{screening_summary} Filtered for {mode_text} setups using one-year daily history.'
+            screening_summary = f'{screening_summary} Searched for {mode_text} setups using one-year daily history.'
         if pattern_status.get('fallback_reason'):
             for candidate in candidate_pool:
                 candidate['pattern_fallback_reason'] = pattern_status.get('fallback_reason')

@@ -161,6 +161,16 @@ class SpyHeatmapMixin:
         """Warm every configured ETF heatmap when the tab is shown."""
         self._p17_request_all_etfs()
 
+    def _p17_page_is_visible(self) -> bool:
+        page = getattr(self, 'page17', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
+
     def _p17_request_all_etfs(self, *, force: bool = False) -> tuple[str, ...]:
         """Request every configured ETF through the shared cache-aware fetch path."""
         scheduled: list[str] = []
@@ -189,7 +199,10 @@ class SpyHeatmapMixin:
         last_fetch = float(getattr(self, "_p17_last_fetch_by_etf", {}).get(etf_symbol, 0.0) or 0.0)
         if not force and cached_result is not None and now - last_fetch <= self._P17_REFRESH_TTL_SECONDS:
             if etf_symbol == getattr(self, "_p17_etf_symbol", "SPY"):
-                self._p17_render_interval_result(reset_view=False)
+                if self._p17_page_is_visible():
+                    self._p17_render_interval_result(reset_view=False)
+                else:
+                    self._p17_render_pending = True
             return False
         fetching.add(etf_symbol)
         self._p17_fetching_symbols = fetching
@@ -249,11 +262,18 @@ class SpyHeatmapMixin:
         self._p17_last_fetch_by_etf[etf_symbol] = datetime.datetime.now().timestamp()
         if etf_symbol == getattr(self, "_p17_etf_symbol", "SPY"):
             self._p17_result = result
-            self._p17_render_interval_result(reset_view=True)
+            if self._p17_page_is_visible():
+                self._p17_render_interval_result(reset_view=True)
+            else:
+                self._p17_render_pending = True
         self._p17_update_refresh_state()
 
     def _p17_render_interval_result(self, *, reset_view: bool = False) -> None:
         """Render the cached ETF heatmap payload for the selected interval."""
+        if not self._p17_page_is_visible():
+            self._p17_render_pending = True
+            return
+        self._p17_render_pending = False
         result = self._p17_current_result()
         if result is None:
             return

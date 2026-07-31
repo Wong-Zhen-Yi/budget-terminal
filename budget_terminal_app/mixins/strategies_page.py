@@ -21,6 +21,13 @@ P29_MAX_WORKERS = 4
 class StrategiesPageMixin:
     """First-class page for equal-weight strategy and portfolio baskets."""
 
+    def _p29_page_is_visible(self) -> bool:
+        """Return whether Cards is the current real-app page."""
+        checker = getattr(self, "_is_current_page", None)
+        if callable(checker):
+            return bool(checker(getattr(self, "page29", None)))
+        return True
+
     def init_page29(self) -> None:
         self.strategies_state = load_strategies_state()
         self._p29_cards: dict[str, StrategyCardWidget] = {}
@@ -29,6 +36,9 @@ class StrategiesPageMixin:
         self._p29_performance_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._p29_request_seq = 0
         self._p29_active_requests: dict[str, int] = {}
+        self._p29_inflight_signatures: dict[str, tuple[Any, ...]] = {}
+        self._p29_queued_signatures: dict[str, tuple[Any, ...]] = {}
+        self._p29_render_pending = False
 
         layout = QVBoxLayout(self.page29)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -232,6 +242,7 @@ class StrategiesPageMixin:
             self.set_status_text(self.status_bar, text, status=status)
 
     def _p29_on_show(self) -> None:
+        self._p29_render_pending = False
         self._p29_refresh_cards(request_data=True)
         self._p29_set_status(f"Showing {len(self._p29_visible_card_ids)} card(s).")
 
@@ -276,16 +287,27 @@ class StrategiesPageMixin:
             return
         interval_key = str(self.strategies_state.get("intervals", {}).get(card_id, "1y") or "1y")
         cache_key = self._p29_cache_key(model, interval_key)
+        active_signature = self._p29_inflight_signatures.get(card_id)
+        if active_signature is not None:
+            if active_signature == cache_key:
+                self._p29_queued_signatures.pop(card_id, None)
+            else:
+                self._p29_queued_signatures[card_id] = cache_key
+            return
         if not force and cache_key in self._p29_performance_cache:
             payload = self._p29_performance_cache[cache_key]
             model["resolved_weights"] = dict(payload.get("weights", {}))
             model["resolved_weighting"] = str(payload.get("weighting", "") or "")
+            if not self._p29_page_is_visible():
+                self._p29_render_pending = True
+                return
             card.set_performance(payload)
             return
         card.set_loading()
         self._p29_request_seq += 1
         request_id = self._p29_request_seq
         self._p29_active_requests[card_id] = request_id
+        self._p29_inflight_signatures[card_id] = cache_key
 
         def _fetch() -> dict[str, Any]:
             return self._p29_get_service().fetch(
@@ -323,17 +345,31 @@ class StrategiesPageMixin:
     ) -> None:
         if self._p29_active_requests.get(card_id) != request_id:
             return
+        self._p29_inflight_signatures.pop(card_id, None)
+        queued_signature = self._p29_queued_signatures.pop(card_id, None)
         card = self._p29_cards.get(card_id)
-        if card is None:
-            return
-        if error or payload is None:
-            card.set_error(error or "Performance data unavailable.")
-            return
-        self._p29_performance_cache[cache_key] = payload
         model = self._p29_models.get(card_id)
-        if model is not None:
+        interval_key = str(self.strategies_state.get("intervals", {}).get(card_id, "1y") or "1y")
+        current_key = self._p29_cache_key(model, interval_key) if model is not None else None
+        is_current_input = current_key == cache_key
+        if error or payload is None:
+            if is_current_input and self._p29_page_is_visible() and card is not None:
+                card.set_error(error or "Performance data unavailable.")
+        else:
+            self._p29_performance_cache[cache_key] = payload
+        if payload is not None and not error and is_current_input and model is not None:
             model["resolved_weights"] = dict(payload.get("weights", {}))
             model["resolved_weighting"] = str(payload.get("weighting", "") or "")
+        if queued_signature is not None and current_key is not None and current_key != cache_key:
+            self._p29_request_card(card_id, force=False)
+            return
+        if payload is None or error or not is_current_input:
+            return
+        if not self._p29_page_is_visible():
+            self._p29_render_pending = True
+            return
+        if card is None:
+            return
         card.set_performance(payload)
         self._p29_set_status("Card performance updated.", "positive")
 

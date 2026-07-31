@@ -180,6 +180,9 @@ def test_responsive_breakpoints_scroll_and_resize_round_trip() -> None:
     try:
         assert harness.p18_body_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         assert harness.p18_body_scroll.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        assert harness.p18_pattern_hint.isVisible()
+        assert "OR matching" in harness.p18_pattern_hint.text()
+        assert "balanced roll" in harness.p18_pattern_hint.text()
 
         assert harness._p18_responsive_mode == "wide"
         assert harness.p18_body_splitter.orientation() == Qt.Orientation.Horizontal
@@ -210,6 +213,60 @@ def test_responsive_breakpoints_scroll_and_resize_round_trip() -> None:
         restored_sizes = harness.p18_body_splitter.sizes()
         restored_ratio = restored_sizes[0] / max(sum(restored_sizes), 1)
         assert abs(restored_ratio - wide_ratio) < 0.08
+    finally:
+        harness.close()
+        app.processEvents()
+
+
+def test_pattern_explanations_candidate_metadata_and_consolidation_summary() -> None:
+    app, harness = _build_harness()
+    try:
+        tooltips = {
+            checkbox.text(): checkbox.toolTip()
+            for checkbox in harness._p18_pattern_checkboxes
+        }
+        assert len(tooltips) == 6
+        assert len(set(tooltips.values())) == 6
+        assert "55-day resistance" in tooltips["Breakout setup"]
+        assert "tight 20-day range" in tooltips["Consolidation"]
+        assert "low directional drift" in tooltips["Consolidation"]
+        assert "bearish price structure" in tooltips["Downtrend"]
+        assert "two comparable lows" in tooltips["Double bottom"]
+        assert "sharp, recent advance" in tooltips["Bullish flag"]
+        assert "orderly pullback" in tooltips["Bullish flag"]
+        assert "lower price low" in tooltips["Bullish RSI divergence"]
+        assert "higher RSI low" in tooltips["Bullish RSI divergence"]
+
+        assert harness.p18_candidates_table.horizontalHeaderItem(3).text() == "Pattern"
+        assert harness.p18_candidates_table.horizontalHeaderItem(4).text() == "Pattern score"
+        multi_match = _candidate("MULTI", 1)
+        multi_match["matched_modes"] = ["breakout", "bullish_flag"]
+        harness._p18_render_candidates([multi_match], pattern_modes=["breakout", "bullish_flag"])
+        pattern_item = harness.p18_candidates_table.item(0, 3)
+        assert pattern_item.text() == "Breakout Setup"
+        assert "Match tier: Strict" in pattern_item.toolTip()
+        assert "Strict matched modes: Breakout, Bullish Flag" in pattern_item.toolTip()
+
+        near_match = _candidate("NEAR", 1, tier="near")
+        near_match["pattern_fallback_reason"] = "No strict setup matched."
+        harness._p18_render_candidates([near_match], pattern_modes=["breakout"])
+        reason_text = harness.p18_candidates_table.item(0, 9).text()
+        assert reason_text.startswith("near resistance")
+        assert reason_text.endswith("No strict setup matched.")
+
+        consolidation_text = harness._p18_technical_snapshot_text({
+            "primary_pattern_mode": "consolidation",
+            "technical_snapshot": {
+                "consolidation": {
+                    "range_pct": 7.25,
+                    "atr20": 1.5,
+                    "atr60": 2.0,
+                    "volume20": 800_000,
+                    "volume60": 1_000_000,
+                },
+            },
+        })
+        assert consolidation_text == "7.25% 20D range; ATR 0.75x 60D; volume 0.80x 60D"
     finally:
         harness.close()
         app.processEvents()
@@ -404,6 +461,7 @@ def test_compact_snapshot_is_bounded_round_trips_and_full_cache_is_lru() -> None
 
 def main() -> None:
     test_responsive_breakpoints_scroll_and_resize_round_trip()
+    test_pattern_explanations_candidate_metadata_and_consolidation_summary()
     test_busy_progress_partial_and_stale_request_guards()
     test_candidate_double_click_is_inert_and_history_refetches_exact_symbol()
     test_compact_snapshot_is_bounded_round_trips_and_full_cache_is_lru()

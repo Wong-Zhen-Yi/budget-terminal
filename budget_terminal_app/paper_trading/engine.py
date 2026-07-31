@@ -131,6 +131,7 @@ class PaperTradingEngine:
         *,
         quote: PaperQuote,
         recurring_run_id: str | None = None,
+        executed_at: dt.datetime | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create and fill exactly one Virtual order without evaluating unrelated pending orders."""
         if not self.instant_fill:
@@ -169,12 +170,14 @@ class PaperTradingEngine:
             expires_at=None,
             reserved_cash=reserved_cash,
             recurring_run_id=recurring_run_id,
+            submitted_at=executed_at,
         )
         fill = self.store.execute_order(
             order["id"],
             execution_quote,
             fill_price=fill_price,
             reference_price=reference_price,
+            executed_at=executed_at,
         )
         if not fill:
             raise ValueError("The targeted Virtual order was not filled.")
@@ -483,13 +486,22 @@ class PaperTradingEngine:
         if quote.symbol.strip().upper() == "":
             raise ValueError("Yahoo returned an empty symbol.")
         if quote.quote_type not in self.SUPPORTED_QUOTE_TYPES:
-            raise ValueError("Paper accepts US-listed stocks and ETFs only.")
-        if quote.currency != "USD":
-            raise ValueError("Paper accepts USD securities only.")
-        allowed_exchanges = self.MAJOR_US_ETF_EXCHANGES if quote.quote_type == "ETF" else self.MAJOR_US_EXCHANGES
-        if quote.exchange not in allowed_exchanges:
             raise ValueError(
-                "Paper accepts stocks and ETFs listed on NYSE, Nasdaq, NYSE American, NYSE Arca, and Cboe BZX only."
+                "Paper accepts US-listed stocks and ETFs only "
+                f"(received type={quote.quote_type or 'missing'}, exchange={quote.exchange or 'missing'}, "
+                f"currency={quote.currency or 'missing'})."
+            )
+        if quote.currency != "USD":
+            raise ValueError(
+                "Paper accepts USD securities only "
+                f"(received type={quote.quote_type or 'missing'}, exchange={quote.exchange or 'missing'}, "
+                f"currency={quote.currency or 'missing'})."
+            )
+        if quote.exchange not in self.MAJOR_US_ETF_EXCHANGES:
+            raise ValueError(
+                "Paper accepts stocks and ETFs listed on NYSE, Nasdaq, NYSE American, NYSE Arca, "
+                f"and Cboe BZX only (received type={quote.quote_type or 'missing'}, "
+                f"exchange={quote.exchange or 'missing'}, currency={quote.currency or 'missing'})."
             )
 
     @staticmethod

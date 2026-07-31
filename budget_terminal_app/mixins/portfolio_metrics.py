@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from ..compat import (
@@ -28,7 +30,12 @@ from ..compat import (
     pg,
     save_portfolio_metrics_settings,
 )
-from budget_terminal_app.data_service.results import describe_market_data_status, strip_market_data_keys
+from budget_terminal_app.data_service.results import (
+    describe_market_data_status,
+    market_data_errors,
+    market_data_meta,
+    strip_market_data_keys,
+)
 from budget_terminal_app.mixins.portfolio_presenters import (
     build_portfolio_stock_row,
     format_market_cap,
@@ -39,13 +46,66 @@ from budget_terminal_app.mixins.portfolio_presenters import (
 )
 from budget_terminal_app.services.portfolio_analysis import filtered_summary, filtered_weights, returns_cache_key
 from budget_terminal_app.table_cells import TableCell
+from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.widgets.table_render import render_table_cell, render_table_row, render_table_rows
 from budget_terminal_app.workers.market_metrics import MarketCapWorker, MonthReturnWorker, PortfolioAnalyticsWorker, PortfolioMomentumWorker
+from budget_terminal_app.workers.data import DataWorker
 
 _P4_MKTCAP_CACHE_TTL_SECONDS = 6 * 60 * 60.0
 _P4_MOMENTUM_REFRESH_DEBOUNCE_MS = 250
 _P4_METRICS_REFRESH_DEBOUNCE_MS = 350
 _P4_ENTRY_EDITABLE_COLUMNS = (P4_PORTFOLIO_COL_SHARES, P4_PORTFOLIO_COL_AVG_PRICE)
+_P4_CONTENT_KEYS = ('positions', 'pie', 'heatmap', 'momentum', 'metrics')
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioRefreshContext:
+    portfolio_id: str
+    tickers: tuple[str, ...]
+    included_tickers: tuple[str, ...]
+    heatmap_tickers: tuple[str, ...]
+    tracker_signature: tuple[tuple[str, float, float, bool], ...]
+    shares_map: tuple[tuple[str, float], ...]
+    cash_amount: float
+    subtab: str
+    return_timeframe: str
+    return_config: tuple[tuple[str, Any], ...]
+    heatmap_interval: str
+    heatmap_config: tuple[tuple[str, Any], ...]
+    momentum_timeframe: str
+    momentum_config: tuple[tuple[str, Any], ...]
+    metrics_benchmark: str
+    metrics_lookback: str
+
+    @property
+    def signature(self) -> tuple[Any, ...]:
+        return (
+            self.portfolio_id,
+            self.tickers,
+            self.included_tickers,
+            self.tracker_signature,
+            round(self.cash_amount, 2),
+            self.subtab,
+            self.return_timeframe,
+            self.return_config,
+            self.heatmap_interval,
+            self.heatmap_config,
+            self.momentum_timeframe,
+            self.momentum_config,
+            self.metrics_benchmark,
+            self.metrics_lookback,
+        )
+
+    @property
+    def holdings_signature(self) -> tuple[Any, ...]:
+        """Return the inputs that determine whether quote results are still safe."""
+        return (
+            self.portfolio_id,
+            self.tickers,
+            self.included_tickers,
+            self.tracker_signature,
+            round(self.cash_amount, 2),
+        )
 
 
 _P4_METRICS_CARD_SPECS = (
@@ -233,31 +293,494 @@ class PortfolioMetricsMixin:
         self._p4_end_position_entry()
 
     def _p4_refresh_holdings(self) -> None:
-        """Refresh active holdings and their dependent analytics on demand."""
+        """Refresh active holdings through one visible-subtab-first pipeline."""
+        if getattr(self, '_refresh_shutdown', False):
+            return
         self._p4_end_position_entry()
-        tickers = sorted({
+        context = self._p4_capture_refresh_context()
+        coordinator = self._p4_get_refresh_coordinator()
+        token, should_start = coordinator.request('portfolio.holdings', context.signature)
+        contexts = getattr(self, '_p4_holdings_refresh_contexts', {})
+        contexts[token.generation] = context
+        self._p4_holdings_refresh_contexts = contexts
+        if not should_start:
+            if coordinator.is_active(token):
+                self._p4_set_holdings_refresh_status('Holdings refresh already running.', status='info')
+            else:
+                self._p4_set_holdings_refresh_status('Updated holdings queued.', status='info')
+            return
+        self._p4_set_holdings_refresh_busy(True)
+        self._p4_start_holdings_refresh(token, context)
+
+    def _p4_get_refresh_coordinator(self) -> Any:
+        """Return the shared refresh coordinator, creating it for small harnesses."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None:
+            from budget_terminal_app.services.refresh_control import RefreshCoordinator
+
+            coordinator = RefreshCoordinator()
+            self._refresh_coordinator = coordinator
+        return coordinator
+
+    def _p4_set_holdings_refresh_busy(self, busy: bool) -> None:
+        """Apply busy state only to the Portfolio holdings refresh action."""
+        button = getattr(self, 'p4_refresh_holdings_btn', None)
+        if button is None:
+            return
+        button.setEnabled(not busy)
+        button.setText('Refreshing…' if busy else 'Refresh Holdings')
+
+    def _p4_set_holdings_refresh_status(self, text: Any, *, status: str='muted') -> None:
+        """Show page-local holdings refresh progress without changing navigation."""
+        label = getattr(self, 'p4_refresh_holdings_status_lbl', None)
+        if label is not None:
+            self.set_status_text(label, str(text or ''), status=status)
+
+    def _p4_holdings_refresh_running(self) -> bool:
+        """Return whether the shared coordinator has an active holdings request."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        return bool(
+            coordinator is not None
+            and coordinator.active_token('portfolio.holdings') is not None
+        )
+
+    def _p4_active_content_key(self) -> str:
+        """Return the stable key for the selected Portfolio sub-tab."""
+        tabs = getattr(self, 'p4_content_tabs', None)
+        if tabs is None:
+            return 'positions'
+        widget = tabs.currentWidget()
+        for attr_name, key in (
+            ('p4_positions_page', 'positions'),
+            ('p4_pie_page', 'pie'),
+            ('p4_heatmap_page', 'heatmap'),
+            ('p4_momentum_page', 'momentum'),
+            ('p4_metrics_page', 'metrics'),
+        ):
+            candidate = getattr(self, attr_name, None)
+            if candidate is not None and widget is candidate:
+                return key
+        return 'positions'
+
+    def _p4_page_visible(self) -> bool:
+        """Return whether Portfolio is the current top-level page."""
+        page = getattr(self, 'page4', None)
+        if page is None:
+            return True
+        is_current = getattr(self, '_is_current_page', None)
+        if callable(is_current):
+            try:
+                return bool(is_current(page))
+            except Exception:
+                return False
+        stack = getattr(self, 'stack', None) or getattr(self, 'stacked_widget', None)
+        return stack is None or stack.currentWidget() is page
+
+    def _p4_tracker_refresh_signature(self) -> tuple[tuple[str, float, float, bool], ...]:
+        """Capture the current editable holdings inputs as an immutable signature."""
+        tracker_data = self._p4_active_tracker_data()
+        signature = []
+        for ticker in self._p4_active_tickers():
+            symbol = self._p4_normalize_stock_symbol(ticker)
+            entry = tracker_data.get(ticker, {}) if isinstance(tracker_data, dict) else {}
+            if not isinstance(entry, dict) and isinstance(tracker_data, dict):
+                entry = tracker_data.get(symbol, {})
+            try:
+                shares = round(float((entry or {}).get('shares', 0) or 0), 8)
+            except (AttributeError, TypeError, ValueError):
+                shares = 0.0
+            try:
+                avg_price = round(float((entry or {}).get('avg_price', 0) or 0), 8)
+            except (AttributeError, TypeError, ValueError):
+                avg_price = 0.0
+            signature.append((symbol, shares, avg_price, (entry or {}).get('include_in_weight') is not False))
+        return tuple(sorted(item for item in signature if item[0]))
+
+    @staticmethod
+    def _p4_frozen_config(config: Any) -> tuple[tuple[str, Any], ...]:
+        """Freeze a small timeframe configuration for a background request."""
+        allowed = {'period', 'interval', 'start'}
+        return tuple(
+            sorted((str(key), value) for key, value in dict(config or {}).items() if str(key) in allowed)
+        )
+
+    @staticmethod
+    def _p4_thawed_config(config: Any) -> dict[str, Any]:
+        return dict(config or ())
+
+    def _p4_capture_refresh_context(self) -> _PortfolioRefreshContext:
+        """Capture all Portfolio inputs before handing work to a background thread."""
+        portfolio_id = str(self.active_portfolio_id)
+        tickers = tuple(sorted({
             self._p4_normalize_stock_symbol(ticker)
             for ticker in self._p4_active_tickers()
             if self._p4_normalize_stock_symbol(ticker)
-        })
-        if (
-            (getattr(self, '_dashboard_showing_all', False) or getattr(self, 'active_portfolio_id', None) == getattr(self, 'main_portfolio_id', None))
-            and hasattr(self, '_dashboard_apply_local_portfolio_membership')
+        }))
+        tracker_signature = self._p4_tracker_refresh_signature()
+        shares_map = tuple((symbol, shares) for symbol, shares, _avg, _included in tracker_signature)
+        included_tickers = tuple(sorted({
+            self._p4_normalize_stock_symbol(ticker)
+            for ticker in self._p4_weight_included_tickers()
+            if self._p4_normalize_stock_symbol(ticker)
+        }))
+        positive_shares = {symbol for symbol, shares in shares_map if shares > 0.0}
+        heatmap_tickers = tuple(symbol for symbol in included_tickers if symbol in positive_shares)
+        return_timeframe = str(getattr(self, '_active_return_timeframe', 'dip_finder') or 'dip_finder')
+        heatmap_interval = str(getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').lower()
+        momentum_timeframe = str(getattr(self, '_active_momentum_timeframe', '1mo') or '1mo')
+        return _PortfolioRefreshContext(
+            portfolio_id=portfolio_id,
+            tickers=tickers,
+            included_tickers=included_tickers,
+            heatmap_tickers=heatmap_tickers,
+            tracker_signature=tracker_signature,
+            shares_map=shares_map,
+            cash_amount=round(float(self._p4_active_cash_balance(portfolio_id) or 0.0), 2),
+            subtab=self._p4_active_content_key(),
+            return_timeframe=return_timeframe,
+            return_config=self._p4_frozen_config(self._get_return_timeframe_config(return_timeframe)),
+            heatmap_interval=heatmap_interval,
+            heatmap_config=self._p4_frozen_config(
+                self._p4_heatmap_interval_config(heatmap_interval)
+                if hasattr(self, '_p4_heatmap_interval_config') else {}
+            ),
+            momentum_timeframe=momentum_timeframe,
+            momentum_config=self._p4_frozen_config(self._get_return_timeframe_config(momentum_timeframe)),
+            metrics_benchmark=self._p4_normalize_metrics_benchmark_symbol(
+                getattr(self, 'p4_metrics_benchmark_symbol', 'SPY')
+            ),
+            metrics_lookback=str(getattr(self, 'p4_metrics_lookback_key', '1y') or '1y').lower(),
+        )
+
+    def _p4_fetch_quotes_stage(self, tickers: Any) -> dict[str, Any]:
+        client = getattr(self, '_data_service_client', None)
+        if client is not None:
+            return client.fetch_portfolio_quotes(tickers)
+        return DataWorker(tickers, [], refresh_reason='portfolio_quotes').fetch_portfolio_quotes()
+
+    def _p4_fetch_market_caps_stage(self, tickers: Any) -> dict[str, Any]:
+        client = getattr(self, '_data_service_client', None)
+        return client.fetch_market_caps(tickers) if client is not None else MarketCapWorker(tickers).fetch()
+
+    def _p4_fetch_visible_dependency(self, context: _PortfolioRefreshContext, quotes: Any) -> tuple[str, Any]:
+        """Fetch only the expensive dependency needed by the captured visible tab."""
+        client = getattr(self, '_data_service_client', None)
+        if context.subtab == 'positions':
+            config = self._p4_thawed_config(context.return_config)
+            if not context.included_tickers:
+                return 'returns', {}
+            payload = (
+                client.fetch_month_returns(context.included_tickers, **config)
+                if client is not None else MonthReturnWorker(context.included_tickers, **config).fetch()
+            )
+            return 'returns', payload
+        if context.subtab == 'heatmap' and context.heatmap_interval not in {'live', '1d'}:
+            config = self._p4_thawed_config(context.heatmap_config)
+            if not context.heatmap_tickers:
+                return 'heatmap', {}
+            payload = (
+                client.fetch_month_returns(context.heatmap_tickers, **config)
+                if client is not None else MonthReturnWorker(context.heatmap_tickers, **config).fetch()
+            )
+            return 'heatmap', payload
+        if context.subtab == 'momentum':
+            config = self._p4_thawed_config(context.momentum_config)
+            shares_map = dict(context.shares_map)
+            payload = (
+                client.fetch_portfolio_momentum(
+                    context.tickers,
+                    shares_map,
+                    cash_amount=context.cash_amount,
+                    **config,
+                )
+                if client is not None else PortfolioMomentumWorker(
+                    context.tickers,
+                    shares_map,
+                    cash_amount=context.cash_amount,
+                    **config,
+                ).fetch()
+            )
+            return 'momentum', payload
+        if context.subtab == 'metrics':
+            prices_map = self._p4_quote_prices(quotes)
+            if context.tickers and not prices_map:
+                return 'metrics', None
+            shares_map = dict(context.shares_map)
+            payload = (
+                client.fetch_portfolio_analytics(
+                    context.tickers,
+                    shares_map,
+                    prices_map=prices_map,
+                    benchmark_symbol=context.metrics_benchmark,
+                    lookback_key=context.metrics_lookback,
+                    cash_amount=context.cash_amount,
+                )
+                if client is not None else PortfolioAnalyticsWorker(
+                    context.tickers,
+                    shares_map,
+                    prices_map=prices_map,
+                    benchmark_symbol=context.metrics_benchmark,
+                    lookback_key=context.metrics_lookback,
+                    cash_amount=context.cash_amount,
+                ).fetch()
+            )
+            return 'metrics', payload
+        return '', None
+
+    @staticmethod
+    def _p4_quote_prices(payload: Any) -> dict[str, float]:
+        prices = {}
+        portfolio = payload.get('portfolio', {}) if isinstance(payload, dict) else {}
+        for ticker, quote in portfolio.items() if isinstance(portfolio, dict) else ():
+            try:
+                prices[str(ticker).upper()] = float((quote or {}).get('price'))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return prices
+
+    def _p4_start_holdings_refresh(self, token: Any, context: _PortfolioRefreshContext) -> None:
+        """Run one ordered Portfolio refresh pipeline on the single outer worker."""
+        def _run() -> None:
+            result = {'quotes': None, 'market_caps': None, 'dependency': ('', None), 'exceptions': []}
+            try:
+                result['quotes'] = self._p4_fetch_quotes_stage(context.tickers)
+            except Exception as exc:
+                logger.warning('Portfolio quote refresh failed: %s', exc)
+                result['exceptions'].append(('quotes', str(exc)))
+            try:
+                result['market_caps'] = self._p4_fetch_market_caps_stage(context.tickers)
+            except Exception as exc:
+                logger.warning('Portfolio market-cap refresh failed: %s', exc)
+                result['exceptions'].append(('market caps', str(exc)))
+            try:
+                result['dependency'] = self._p4_fetch_visible_dependency(context, result['quotes'])
+            except Exception as exc:
+                logger.warning('Portfolio %s refresh failed: %s', context.subtab, exc)
+                result['exceptions'].append((context.subtab, str(exc)))
+            if getattr(self, '_refresh_shutdown', False):
+                return
+            try:
+                self._invoke_main.emit(
+                    lambda payload=result, requested_token=token, captured=context: self._p4_on_holdings_refresh_ready(
+                        requested_token,
+                        captured,
+                        payload,
+                    )
+                )
+            except RuntimeError:
+                return
+
+        try:
+            self._p4_submit_background_task(_run)
+        except Exception as exc:
+            logger.exception('Portfolio holdings worker could not start: %s', exc)
+            contexts = getattr(self, '_p4_holdings_refresh_contexts', {})
+            contexts.pop(token.generation, None)
+            next_token = self._p4_get_refresh_coordinator().complete(token)
+            if next_token is not None:
+                next_context = contexts.get(next_token.generation)
+                if next_context is not None:
+                    self._p4_start_holdings_refresh(next_token, next_context)
+                    return
+                self._p4_get_refresh_coordinator().complete(next_token)
+            self._p4_set_holdings_refresh_busy(False)
+            self._p4_set_holdings_refresh_status(
+                'Holdings refresh could not start; showing previous prices.',
+                status='negative',
+            )
+
+    def _p4_context_is_current(self, context: _PortfolioRefreshContext) -> bool:
+        """Reject late results when the active portfolio or editable inputs changed."""
+        if str(getattr(self, 'active_portfolio_id', '')) != context.portfolio_id:
+            return False
+        try:
+            return self._p4_capture_refresh_context().holdings_signature == context.holdings_signature
+        except Exception:
+            return False
+
+    def _p4_cache_market_caps(self, payload: Any) -> None:
+        results = strip_market_data_keys(payload) if isinstance(payload, dict) else {}
+        if not isinstance(results, dict):
+            return
+        fetched_at = self._p4_mktcap_cache_now()
+        for ticker, value in results.items():
+            symbol = self._p4_normalize_stock_symbol(ticker)
+            if symbol:
+                self._mktcap_cache[symbol] = value
+                self._mktcap_cache_ts[symbol] = fetched_at
+
+    def _p4_cache_visible_dependency(self, context: _PortfolioRefreshContext, dependency: Any) -> None:
+        kind, payload = dependency if isinstance(dependency, tuple) and len(dependency) == 2 else ('', None)
+        if not kind or payload is None:
+            return
+        if isinstance(payload, dict) and market_data_meta(payload).get('freshness') == 'failed':
+            return
+        if kind == 'returns':
+            cache_key = (context.portfolio_id, context.return_timeframe, context.included_tickers)
+            normalized = strip_market_data_keys(payload) if isinstance(payload, dict) else {}
+            if context.included_tickers and not normalized:
+                return
+            previous = self._return_metrics_cache.get(cache_key, {})
+            merged = dict(previous) if isinstance(previous, dict) else {}
+            merged.update(normalized)
+            self._return_metrics_cache[cache_key] = merged
+            self._return_metrics_fetching[cache_key] = False
+        elif kind == 'heatmap':
+            cache_key = (context.portfolio_id, context.heatmap_interval, context.heatmap_tickers)
+            normalized = strip_market_data_keys(payload) if isinstance(payload, dict) else {}
+            if context.heatmap_tickers and not normalized:
+                return
+            self._p4_heatmap_return_cache[cache_key] = normalized if isinstance(normalized, dict) else {}
+            self._p4_heatmap_return_fetching[cache_key] = False
+        elif kind == 'momentum':
+            cache_key = self._p4_momentum_cache_key(
+                context.momentum_timeframe,
+                context.portfolio_id,
+                shares_signature=context.shares_map,
+                cash_amount=context.cash_amount,
+            )
+            self._momentum_metrics_cache[cache_key] = payload if isinstance(payload, dict) else {}
+            self._momentum_metrics_fetching[cache_key] = False
+        elif kind == 'metrics':
+            shares_signature = tuple((symbol, shares) for symbol, shares in context.shares_map if shares > 0.0)
+            if context.cash_amount > 0.0:
+                shares_signature = tuple(sorted((*shares_signature, ('CASH', round(context.cash_amount, 2)))))
+            cache_key = self._p4_portfolio_analytics_cache_key(
+                portfolio_id=context.portfolio_id,
+                benchmark_symbol=context.metrics_benchmark,
+                lookback_key=context.metrics_lookback,
+                shares_signature=shares_signature,
+            )
+            self._portfolio_analytics_cache[cache_key] = payload if isinstance(payload, dict) else {}
+            self._portfolio_analytics_fetching[cache_key] = False
+
+    def _p4_merge_quote_payload(self, payload: Any) -> int:
+        """Merge quote-only data without dropping Dashboard charts, news, or targets."""
+        quotes = payload.get('portfolio', {}) if isinstance(payload, dict) else {}
+        if not isinstance(quotes, dict) or not quotes:
+            return 0
+        self._p4_latest_quote_overlay = {
+            'completed_monotonic': monotonic(),
+            'quotes': {
+                str(ticker).upper(): dict(quote) if isinstance(quote, dict) else quote
+                for ticker, quote in quotes.items()
+            },
+        }
+        data = dict(getattr(self, 'last_data', None) or {})
+        portfolio = dict(data.get('portfolio', {}) or {})
+        portfolio.update(quotes)
+        data['portfolio'] = portfolio
+        self.last_data = data
+        return len(quotes)
+
+    def _p4_on_holdings_refresh_ready(self, token: Any, context: _PortfolioRefreshContext, result: Any) -> None:
+        """Cache a pipeline result, render only the current visible tab, then promote pending work."""
+        coordinator = self._p4_get_refresh_coordinator()
+        contexts = getattr(self, '_p4_holdings_refresh_contexts', {})
+        try:
+            self._p4_apply_holdings_refresh_result(
+                context,
+                result,
+                current_request=coordinator.is_current(token),
+            )
+        except Exception as exc:
+            logger.exception('Portfolio holdings completion failed: %s', exc)
+            self._p4_set_holdings_refresh_status(
+                'Holdings refresh failed; showing previous prices.',
+                status='negative',
+            )
+        finally:
+            contexts.pop(token.generation, None)
+            next_token = coordinator.complete(token)
+            if next_token is not None:
+                next_context = contexts.get(next_token.generation)
+                if next_context is not None:
+                    self._p4_start_holdings_refresh(next_token, next_context)
+                    return
+                coordinator.complete(next_token)
+            self._p4_set_holdings_refresh_busy(False)
+            if self._p4_page_visible():
+                self._p4_render_deferred_subtab()
+
+    def _p4_apply_holdings_refresh_result(
+        self,
+        context: _PortfolioRefreshContext,
+        result: Any,
+        *,
+        current_request: bool,
+    ) -> None:
+        """Cache and conditionally render one completed holdings payload."""
+        result = result if isinstance(result, dict) else {}
+        quote_payload = result.get('quotes')
+        self._p4_holdings_refresh_cache = getattr(self, '_p4_holdings_refresh_cache', {})
+        self._p4_holdings_refresh_cache[context.signature] = result
+        self._p4_cache_market_caps(result.get('market_caps'))
+        self._p4_cache_visible_dependency(context, result.get('dependency'))
+
+        quote_meta = market_data_meta(quote_payload)
+        quote_errors = market_data_errors(quote_payload)
+        usable_quotes = self._p4_quote_prices(quote_payload)
+        inputs_current = self._p4_context_is_current(context)
+        if current_request and inputs_current and usable_quotes:
+            self._p4_merge_quote_payload(quote_payload)
+            self._p4_dirty_subtabs = set(_P4_CONTENT_KEYS)
+            if self._p4_page_visible():
+                self._p4_render_deferred_subtab()
+
+        freshness = str(quote_meta.get('freshness') or 'failed').lower()
+        exceptions = list(result.get('exceptions') or [])
+        component_issues = []
+        for component_name, component_payload in (
+            ('market caps', result.get('market_caps')),
+            (str((result.get('dependency') or ('', None))[0] or ''), (result.get('dependency') or ('', None))[1]),
         ):
-            self._dashboard_apply_local_portfolio_membership(getattr(self, 'last_data', None))
-        if hasattr(self, 'refresh_data'):
-            if getattr(self, 'last_data', None):
-                self.refresh_data(force=True, reason='portfolio_membership_change')
+            if not component_name or not isinstance(component_payload, dict):
+                continue
+            component_meta = market_data_meta(component_payload)
+            component_errors = market_data_errors(component_payload)
+            if str(component_meta.get('freshness') or 'fresh').lower() in {'failed', 'partial', 'stale'}:
+                component_issues.append(component_name)
+            component_issues.extend(component_name for _error in component_errors)
+        if current_request and inputs_current:
+            if not context.tickers:
+                self._p4_dirty_subtabs = set(_P4_CONTENT_KEYS)
+                if self._p4_page_visible():
+                    self._p4_render_deferred_subtab()
+                self._p4_set_holdings_refresh_status('No stock holdings to refresh.', status='muted')
+            elif not usable_quotes or freshness == 'failed':
+                self._p4_set_holdings_refresh_status(
+                    'Holdings refresh failed; showing previous prices.',
+                    status='negative',
+                )
+            elif exceptions or quote_errors or component_issues or freshness in {'partial', 'stale'}:
+                unavailable = len(exceptions) + len(quote_errors) + len(component_issues)
+                suffix = f' ({unavailable} component issue(s))' if unavailable else ''
+                self._p4_set_holdings_refresh_status(f'Holdings refreshed with partial data{suffix}.', status='warning')
             else:
-                self.refresh_data(force=True)
-        if tickers:
-            self._fetch_market_caps(tickers)
-        self._p4_invalidate_returns_cache()
-        self._p4_invalidate_momentum_cache()
-        self._p4_invalidate_portfolio_analytics_cache()
-        self._fetch_returns_for_timeframe(self._active_return_timeframe)
-        self._p4_refresh_active_momentum_view()
-        self._p4_schedule_portfolio_metrics_refresh()
+                self._p4_set_holdings_refresh_status('Holdings refreshed.', status='positive')
+        elif current_request:
+            self._p4_set_holdings_refresh_status(
+                'Holdings changed while refreshing; run Refresh Holdings again.',
+                status='warning',
+            )
+
+    def _p4_mark_all_subtabs_dirty(self) -> None:
+        self._p4_dirty_subtabs = set(_P4_CONTENT_KEYS)
+
+    def _p4_render_deferred_subtab(self) -> None:
+        """Render or fetch only the Portfolio sub-tab that is currently visible."""
+        if not self._p4_page_visible():
+            return
+        scope = self._p4_active_content_key()
+        dirty = getattr(self, '_p4_dirty_subtabs', None)
+        if isinstance(dirty, set) and scope not in dirty:
+            return
+        data = getattr(self, 'last_data', None) or {'portfolio': {}}
+        self.update_page4(
+            data,
+            render_scope=scope,
+            mark_hidden_dirty=False,
+        )
 
     def _p4_returns_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
         """Build the cache key for one portfolio/timeframe/inclusion selection."""
@@ -281,10 +804,27 @@ class PortfolioMetricsMixin:
             if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == pid)
         }
 
-    def _p4_momentum_cache_key(self, timeframe_key: Any, portfolio_id: Any = None) -> Any:
-        """Build the cache key for one portfolio momentum timeframe pair."""
+    def _p4_momentum_cache_key(
+        self,
+        timeframe_key: Any,
+        portfolio_id: Any = None,
+        *,
+        shares_signature: Any = None,
+        cash_amount: Any = None,
+    ) -> Any:
+        """Build a momentum key that changes with tickers, shares, and cash."""
         pid = str(portfolio_id or self.active_portfolio_id)
-        return (pid, str(timeframe_key), round(self._p4_active_cash_balance(pid), 2))
+        if shares_signature is None:
+            shares_signature = tuple(sorted(self._p4_active_momentum_shares_map().items()))
+        else:
+            shares_signature = tuple(sorted(
+                (self._p4_normalize_stock_symbol(symbol), round(float(shares or 0.0), 8))
+                for symbol, shares in shares_signature
+                if self._p4_normalize_stock_symbol(symbol)
+            ))
+        ticker_signature = tuple(sorted(symbol for symbol, _shares in shares_signature))
+        cash = self._p4_active_cash_balance(pid) if cash_amount is None else cash_amount
+        return (pid, str(timeframe_key), ticker_signature, shares_signature, round(float(cash or 0.0), 2))
 
     def _p4_invalidate_momentum_cache(self, portfolio_id: Any = None) -> None:
         """Drop cached momentum metrics for one portfolio slot."""
@@ -381,6 +921,12 @@ class PortfolioMetricsMixin:
 
     def _p4_refresh_pie_chart(self, metrics_map: Any = None) -> None:
         """Refresh the checked-position pie chart and its filtered total."""
+        if hasattr(self, 'p4_content_tabs') and (
+            not self._p4_page_visible() or self._p4_active_content_key() != 'pie'
+        ):
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('pie')
+            return
         if metrics_map is None:
             data = getattr(self, 'last_data', None)
             portfolio = data.get('portfolio', {}) if isinstance(data, dict) else {}
@@ -468,13 +1014,11 @@ class PortfolioMetricsMixin:
         self._p4_invalidate_portfolio_analytics_cache()
         last_data = getattr(self, 'last_data', None)
         if last_data:
-            self.update_page4(last_data)
+            self.update_page4(last_data, defer_expensive_refresh=True)
         else:
             self._p4_update_cash_dependent_views()
         if hasattr(self, '_p6_populate_tables'):
             self._p6_populate_tables(force_progress_rebuild=True)
-        self._p4_schedule_momentum_refresh()
-        self._p4_schedule_portfolio_metrics_refresh()
 
     def _p4_sync_cash_input(self) -> None:
         """Reflect the active portfolio cash value into the summary editor."""
@@ -727,6 +1271,8 @@ class PortfolioMetricsMixin:
     def _p4_metrics_tab_visible(self) -> bool:
         """Return whether the Portfolio Metrics sub-tab is currently selected."""
         return (
+            self._p4_page_visible()
+            and
             hasattr(self, 'p4_content_tabs')
             and hasattr(self, 'p4_metrics_page')
             and self.p4_content_tabs.currentWidget() is self.p4_metrics_page
@@ -1031,6 +1577,7 @@ class PortfolioMetricsMixin:
         tickers = list(self._p4_active_tickers())
         prices_map = self._p4_metrics_price_map()
         cash_amount = self._p4_active_cash_balance()
+        portfolio_id = str(self.active_portfolio_id)
         self._portfolio_analytics_fetching[cache_key] = True
         self._p4_set_portfolio_metrics_status(
             f'Loading {lookback_key.upper()} metrics versus {benchmark_symbol}...',
@@ -1071,7 +1618,7 @@ class PortfolioMetricsMixin:
                     cash_amount=cash_amount,
                 ).fetch()
             self._invoke_main.emit(
-                lambda result=payload, key=cache_key, pid=str(self.active_portfolio_id): self._on_portfolio_analytics_ready(key, pid, result)
+                lambda result=payload, key=cache_key, pid=portfolio_id: self._on_portfolio_analytics_ready(key, pid, result)
             )
 
         self._p4_submit_background_task(_run)
@@ -1361,12 +1908,7 @@ class PortfolioMetricsMixin:
         self._p4_refresh_pie_chart(metrics_map)
         if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
             self._p4_refresh_portfolio_heatmap_view(reset_view=False)
-        timeframe = getattr(self, '_active_return_timeframe', 'dip_finder')
-        included_tickers = self._p4_weight_included_tickers()
-        if not included_tickers:
-            self._update_returns_chart(timeframe, {})
-        else:
-            self._fetch_returns_for_timeframe(timeframe)
+        # Historical returns stay cached until the explicit holdings refresh.
 
     def _p4_schedule_momentum_refresh(self) -> None:
         """Debounce expensive momentum refreshes while tracker cells are being edited."""
@@ -1614,21 +2156,80 @@ class PortfolioMetricsMixin:
             return
         values = [results[ticker] for ticker in tickers]
         colors = [self.theme_color('accent_positive' if value >= 0 else 'accent_negative') for value in values]
-        for xi, (value, color) in enumerate(zip(values, colors)):
+
+        def _apply(xi: int, item: Any) -> None:
+            value, color = item
             pw.addItem(pg.BarGraphItem(x=[xi], height=[value], width=0.6, brush=pg.mkBrush(color), pen=pg.mkPen(color)))
             sign = '+' if value >= 0 else ''
             label = pg.TextItem(text=f'{sign}{value:.1f}%', color=color, anchor=(0.5, 1.0 if value >= 0 else 0.0))
             label.setPos(xi, value)
             pw.addItem(label)
-        pw.addItem(pg.InfiniteLine(pos=0, angle=0, pen=self.theme_pen('chart_reference', width=1)))
-        ax = pw.getAxis('bottom')
-        ax.setTicks([[(i, ticker) for i, ticker in enumerate(tickers)]])
-        ax.setStyle(tickFont=self.font())
-        pw.showAxis('bottom')
-        pw.showAxis('left')
-        max_v = max((abs(value) for value in values)) if values else 1
-        pw.setYRange(-max_v * 1.6, max_v * 1.6)
-        pw.setXRange(-0.6, len(tickers) - 0.4)
+
+        def _finish_chart() -> None:
+            pw.addItem(pg.InfiniteLine(pos=0, angle=0, pen=self.theme_pen('chart_reference', width=1)))
+            ax = pw.getAxis('bottom')
+            ax.setTicks([[(i, ticker) for i, ticker in enumerate(tickers)]])
+            ax.setStyle(tickFont=self.font())
+            pw.showAxis('bottom')
+            pw.showAxis('left')
+            max_v = max((abs(value) for value in values)) if values else 1
+            pw.setYRange(-max_v * 1.6, max_v * 1.6)
+            pw.setXRange(-0.6, len(tickers) - 0.4)
+
+        if len(tickers) <= 25:
+            for xi, item in enumerate(zip(values, colors)):
+                _apply(xi, item)
+            _finish_chart()
+            return
+
+        generations = getattr(self, '_p4_returns_render_generations', {})
+        generation = int(generations.get(timeframe_key, 0) or 0) + 1
+        generations[timeframe_key] = generation
+        self._p4_returns_render_generations = generations
+        previous_updates = True
+        prepared = False
+        failed = False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, prepared
+            previous_updates = pw.updatesEnabled()
+            prepared = True
+            pw.setUpdatesEnabled(False)
+
+        def _on_error(_exc: Exception) -> None:
+            nonlocal failed
+            failed = True
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('positions')
+
+        def _finish() -> None:
+            if prepared:
+                pw.setUpdatesEnabled(previous_updates)
+            if not failed and (
+                generation == self._p4_returns_render_generations.get(timeframe_key)
+                and self._p4_page_visible()
+                and self._p4_active_content_key() == 'positions'
+            ):
+                _finish_chart()
+                if previous_updates:
+                    pw.update()
+            else:
+                self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+                self._p4_dirty_subtabs.add('positions')
+
+        run_batched(
+            self,
+            ('portfolio.positions.returns', timeframe_key),
+            zip(values, colors),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            on_error=_on_error,
+            is_current=lambda value: value == self._p4_returns_render_generations.get(timeframe_key),
+            is_visible=lambda: self._p4_page_visible() and self._p4_active_content_key() == 'positions',
+            max_items=25,
+        )
 
     def _update_weight_chart(self, weights: Any) -> None:
         """Render portfolio weights as a descending bar chart."""
@@ -1645,18 +2246,75 @@ class PortfolioMetricsMixin:
         pens = [pg.mkPen(colors[i % len(colors)]) for i in range(len(tickers))]
         max_value = max(values) if values else 1
         label_offset = max(max_value * 0.04, 0.6)
-        for xi, (ticker, value, brush, pen) in enumerate(zip(tickers, values, brushes, pens)):
+
+        def _apply(xi: int, item: Any) -> None:
+            _ticker, value, brush, pen = item
             pw.addItem(pg.BarGraphItem(x=[xi], height=[value], width=0.6, brush=brush, pen=pen))
             label = pg.TextItem(text=f'{value:.1f}%', color=self.theme_color('text_primary'), anchor=(0.5, 1.0))
             label.setPos(xi, value + label_offset)
             pw.addItem(label)
-        ax = pw.getAxis('bottom')
-        ax.setTicks([[(i, ticker) for i, ticker in enumerate(tickers)]])
-        ax.setStyle(tickFont=self.font())
-        pw.showAxis('bottom')
-        pw.showAxis('left')
-        pw.setYRange(0, max_value + label_offset + max(max_value * 0.15, 0.5))
-        pw.setXRange(-0.6, len(tickers) - 0.4)
+
+        def _finish_chart() -> None:
+            ax = pw.getAxis('bottom')
+            ax.setTicks([[(i, ticker) for i, ticker in enumerate(tickers)]])
+            ax.setStyle(tickFont=self.font())
+            pw.showAxis('bottom')
+            pw.showAxis('left')
+            pw.setYRange(0, max_value + label_offset + max(max_value * 0.15, 0.5))
+            pw.setXRange(-0.6, len(tickers) - 0.4)
+
+        if len(tickers) <= 25:
+            for xi, item in enumerate(zip(tickers, values, brushes, pens)):
+                _apply(xi, item)
+            _finish_chart()
+            return
+
+        generation = int(getattr(self, '_p4_weight_render_generation', 0) or 0) + 1
+        self._p4_weight_render_generation = generation
+        previous_updates = True
+        prepared = False
+        failed = False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, prepared
+            previous_updates = pw.updatesEnabled()
+            prepared = True
+            pw.setUpdatesEnabled(False)
+
+        def _on_error(_exc: Exception) -> None:
+            nonlocal failed
+            failed = True
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('positions')
+
+        def _finish() -> None:
+            if prepared:
+                pw.setUpdatesEnabled(previous_updates)
+            if not failed and (
+                generation == getattr(self, '_p4_weight_render_generation', 0)
+                and self._p4_page_visible()
+                and self._p4_active_content_key() == 'positions'
+            ):
+                _finish_chart()
+                if previous_updates:
+                    pw.update()
+            else:
+                self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+                self._p4_dirty_subtabs.add('positions')
+
+        run_batched(
+            self,
+            'portfolio.positions.weights',
+            zip(tickers, values, brushes, pens),
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            on_error=_on_error,
+            is_current=lambda value: value == getattr(self, '_p4_weight_render_generation', 0),
+            is_visible=lambda: self._p4_page_visible() and self._p4_active_content_key() == 'positions',
+            max_items=25,
+        )
 
     def _p4_empty_momentum_payload(self, reason: str, *, included: Any=None, excluded: Any=None) -> dict[str, Any]:
         """Build a normalized empty momentum payload."""
@@ -1785,12 +2443,17 @@ class PortfolioMetricsMixin:
     def _fetch_momentum_for_timeframe(self, timeframe_key: Any) -> None:
         """Fetch portfolio momentum for a specific timeframe."""
         portfolio_id = str(self.active_portfolio_id)
-        cache_key = self._p4_momentum_cache_key(timeframe_key, portfolio_id)
-        if self._momentum_metrics_fetching.get(cache_key, False):
-            return
         tickers = list(self._p4_active_tickers())
         shares_map = self._p4_active_momentum_shares_map()
         cash_amount = self._p4_active_cash_balance()
+        cache_key = self._p4_momentum_cache_key(
+            timeframe_key,
+            portfolio_id,
+            shares_signature=tuple(shares_map.items()),
+            cash_amount=cash_amount,
+        )
+        if self._momentum_metrics_fetching.get(cache_key, False):
+            return
         if not tickers and cash_amount <= 0.0:
             payload = self._p4_empty_momentum_payload('No portfolio holdings available')
             self._momentum_metrics_cache[cache_key] = payload
@@ -1835,19 +2498,37 @@ class PortfolioMetricsMixin:
                     cash_amount=cash_amount,
                 ).fetch()
             self._invoke_main.emit(
-                lambda result=payload, key=timeframe_key, pid=portfolio_id: self._on_momentum_ready(key, pid, result)
+                lambda result=payload, key=timeframe_key, pid=portfolio_id, requested_cache_key=cache_key: self._on_momentum_ready(
+                    key,
+                    pid,
+                    result,
+                    requested_cache_key,
+                )
             )
 
         self._p4_submit_background_task(_run)
 
-    def _on_momentum_ready(self, timeframe_key: Any, portfolio_id: Any, payload: Any) -> None:
+    def _on_momentum_ready(
+        self,
+        timeframe_key: Any,
+        portfolio_id: Any,
+        payload: Any,
+        cache_key: Any = None,
+    ) -> None:
         """Handle portfolio momentum data becoming ready."""
         if hasattr(self, '_record_data_health_payload'):
             self._record_data_health_payload('Portfolio momentum', payload, symbols=self._p4_active_tickers())
-        cache_key = self._p4_momentum_cache_key(timeframe_key, portfolio_id)
+        cache_key = cache_key or self._p4_momentum_cache_key(timeframe_key, portfolio_id)
         self._momentum_metrics_fetching[cache_key] = False
         self._momentum_metrics_cache[cache_key] = payload
-        if str(portfolio_id) == str(self.active_portfolio_id) and timeframe_key == self._active_momentum_timeframe:
+        current_key = self._p4_momentum_cache_key(timeframe_key, self.active_portfolio_id)
+        if (
+            cache_key == current_key
+            and str(portfolio_id) == str(self.active_portfolio_id)
+            and timeframe_key == self._active_momentum_timeframe
+            and self._p4_active_content_key() == 'momentum'
+            and self._p4_page_visible()
+        ):
             self._update_momentum_chart(timeframe_key, payload)
 
     def _on_momentum_timeframe_changed(self, index: int) -> None:
@@ -1864,6 +2545,8 @@ class PortfolioMetricsMixin:
 
     def _p4_refresh_active_momentum_view(self) -> None:
         """Refresh the visible momentum chart from cache or fetch it."""
+        if self._p4_active_content_key() != 'momentum' or not self._p4_page_visible():
+            return
         timeframe_key = str(getattr(self, '_active_momentum_timeframe', '1mo') or '1mo')
         cache_key = self._p4_momentum_cache_key(timeframe_key)
         if cache_key in self._momentum_metrics_cache:
@@ -1939,17 +2622,23 @@ class PortfolioMetricsMixin:
         if hasattr(self, '_record_data_health_payload'):
             requested_symbols = cache_key[2] if isinstance(cache_key, tuple) and len(cache_key) >= 3 else self._p4_weight_included_tickers()
             self._record_data_health_payload('Portfolio returns', results, symbols=requested_symbols)
-        results = strip_market_data_keys(results) if isinstance(results, dict) else results
+        results = strip_market_data_keys(results) if isinstance(results, dict) else {}
         cache_key = cache_key or self._p4_returns_cache_key(timeframe_key, portfolio_id)
         self._return_metrics_fetching[cache_key] = False
-        self._return_metrics_cache[cache_key] = results
+        previous = self._return_metrics_cache.get(cache_key, {})
+        merged_results = dict(previous) if isinstance(previous, dict) else {}
+        if isinstance(results, dict):
+            merged_results.update(results)
+        self._return_metrics_cache[cache_key] = merged_results
         current_cache_key = self._p4_returns_cache_key(timeframe_key, portfolio_id)
         if (
             cache_key == current_cache_key
             and str(portfolio_id) == str(self.active_portfolio_id)
             and timeframe_key == self._active_return_timeframe
+            and self._p4_active_content_key() == 'positions'
+            and self._p4_page_visible()
         ):
-            self._update_returns_chart(timeframe_key, results)
+            self._update_returns_chart(timeframe_key, merged_results)
 
     def _on_returns_timeframe_changed(self, index: int) -> None:
         """Handle return timeframe tab changes."""
@@ -2072,24 +2761,111 @@ class PortfolioMetricsMixin:
                 normalized_results[symbol] = mc
                 self._mktcap_cache[symbol] = mc
                 self._mktcap_cache_ts[symbol] = fetched_at
-        keep_sorting_disabled = self._p4_position_entry_is_active()
-        sorting_enabled = self.p4_table.isSortingEnabled()
-        self.p4_table.setSortingEnabled(False)
-        try:
-            for row in range(self.p4_table.rowCount()):
-                item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
-                symbol = str(item.text() if item else '').strip().upper()
-                if symbol and symbol in normalized_results:
-                    self._update_mktcap_item(row, symbol, normalized_results[symbol])
-        finally:
-            if sorting_enabled and not keep_sorting_disabled:
-                self.p4_table.setSortingEnabled(True)
-        self._p4_restore_position_entry_cell()
+        if self._p4_page_visible() and self._p4_active_content_key() == 'positions':
+            keep_sorting_disabled = self._p4_position_entry_is_active()
+            sorting_enabled = self.p4_table.isSortingEnabled()
+            self.p4_table.setSortingEnabled(False)
+            try:
+                for row in range(self.p4_table.rowCount()):
+                    item = self.p4_table.item(row, P4_PORTFOLIO_COL_SYMBOL)
+                    symbol = str(item.text() if item else '').strip().upper()
+                    if symbol and symbol in normalized_results:
+                        self._update_mktcap_item(row, symbol, normalized_results[symbol])
+            finally:
+                if sorting_enabled and not keep_sorting_disabled:
+                    self.p4_table.setSortingEnabled(True)
+            self._p4_restore_position_entry_cell()
+        else:
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('positions')
         queued = list(getattr(self, '_mktcap_queued_tickers', set()))
         self._mktcap_queued_tickers = set()
         if queued:
             remaining = [ticker for ticker in queued if str(ticker or '').strip().upper() not in request_tickers]
             self._fetch_market_caps(remaining)
+
+    def _p4_finalize_positions_table_render(self, selected_symbol: str='') -> None:
+        """Restore Portfolio table affordances after a complete row render."""
+        self._p4_apply_visible_symbol_checkboxes()
+        if self._p4_position_entry_is_active():
+            self._p4_restore_position_entry_cell()
+        elif selected_symbol:
+            selected_row = self._p4_find_stock_row(selected_symbol)
+            if selected_row >= 0:
+                self.p4_table.selectRow(selected_row)
+        if hasattr(self, '_p4_update_remove_stock_button_state'):
+            self._p4_update_remove_stock_button_state()
+        if hasattr(self, '_p4_apply_table_width_preferences'):
+            self._p4_apply_table_width_preferences('stock')
+
+    def _p4_render_positions_rows(self, rows: Any) -> bool:
+        """Render large holdings tables in short, navigation-safe GUI slices."""
+        normalized_rows = list(rows or [])
+        selected_symbol = ''
+        if hasattr(self, '_p4_selected_stock_ticker'):
+            selected_symbol = self._p4_selected_stock_ticker()
+        if len(normalized_rows) <= 50:
+            render_table_rows(self.p4_table, normalized_rows)
+            self._p4_finalize_positions_table_render(selected_symbol)
+            return False
+
+        generation = int(getattr(self, '_p4_positions_render_generation', 0) or 0) + 1
+        self._p4_positions_render_generation = generation
+        previous_updates = True
+        previous_signals = False
+        sorting_enabled = False
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal previous_updates, previous_signals, sorting_enabled, prepared
+            previous_updates = self.p4_table.updatesEnabled()
+            previous_signals = self.p4_table.blockSignals(True)
+            sorting_enabled = bool(self.p4_table.isSortingEnabled())
+            prepared = True
+            self.p4_table.setSortingEnabled(False)
+            self.p4_table.setUpdatesEnabled(False)
+            self.p4_table.setRowCount(len(normalized_rows))
+
+        def _apply(row_index: int, row: Any) -> None:
+            render_table_row(self.p4_table, row_index, row)
+
+        def _finish() -> None:
+            if not prepared:
+                return
+            self.p4_table.setUpdatesEnabled(previous_updates)
+            if sorting_enabled and not self._p4_position_entry_is_active():
+                self.p4_table.setSortingEnabled(True)
+            self.p4_table.blockSignals(previous_signals)
+            if previous_updates:
+                self.p4_table.viewport().update()
+            render_current = (
+                generation == getattr(self, '_p4_positions_render_generation', 0)
+                and self._p4_page_visible()
+                and self._p4_active_content_key() == 'positions'
+            )
+            if render_current:
+                self._p4_finalize_positions_table_render(selected_symbol)
+            else:
+                self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+                self._p4_dirty_subtabs.add('positions')
+
+        def _on_error(_exc: Exception) -> None:
+            self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+            self._p4_dirty_subtabs.add('positions')
+
+        run_batched(
+            self,
+            'portfolio.positions.rows',
+            normalized_rows,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            on_error=_on_error,
+            is_current=lambda value: value == getattr(self, '_p4_positions_render_generation', 0),
+            is_visible=lambda: self._p4_page_visible() and self._p4_active_content_key() == 'positions',
+        )
+        return True
 
     def update_page4(
         self,
@@ -2097,11 +2873,77 @@ class PortfolioMetricsMixin:
         *,
         preserve_visible_order: bool | None = None,
         defer_expensive_refresh: bool=False,
+        render_scope: str | None = None,
+        mark_hidden_dirty: bool=True,
     ) -> None:
-        """Update page4."""
+        """Update the visible Portfolio sub-tab and defer every hidden sub-tab."""
+        dirty = set(getattr(self, '_p4_dirty_subtabs', set()))
+        if mark_hidden_dirty:
+            dirty.update(_P4_CONTENT_KEYS)
+        self._p4_dirty_subtabs = dirty
+        if not self._p4_page_visible():
+            return
+        scope = str(render_scope or self._p4_active_content_key()).strip().lower()
+        if scope not in _P4_CONTENT_KEYS:
+            scope = 'positions'
         portfolio = data.get('portfolio', {})
         tickers = self._p4_active_tickers()
         metrics_map, _total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+        self._p4_update_stock_positions_label(len(tickers))
+        self._p4_update_filtered_summary_labels(metrics_map)
+
+        if scope == 'pie':
+            self._p4_refresh_pie_chart(metrics_map)
+            self._p4_dirty_subtabs.discard(scope)
+            return
+        if scope == 'heatmap':
+            if defer_expensive_refresh:
+                return
+            interval_key = str(getattr(self, '_p4_heatmap_interval_key', 'live') or 'live').lower()
+            cache_key = self._p4_heatmap_returns_cache_key(interval_key)
+            if (
+                self._p4_holdings_refresh_running()
+                and not self._p4_heatmap_uses_snapshot_returns(interval_key)
+                and cache_key not in getattr(self, '_p4_heatmap_return_cache', {})
+            ):
+                return
+            if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
+                self._p4_refresh_portfolio_heatmap_view(reset_view=False)
+            self._p4_dirty_subtabs.discard(scope)
+            return
+        if scope == 'momentum':
+            active_cache_key = self._p4_momentum_cache_key(self._active_momentum_timeframe)
+            cash_balance = self._p4_active_cash_balance()
+            if not tickers and cash_balance <= 0.0:
+                payload = self._p4_empty_momentum_payload('No portfolio holdings available')
+                self._momentum_metrics_cache[active_cache_key] = payload
+                self._momentum_metrics_fetching[active_cache_key] = False
+                self._update_momentum_chart(self._active_momentum_timeframe, payload)
+            elif active_cache_key in self._momentum_metrics_cache:
+                self._update_momentum_chart(
+                    self._active_momentum_timeframe,
+                    self._momentum_metrics_cache.get(active_cache_key, {}),
+                )
+            elif not defer_expensive_refresh:
+                if self._p4_holdings_refresh_running():
+                    return
+                self._fetch_momentum_for_timeframe(self._active_momentum_timeframe)
+            self._p4_dirty_subtabs.discard(scope)
+            return
+        if scope == 'metrics':
+            cache_key = self._p4_portfolio_analytics_cache_key()
+            if defer_expensive_refresh:
+                return
+            if (
+                cache_key not in getattr(self, '_portfolio_analytics_cache', {})
+                and self._p4_holdings_refresh_running()
+            ):
+                return
+            if not defer_expensive_refresh:
+                self._p4_refresh_portfolio_metrics_view()
+            self._p4_dirty_subtabs.discard(scope)
+            return
+
         active_entry = self._p4_position_entry_is_active()
         preserve_order = active_entry if preserve_visible_order is None else bool(preserve_visible_order)
         defer_refresh = bool(defer_expensive_refresh or active_entry)
@@ -2129,26 +2971,16 @@ class PortfolioMetricsMixin:
             )
         if preserve_order and self.p4_table.isSortingEnabled():
             self.p4_table.setSortingEnabled(False)
-        render_table_rows(self.p4_table, rows)
-        self._p4_apply_visible_symbol_checkboxes()
-        self._p4_restore_position_entry_cell()
+        self._p4_render_positions_rows(rows)
 
-        cash_balance = self._p4_active_cash_balance()
-        if hasattr(self, '_p4_update_remove_stock_button_state'):
-            self._p4_update_remove_stock_button_state()
-        if hasattr(self, '_p4_apply_table_width_preferences'):
-            self._p4_apply_table_width_preferences('stock')
-        self._p4_update_stock_positions_label(len(tickers))
-        self._p4_update_filtered_summary_labels(metrics_map)
         if defer_refresh:
+            self._p4_dirty_subtabs.discard(scope)
             return
         self._update_weight_chart(weights)
-        self._p4_refresh_pie_chart(metrics_map)
-        if hasattr(self, '_p4_refresh_portfolio_heatmap_view'):
-            self._p4_refresh_portfolio_heatmap_view(reset_view=False)
 
         active_cache_key = self._p4_returns_cache_key(self._active_return_timeframe)
         included_tickers = self._p4_weight_included_tickers()
+        returns_deferred = False
         if not included_tickers:
             self._return_metrics_cache[active_cache_key] = {}
             self._return_metrics_fetching[active_cache_key] = False
@@ -2158,23 +2990,11 @@ class PortfolioMetricsMixin:
                 self._active_return_timeframe,
                 self._return_metrics_cache.get(active_cache_key, {}),
             )
+        elif self._p4_holdings_refresh_running():
+            returns_deferred = True
         else:
             self._fetch_returns_for_timeframe(self._active_return_timeframe)
-
-        active_momentum_cache_key = self._p4_momentum_cache_key(self._active_momentum_timeframe)
-        if not tickers and cash_balance <= 0.0:
-            payload = self._p4_empty_momentum_payload('No portfolio holdings available')
-            self._momentum_metrics_cache[active_momentum_cache_key] = payload
-            self._momentum_metrics_fetching[active_momentum_cache_key] = False
-            self._update_momentum_chart(self._active_momentum_timeframe, payload)
-        elif active_momentum_cache_key in self._momentum_metrics_cache:
-            self._update_momentum_chart(
-                self._active_momentum_timeframe,
-                self._momentum_metrics_cache.get(active_momentum_cache_key, {}),
-            )
-        else:
-            self._fetch_momentum_for_timeframe(self._active_momentum_timeframe)
-
-        self._fetch_market_caps(sorted_tickers)
-        if self._p4_metrics_tab_visible():
-            self._p4_refresh_portfolio_metrics_view()
+        if not self._p4_holdings_refresh_running():
+            self._fetch_market_caps(sorted_tickers)
+        if not returns_deferred:
+            self._p4_dirty_subtabs.discard(scope)

@@ -11,12 +11,20 @@ class CryptoMixin:
     P19_HEATMAP_COLUMNS = 6
     P19_NEWS_LIMIT = 10
 
+    def _p19_page_is_visible(self) -> bool:
+        """Return whether the Crypto page is the active real-app surface."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page19', None)))
+        return True
+
     def init_page19(self) -> None:
         """Build the Crypto market dashboard page."""
         self._p19_thread: QThread | None = None
         self._p19_worker: CryptoMarketWorker | None = None
         self._p19_last_payload: dict[str, Any] = {}
         self._p19_progress: dict[str, str] = {}
+        self._p19_render_pending = False
         self._p19_watchlist_load_guard = False
         self._p19_panel_widgets: list[QFrame] = []
         self._p19_table_widgets: list[QTableWidget] = []
@@ -34,6 +42,17 @@ class CryptoMixin:
         self._p19_set_loading_state()
         self._p19_apply_styles()
         QTimer.singleShot(0, self._p19_refresh_data)
+
+    def _p19_on_show(self) -> None:
+        """Publish the newest accumulated worker payload once after navigation back."""
+        payload = getattr(self, '_p19_last_payload', {})
+        if getattr(self, '_p19_render_pending', False) and isinstance(payload, dict) and payload:
+            self._p19_render_pending = False
+            self._p19_apply_payload(payload)
+            return
+        thread = getattr(self, '_p19_thread', None)
+        if not payload and not (thread is not None and thread.isRunning()):
+            self._p19_refresh_data()
 
     def _p19_build_toolbar(self) -> QFrame:
         toolbar = self._p19_make_panel()
@@ -303,10 +322,18 @@ class CryptoMixin:
     def _p19_on_partial_data(self, payload: dict[str, Any]) -> None:
         incoming = payload if isinstance(payload, dict) else {}
         merged = self._p19_merge_payload(incoming)
+        if not self._p19_page_is_visible():
+            self._p19_render_pending = True
+            return
+        self._p19_render_pending = False
         self._p19_apply_payload(merged, updated_keys=set(incoming.keys()), partial=True)
 
     def _p19_on_data(self, payload: dict[str, Any]) -> None:
         merged = self._p19_merge_payload(payload if isinstance(payload, dict) else {})
+        if not self._p19_page_is_visible():
+            self._p19_render_pending = True
+            return
+        self._p19_render_pending = False
         self._p19_apply_payload(merged, partial=False)
 
     def _p19_on_error(self, message: str) -> None:

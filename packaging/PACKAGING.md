@@ -19,10 +19,11 @@ Create the virtual environment:
 python -m venv .venv
 ```
 
-Install dependencies plus `pyinstaller`:
+Upgrade the packaging tools, then install the pinned runtime and development dependencies:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+.\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
 ```
 
 ## Windows Build Command
@@ -36,7 +37,7 @@ Run the standard packaging script from the repository root:
 That script will:
 
 1. Activate `.venv`
-2. Install `requirements.txt` and `pyinstaller`
+2. Upgrade the packaging tools and install `requirements.txt` plus `requirements-dev.txt`
 3. Remove old `build\` output and only the current-version `dist\` target
 4. Build the executable with `packaging\budget_terminal.spec`
 5. Create the release zip in `release\`
@@ -88,7 +89,8 @@ If the build script fails:
 - Reinstall dependencies:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+.\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
 ```
 
 - Delete stale build artifacts and rerun:

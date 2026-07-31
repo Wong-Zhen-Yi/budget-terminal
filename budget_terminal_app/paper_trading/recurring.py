@@ -87,6 +87,27 @@ def recurring_due_window(schedule: dict[str, Any], now: dt.datetime) -> tuple[dt
     return due, future
 
 
+def recurring_due_occurrences(
+    schedule: dict[str, Any],
+    now: dt.datetime,
+) -> list[tuple[dt.datetime, dt.datetime]]:
+    """Return every due occurrence and the run time that follows it."""
+    current = ensure_utc(now)
+    due = parse_timestamp(schedule.get("next_run_at"))
+    if due is None or due > current:
+        return []
+    occurrences: list[tuple[dt.datetime, dt.datetime]] = []
+    iterations = 0
+    while due <= current:
+        future = next_recurring_run(schedule, due)
+        occurrences.append((due, future))
+        due = future
+        iterations += 1
+        if iterations > 100_000:
+            raise RuntimeError("Recurring schedule could not advance to a future occurrence.")
+    return occurrences
+
+
 class RecurringTradingService:
     """Execute due local recurring funding and Virtual buy schedules."""
 
@@ -125,14 +146,26 @@ class RecurringTradingService:
         timezone = recurring_timezone(str(schedule.get("timezone") or "LOCAL"))
         return ensure_utc(scheduled_for).astimezone(timezone).date()
 
-    def run_due(self, now: dt.datetime | None = None) -> dict[str, Any]:
+    def run_due(self, now: dt.datetime | None = None, *, catch_up: bool = False) -> dict[str, Any]:
         current = ensure_utc(now or self._now())
         current_iso = iso_utc(current)
         result: dict[str, Any] = {"claimed": 0, "success": 0, "skipped": 0, "failed": 0, "runs": []}
+        occurrences: list[tuple[dt.datetime, int, str, dict[str, Any], dt.datetime]] = []
         for schedule in self.store.due_recurring_schedules(current_iso):
+            for scheduled_for, next_run in recurring_due_occurrences(schedule, current):
+                occurrences.append(
+                    (
+                        scheduled_for,
+                        0 if schedule["kind"] == RecurringKind.FUNDING else 1,
+                        str(schedule.get("created_at") or schedule["id"]),
+                        schedule,
+                        next_run,
+                    )
+                )
+        occurrences.sort(key=lambda item: (item[0], item[1], item[2]))
+        for scheduled_for, _kind_order, _created_at, schedule, next_run in occurrences:
             run = None
             try:
-                scheduled_for, next_run = recurring_due_window(schedule, current)
                 run = self.store.claim_recurring_run(
                     schedule["id"],
                     scheduled_for=iso_utc(scheduled_for),
@@ -143,11 +176,21 @@ class RecurringTradingService:
                     continue
                 result["claimed"] += 1
                 if schedule["kind"] == RecurringKind.FUNDING:
-                    self.store.apply_scheduled_funding(run["id"], completed_at=current_iso)
+                    self.store.apply_scheduled_funding(
+                        run["id"],
+                        completed_at=current_iso,
+                        effective_at=iso_utc(scheduled_for) if catch_up else current_iso,
+                    )
                     self.store.record_equity_snapshot(schedule["account_id"], force=True)
                     terminal = self.store.list_recurring_runs(schedule["id"], limit=1)[0]
                 else:
-                    terminal = self._run_buy(schedule, run, scheduled_for, current_iso)
+                    terminal = self._run_buy(
+                        schedule,
+                        run,
+                        scheduled_for,
+                        current_iso,
+                        historical=catch_up,
+                    )
             except Exception as exc:
                 if run is not None and run.get("status") == RecurringRunStatus.RUNNING:
                     try:
@@ -166,12 +209,42 @@ class RecurringTradingService:
             result["runs"].append(terminal)
         return result
 
+    def replay_skipped_run(self, run_id: str, now: dt.datetime | None = None) -> dict[str, Any]:
+        """Replay one approved skipped buy at its historical scheduled price."""
+        current = ensure_utc(now or self._now())
+        current_iso = iso_utc(current)
+        existing = self.store.get_recurring_run(run_id)
+        schedule = self.store.get_recurring_schedule(str(existing["schedule_id"]))
+        scheduled_for = parse_timestamp(existing.get("scheduled_for"))
+        if scheduled_for is None:
+            raise ValueError("Recurring run has no valid scheduled time.")
+        run, prior_message = self.store.reopen_skipped_recurring_run(run_id, started_at=current_iso)
+        try:
+            return self._run_buy(
+                schedule,
+                run,
+                scheduled_for,
+                current_iso,
+                historical=True,
+                prior_message=prior_message,
+            )
+        except Exception as exc:
+            return self.store.complete_recurring_run(
+                run["id"],
+                RecurringRunStatus.FAILED,
+                message=f"Replay failed after prior skip ({prior_message}): {exc}",
+                completed_at=current_iso,
+            )
+
     def _run_buy(
         self,
         schedule: dict[str, Any],
         run: dict[str, Any],
         scheduled_for: dt.datetime,
         completed_at: str,
+        *,
+        historical: bool = False,
+        prior_message: str = "",
     ) -> dict[str, Any]:
         scheduled_date = self.schedule_local_date(schedule, scheduled_for)
         if not self._trading_day_resolver(scheduled_date):
@@ -201,7 +274,11 @@ class RecurringTradingService:
                 completed_at=completed_at,
             )
         try:
-            quote = self.quote_service.fetch(str(schedule["symbol"]))
+            quote = (
+                self.quote_service.fetch_historical(str(schedule["symbol"]), scheduled_for)
+                if historical
+                else self.quote_service.fetch(str(schedule["symbol"]))
+            )
             self.engine._validate_security(quote)
             reference = (
                 float(quote.mark_price)
@@ -228,19 +305,22 @@ class RecurringTradingService:
                 request,
                 quote=quote,
                 recurring_run_id=run["id"],
+                executed_at=scheduled_for if historical else None,
             )
         except Exception as exc:
+            prefix = f"Replay after prior skip ({prior_message}) also skipped: " if prior_message else "Skipped: "
             return self.store.complete_recurring_run(
                 run["id"],
                 RecurringRunStatus.SKIPPED,
-                message=f"Skipped: {exc}",
+                message=f"{prefix}{exc}",
                 completed_at=completed_at,
             )
+        prefix = f"Recovered after prior skip ({prior_message}). " if prior_message else ""
         return self.store.complete_recurring_run(
             run["id"],
             RecurringRunStatus.SUCCESS,
             message=(
-                f"Bought {format_share_quantity(quantity)} {schedule['symbol']} for "
+                f"{prefix}Bought {format_share_quantity(quantity)} {schedule['symbol']} for "
                 f"${float(fill['fill_price']) * quantity + float(fill['commission']):,.2f}."
             ),
             quantity=quantity,

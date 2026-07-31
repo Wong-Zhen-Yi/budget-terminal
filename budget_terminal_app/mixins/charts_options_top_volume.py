@@ -10,6 +10,7 @@ from budget_terminal_app.mixins.options_chain_presenters import (
     prepare_top_volume_records,
 )
 from budget_terminal_app.services.options_data import OPTIONS_MARKET_TIMEZONE, is_options_expiry_closed
+from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.widgets.table_render import render_table_rows
 
 
@@ -70,6 +71,12 @@ class ChartsOptionsTopVolumeMixin:
         self._p28_latest_request_id = 0
         self._p28_initial_load_requested = False
         self._p28_has_completed_view = False
+        self._p28_last_applied_request_id = 0
+        self._p28_pending_completed_view = None
+        self._p28_pending_load_error = None
+        self._p28_option_render_generation = 0
+        self._p28_option_render_pending = False
+        self._p28_bucket_config = ()
         self._p28_sections = {}
         self._p28_payload = self._p28_empty_payload(self.p28_symbol)
         self._p28_chart_rows = []
@@ -253,9 +260,39 @@ class ChartsOptionsTopVolumeMixin:
         self._p28_update_timeframe_buttons()
         self._p28_update_type_buttons()
         self._p28_apply_splitter_sizes()
+        if not self._p28_is_render_surface_visible():
+            return
+        applied_pending_view = False
+        pending_view = getattr(self, '_p28_pending_completed_view', None)
+        if isinstance(pending_view, dict):
+            self._p28_pending_completed_view = None
+            if int(pending_view.get('request_id', 0) or 0) == getattr(self, '_p28_latest_request_id', 0):
+                self._p28_apply_completed_view(**pending_view)
+                applied_pending_view = True
+        pending_error = getattr(self, '_p28_pending_load_error', None)
+        if not applied_pending_view and isinstance(pending_error, tuple) and len(pending_error) == 3:
+            self._p28_pending_load_error = None
+            self._p28_apply_load_error(*pending_error)
+        if not applied_pending_view and getattr(self, '_p28_option_render_pending', False):
+            payload = getattr(self, '_p28_payload', {})
+            if isinstance(payload, dict) and getattr(self, '_p28_has_completed_view', False):
+                records = payload.get('records', {}) if isinstance(payload.get('records'), dict) else {}
+                expirations = payload.get('expirations', {}) if isinstance(payload.get('expirations'), dict) else {}
+                self._p28_render_option_tables(str(payload.get('ticker') or ''), records, expirations)
         self._p28_sync_status_to_status_bar()
         if not getattr(self, '_p28_initial_load_requested', False):
             self._p28_load(force_refresh=False)
+
+    def _p28_is_render_surface_visible(self) -> bool:
+        """Return whether Projections UI work may be applied now."""
+        page = getattr(self, 'page28', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
 
     def _p28_empty_payload(self, ticker: str = '') -> dict[str, Any]:
         """Return an empty page payload."""
@@ -402,7 +439,7 @@ class ChartsOptionsTopVolumeMixin:
         """Set the page status label."""
         if hasattr(self, 'p28_status_label'):
             self.set_status_text(self.p28_status_label, text, status=str(status))
-        if self._is_current_page(getattr(self, 'page28', None)) and hasattr(self, 'status_bar'):
+        if self._p28_is_render_surface_visible() and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
     def _p28_sync_status_to_status_bar(self) -> None:
@@ -442,6 +479,8 @@ class ChartsOptionsTopVolumeMixin:
         self._p28_request_seq += 1
         request_id = self._p28_request_seq
         self._p28_latest_request_id = request_id
+        self._p28_pending_completed_view = None
+        self._p28_pending_load_error = None
         self._p28_save_state()
         self._p28_set_loading(True)
         if getattr(self, '_p28_has_completed_view', False):
@@ -567,12 +606,50 @@ class ChartsOptionsTopVolumeMixin:
         bucket_projection_records: dict[str, list[dict[str, Any]]],
         bucket_expirations: dict[str, str],
     ) -> None:
-        """Render a completed combined payload."""
+        """Accept a completed combined payload and render it only while visible."""
         if request_id != getattr(self, '_p28_latest_request_id', 0):
             return
         if not isinstance(chart_df, pd.DataFrame) or chart_df.empty:
             message = str(chart_error or f'No chart data returned for {ticker}.')
             self._p28_handle_load_error(request_id, ticker, message)
+            return
+        self._p28_set_loading(False)
+        completed_view = {
+            'request_id': request_id,
+            'ticker': ticker,
+            'chart_df': chart_df,
+            'chart_error': chart_error,
+            'interval': interval,
+            'bucket_config': bucket_config,
+            'bucket_records': bucket_records,
+            'bucket_records_by_filter': bucket_records_by_filter,
+            'bucket_projection_records': bucket_projection_records,
+            'bucket_expirations': bucket_expirations,
+        }
+        self._p28_pending_load_error = None
+        if not self._p28_is_render_surface_visible():
+            self._p28_pending_completed_view = completed_view
+            return
+        self._p28_pending_completed_view = None
+        self._p28_apply_completed_view(**completed_view)
+
+    def _p28_apply_completed_view(
+        self,
+        request_id: int,
+        ticker: str,
+        chart_df: Any,
+        chart_error: str,
+        interval: str,
+        bucket_config: tuple[tuple[str, str, int], ...],
+        bucket_records: dict[str, list[dict[str, Any]]],
+        bucket_records_by_filter: dict[str, dict[str, list[dict[str, Any]]]],
+        bucket_projection_records: dict[str, list[dict[str, Any]]],
+        bucket_expirations: dict[str, str],
+    ) -> None:
+        """Apply one latest combined result to the visible Projections panel."""
+        if request_id != getattr(self, '_p28_latest_request_id', 0):
+            return
+        if request_id == getattr(self, '_p28_last_applied_request_id', 0):
             return
         self._p28_set_loading(False)
         self.p28_symbol = ticker
@@ -609,6 +686,7 @@ class ChartsOptionsTopVolumeMixin:
         self._p28_set_bucket_config(bucket_config)
         self._p28_render_option_tables(ticker, bucket_records, bucket_expirations)
         self._p28_has_completed_view = True
+        self._p28_last_applied_request_id = request_id
         self._p28_save_state()
         row_total = self._p28_loaded_row_count()
         expiry_count = len(bucket_config)
@@ -628,10 +706,21 @@ class ChartsOptionsTopVolumeMixin:
         self._p28_set_status(status, 'warning' if chart_error or populated_count < expiry_count else 'positive')
 
     def _p28_handle_load_error(self, request_id: int, ticker: str, message: str) -> None:
-        """Render a load failure if the request is still current."""
+        """Accept a load failure and defer its UI work while hidden."""
         if request_id != getattr(self, '_p28_latest_request_id', 0):
             return
         self._p28_set_loading(False)
+        self._p28_pending_completed_view = None
+        if not self._p28_is_render_surface_visible():
+            self._p28_pending_load_error = (request_id, ticker, message)
+            return
+        self._p28_pending_load_error = None
+        self._p28_apply_load_error(request_id, ticker, message)
+
+    def _p28_apply_load_error(self, request_id: int, ticker: str, message: str) -> None:
+        """Apply one latest load failure to the visible page."""
+        if request_id != getattr(self, '_p28_latest_request_id', 0):
+            return
         if getattr(self, '_p28_has_completed_view', False):
             self._p28_set_status(f'Refresh failed for {ticker}; showing previous result: {message}', 'negative')
             return
@@ -662,6 +751,7 @@ class ChartsOptionsTopVolumeMixin:
                 self.p28_options_grid.setRowStretch(row, 0)
         except Exception:
             pass
+        self._p28_bucket_config = ()
         self._p28_sections = {}
 
     def _p28_grid_column_count(self, count: int) -> int:
@@ -669,33 +759,33 @@ class ChartsOptionsTopVolumeMixin:
         return 1
 
     def _p28_set_bucket_config(self, bucket_config: tuple[tuple[str, str, int], ...]) -> None:
-        """Rebuild the all-expiration grid."""
+        """Store the all-expiration layout; sections are built in render slices."""
         self._p28_clear_option_grid()
-        normalized = tuple(bucket_config or ())
-        if not normalized:
-            return
-        grid_columns = self._p28_grid_column_count(len(normalized))
-        for index, (bucket_key, _bucket_label, _days_out) in enumerate(normalized):
-            panel = QFrame()
-            self.set_theme_role(panel, 'panel')
-            panel_layout = QVBoxLayout(panel)
-            panel_layout.setContentsMargins(6, 6, 6, 6)
-            panel_layout.setSpacing(4)
-            label = QLabel(format_top_volume_expiration(bucket_key) or bucket_key)
-            self.set_theme_role(label, 'section_title')
-            projection_label = QLabel('Options-volume projection unavailable')
-            projection_label.setWordWrap(True)
-            self.set_theme_role(projection_label, 'muted')
-            table = self._p28_make_top_volume_table()
-            panel_layout.addWidget(label)
-            panel_layout.addWidget(projection_label)
-            panel_layout.addWidget(table, 1)
-            self._p28_sections[bucket_key] = {'panel': panel, 'label': label, 'projection_label': projection_label, 'table': table}
-            self.p28_options_grid.addWidget(panel, index // grid_columns, index % grid_columns)
-        for col in range(grid_columns):
-            self.p28_options_grid.setColumnStretch(col, 1)
-        for row in range(max(1, math.ceil(len(normalized) / grid_columns))):
-            self.p28_options_grid.setRowStretch(row, 1)
+        self._p28_bucket_config = tuple(bucket_config or ())
+
+    def _p28_ensure_option_section(self, bucket_key: str, index: int, grid_columns: int) -> dict[str, Any]:
+        """Create one expiration panel when its render slice reaches it."""
+        existing = getattr(self, '_p28_sections', {}).get(bucket_key)
+        if isinstance(existing, dict):
+            return existing
+        panel = QFrame()
+        self.set_theme_role(panel, 'panel')
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(6, 6, 6, 6)
+        panel_layout.setSpacing(4)
+        label = QLabel(format_top_volume_expiration(bucket_key) or bucket_key)
+        self.set_theme_role(label, 'section_title')
+        projection_label = QLabel('Options-volume projection unavailable')
+        projection_label.setWordWrap(True)
+        self.set_theme_role(projection_label, 'muted')
+        table = self._p28_make_top_volume_table()
+        panel_layout.addWidget(label)
+        panel_layout.addWidget(projection_label)
+        panel_layout.addWidget(table, 1)
+        section = {'panel': panel, 'label': label, 'projection_label': projection_label, 'table': table}
+        self._p28_sections[bucket_key] = section
+        self.p28_options_grid.addWidget(panel, index // grid_columns, index % grid_columns)
+        return section
 
     def _p28_make_top_volume_table(self) -> Any:
         """Build one compact top-volume table."""
@@ -711,9 +801,63 @@ class ChartsOptionsTopVolumeMixin:
         table.setAlternatingRowColors(True)
         return table
 
+    @staticmethod
+    def _p28_table_selection_key(table: Any) -> tuple[str, ...] | None:
+        """Return a stable text key for the selected option row."""
+        row = int(table.currentRow()) if table is not None else -1
+        if row < 0:
+            return None
+        return tuple(
+            str(table.item(row, column).text() if table.item(row, column) is not None else '')
+            for column in range(table.columnCount())
+        )
+
+    @staticmethod
+    def _p28_restore_table_selection(table: Any, selection_key: tuple[str, ...] | None) -> None:
+        """Restore an option-row selection after its table is rebuilt."""
+        if table is None or selection_key is None:
+            return
+        for row in range(table.rowCount()):
+            candidate = tuple(
+                str(table.item(row, column).text() if table.item(row, column) is not None else '')
+                for column in range(table.columnCount())
+            )
+            if candidate == selection_key:
+                table.setCurrentCell(row, 0)
+                table.selectRow(row)
+                return
+
     def _p28_render_option_tables(self, ticker: str, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
-        """Render top-volume records into the expiration grid."""
-        for bucket_key, section in getattr(self, '_p28_sections', {}).items():
+        """Render expiration sections in bounded event-loop slices."""
+        config = tuple(getattr(self, '_p28_bucket_config', ()) or ())
+        if config:
+            section_entries = [(index, str(bucket_key)) for index, (bucket_key, _label, _days_out) in enumerate(config)]
+        else:
+            section_entries = [(index, str(bucket_key)) for index, bucket_key in enumerate(getattr(self, '_p28_sections', {}))]
+        grid_columns = self._p28_grid_column_count(len(section_entries))
+        self._p28_option_render_generation = getattr(self, '_p28_option_render_generation', 0) + 1
+        generation = self._p28_option_render_generation
+        self._p28_option_render_pending = False
+        selection_keys = {
+            bucket_key: self._p28_table_selection_key(section.get('table'))
+            for bucket_key, section in getattr(self, '_p28_sections', {}).items()
+            if isinstance(section, dict)
+        }
+        host = getattr(self, 'p28_options_host', None)
+        previous_updates = True
+        prepared = False
+        handle_box: dict[str, Any] = {}
+
+        def _prepare() -> None:
+            nonlocal previous_updates, prepared
+            if host is not None:
+                previous_updates = host.updatesEnabled()
+                host.setUpdatesEnabled(False)
+            prepared = True
+
+        def _apply(_index: int, entry: tuple[int, str]) -> None:
+            section_index, bucket_key = entry
+            section = self._p28_ensure_option_section(bucket_key, section_index, grid_columns)
             table = section.get('table') if isinstance(section, dict) else None
             label = section.get('label') if isinstance(section, dict) else None
             projection_label = section.get('projection_label') if isinstance(section, dict) else None
@@ -723,7 +867,7 @@ class ChartsOptionsTopVolumeMixin:
                 label.setText(display)
             self._p28_update_section_projection_label(projection_label, bucket_key)
             if table is None:
-                continue
+                return
             table.setToolTip(f'Using expiration {display}' if display else 'No expiration available')
             render_table_rows(
                 table,
@@ -740,6 +884,44 @@ class ChartsOptionsTopVolumeMixin:
                     pd_module=pd,
                 ),
             )
+            self._p28_restore_table_selection(table, selection_keys.get(bucket_key))
+
+        def _finish() -> None:
+            if prepared and section_entries:
+                for column in range(grid_columns):
+                    self.p28_options_grid.setColumnStretch(column, 1)
+                for row in range(max(1, math.ceil(len(section_entries) / grid_columns))):
+                    self.p28_options_grid.setRowStretch(row, 1)
+            if prepared and host is not None:
+                host.setUpdatesEnabled(previous_updates)
+                if previous_updates:
+                    host.update()
+            handle = handle_box.get('handle')
+            if generation != getattr(self, '_p28_option_render_generation', 0) or handle is None:
+                return
+            self._p28_option_render_pending = not bool(handle.completed)
+
+        def _on_error(exc: Exception) -> None:
+            if generation == getattr(self, '_p28_option_render_generation', 0):
+                self._p28_option_render_pending = True
+                if self._p28_is_render_surface_visible():
+                    self._p28_set_status(f'Unable to render all option expirations: {exc}', 'negative')
+
+        handle = run_batched(
+            self,
+            'projections-option-sections',
+            section_entries,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            on_error=_on_error,
+            is_current=lambda value: value == getattr(self, '_p28_option_render_generation', 0),
+            is_visible=self._p28_is_render_surface_visible,
+            max_batch_ms=8.0,
+            max_items=4,
+        )
+        handle_box['handle'] = handle
 
     def _p28_loaded_row_count(self) -> int:
         """Return the number of loaded option rows."""

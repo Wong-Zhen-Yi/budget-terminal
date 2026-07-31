@@ -172,6 +172,7 @@ def test_offscreen_sectors_workspace() -> None:
         _assert(window.p8_detail_table.horizontalScrollBar().maximum() == 0, "narrow layout should still fit table columns")
     finally:
         window.close()
+        window.deleteLater()
         app.processEvents()
 
 

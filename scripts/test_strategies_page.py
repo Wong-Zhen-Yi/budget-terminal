@@ -230,6 +230,9 @@ def _build_window(temp_dir: Path):
         window._p29_executor = _InlineExecutor()
         window._p29_refresh_cards(request_data=True)
         app.processEvents()
+        window.switch_page(28)
+        app.processEvents()
+        app.processEvents()
     finally:
         WindowLifecycleMixin._schedule_startup_refresh = original_schedule_startup_refresh
         WindowLifecycleMixin._start_lazy_warmup = original_start_lazy_warmup

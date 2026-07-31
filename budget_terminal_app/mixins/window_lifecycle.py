@@ -1,6 +1,57 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from ..widgets.batched_render import cancel_all_batched
+
+
+REFRESH_ROUTE_ARCHITECTURE = {
+    0: 'background-coordinated',
+    1: 'background-coordinated',
+    2: 'local-only',
+    3: 'background-coordinated',
+    5: 'background-single-flight',
+    6: 'background-single-flight',
+    7: 'background-single-flight',
+    8: 'background-single-flight',
+    9: 'background-active-subtab',
+    11: 'background-active-subtab',
+    12: 'background-single-flight',
+    13: 'background-single-flight',
+    14: 'background-single-flight',
+    15: 'background-single-flight',
+    16: 'background-single-flight',
+    17: 'local-only',
+    18: 'background-single-flight',
+    19: 'background-single-flight',
+    20: 'background-single-flight',
+    21: 'background-single-flight',
+    22: 'background-single-flight',
+    23: 'background-single-flight',
+    24: 'background-single-flight',
+    25: 'background-single-flight',
+    26: 'background-single-flight',
+    27: 'background-single-flight',
+    28: 'background-single-flight',
+    29: 'background-single-flight',
+    30: 'background-active-subtab',
+    31: 'background-active-subtab',
+    33: 'background-single-flight',
+    37: 'local-only',
+}
+
+_MIGRATED_REFRESH_ROUTES = {
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33,
+}
+REFRESH_ROUTE_CLASSIFICATION = {
+    page_index: (
+        'local-only'
+        if architecture == 'local-only'
+        else 'migrated'
+        if page_index in _MIGRATED_REFRESH_ROUTES
+        else 'background-safe'
+    )
+    for page_index, architecture in REFRESH_ROUTE_ARCHITECTURE.items()
+}
 
 class WindowLifecycleMixin:
     _STARTUP_REFRESH_DELAY_MS = 2400
@@ -61,7 +112,7 @@ class WindowLifecycleMixin:
         """Handle register navigation pages."""
         self._startup_progress_begin('navigation', 'Navigation')
         self._pages.clear()
-        self._register_page(0, self.btn_page1)
+        self._register_page(0, self.btn_page1, on_show=self._dashboard_on_show if hasattr(self, '_dashboard_on_show') else None)
         self._register_page(25, self.btn_page26, on_show=self._p26_on_show if hasattr(self, '_p26_on_show') else None)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
         self._register_page(30, self.btn_page31, on_show=self._p31_on_show if hasattr(self, '_p31_on_show') else None)
@@ -69,28 +120,34 @@ class WindowLifecycleMixin:
         self._register_page(28, self.btn_page29, on_show=self._p29_on_show if hasattr(self, '_p29_on_show') else None)
         self._register_page(2, self.btn_page6, on_show=self._p6_on_show if hasattr(self, '_p6_on_show') else None)
         self._register_page(3, self.btn_page7, on_show=self._p7_on_show if hasattr(self, '_p7_on_show') else None)
-        self._register_page(19, self.btn_page20, on_show=self._p20_on_show)
-        self._register_page(29, self.btn_page30)
+        self._register_page(
+            19,
+            self.btn_page20,
+            on_show=self._p20_on_show,
+            on_hide=self._p20_on_hide if hasattr(self, '_p20_on_hide') else None,
+        )
+        self._register_page(29, self.btn_page30, on_show=self._p30_on_show if hasattr(self, '_p30_on_show') else None)
         self._register_page(26, self.btn_page27, on_show=self._p27_on_show if hasattr(self, '_p27_on_show') else None)
-        self._register_page(33, self.btn_page34)
+        self._register_page(33, self.btn_page34, on_show=self._p34_on_show if hasattr(self, '_p34_on_show') else None)
         self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
         self._register_page(6, self.btn_page17, on_show=self._p17_on_show)
         self._register_page(7, self.btn_page12, on_show=self._stocks_on_show)
         self._register_page(22, self.btn_page23, on_show=self._valuation_on_show if hasattr(self, '_valuation_on_show') else None)
-        self._register_page(8, self.btn_page2, on_show=lambda: self._p2_relayout_charts() if hasattr(self, '_p2_relayout_charts') else None)
+        self._register_page(8, self.btn_page2, on_show=self._p2_on_show if hasattr(self, '_p2_on_show') else None)
         self._register_page(9, self.btn_page10, on_show=self._p10_on_show)
         self._register_page(27, self.btn_page28, on_show=self._p28_on_show if hasattr(self, '_p28_on_show') else None)
         self._register_page(24, self.btn_page25, on_show=self._p25_on_show if hasattr(self, '_p25_on_show') else None)
         self._register_page(11, self.btn_page5)
-        self._register_page(12, self.btn_page13)
+        self._register_page(12, self.btn_page13, on_show=self._p13_on_show if hasattr(self, '_p13_on_show') else None)
         self._register_page(13, self.btn_page14, on_show=self._p14_on_show)
-        self._register_page(14, self.btn_page19)
+        self._register_page(14, self.btn_page19, on_show=self._p19_on_show if hasattr(self, '_p19_on_show') else None)
         self._register_page(15, self.btn_page15, on_show=self._p15_on_show)
         self._register_page(21, self.btn_page22, on_show=self._p22_on_show)
         self._register_page(23, self.btn_page24, on_show=self._p24_on_show)
         self._register_page(16, self.btn_page16, on_show=self._p16_on_show)
-        self._register_page(18, self.btn_page18)
-        self._register_page(20, self.btn_page21)
+        self._register_page(37, self.btn_page38)
+        self._register_page(18, self.btn_page18, on_show=self._p18_on_show if hasattr(self, '_p18_on_show') else None)
+        self._register_page(20, self.btn_page21, on_show=self._p21_on_show if hasattr(self, '_p21_on_show') else None)
         self._register_page(17, self.btn_page9)
         self._apply_navigation_settings_to_shell()
         self._startup_progress_complete('navigation', 'Navigation')
@@ -1098,6 +1155,11 @@ class WindowLifecycleMixin:
                 {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Main'},
                 {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Multi Charts', 'aliases': ('Multiple Charts',)},
                 {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Compare', 'aliases': ('Comparison',)},
+                {
+                    'tab_widget_attr': 'p10_tabs',
+                    'tab_text': 'Cheat Sheet',
+                    'aliases': ('Chart Patterns', 'Pattern Cheat Sheet'),
+                },
             ),
             11: (
                 {'tab_widget_attr': 'p5_tabs', 'tab_text': 'Chain', 'aliases': ('Options Chain',)},
@@ -1457,7 +1519,18 @@ class WindowLifecycleMixin:
         if not hasattr(self, 'stacked_widget'):
             return
         current_index = int(self.stacked_widget.currentIndex())
-        logger.info('Manual refresh requested: %s page (index %s).', self._page_label(current_index), current_index)
+        architecture = REFRESH_ROUTE_ARCHITECTURE.get(current_index)
+        classification = REFRESH_ROUTE_CLASSIFICATION.get(current_index)
+        if architecture is None or classification is None:
+            logger.error('Manual refresh blocked for unclassified page index %s.', current_index)
+            return
+        logger.info(
+            'Manual refresh requested: %s page (index %s, classification=%s, architecture=%s).',
+            self._page_label(current_index),
+            current_index,
+            classification,
+            architecture,
+        )
         if current_index == 0:
             if hasattr(self, 'refresh_data'):
                 self.refresh_data(force=True, reason='manual_refresh')
@@ -1471,21 +1544,8 @@ class WindowLifecycleMixin:
                 self._p29_refresh_performance(force=True)
             return
         if current_index == 1:
-            current_widget = self.p4_content_tabs.currentWidget() if hasattr(self, 'p4_content_tabs') else None
-            if current_widget is getattr(self, 'p4_metrics_page', None):
-                if hasattr(self, '_p4_invalidate_portfolio_analytics_cache'):
-                    self._p4_invalidate_portfolio_analytics_cache(self.active_portfolio_id)
-                if hasattr(self, '_p4_refresh_portfolio_metrics_view'):
-                    self._p4_refresh_portfolio_metrics_view(force=True)
-                return
-            if current_widget is getattr(self, 'p4_momentum_page', None):
-                if hasattr(self, '_p4_invalidate_momentum_cache'):
-                    self._p4_invalidate_momentum_cache(self.active_portfolio_id)
-                if hasattr(self, '_p4_refresh_active_momentum_view'):
-                    self._p4_refresh_active_momentum_view()
-                return
-            if hasattr(self, 'refresh_data'):
-                self.refresh_data(force=True, reason='manual_refresh')
+            if hasattr(self, '_p4_refresh_holdings'):
+                self._p4_refresh_holdings()
             return
         if current_index == 2:
             if hasattr(self, '_p6_populate_tables'):
@@ -1518,6 +1578,10 @@ class WindowLifecycleMixin:
         if current_index == 30:
             if hasattr(self, '_p31_run_engine_cycle'):
                 self._p31_run_engine_cycle(mark=True, force=True)
+            return
+        if current_index == 31:
+            if hasattr(self, '_p32_run_engine_cycle'):
+                self._p32_run_engine_cycle(mark=True, force=True)
             return
         if current_index == 26:
             if hasattr(self, '_p27_request_refresh'):
@@ -1561,6 +1625,13 @@ class WindowLifecycleMixin:
                 if hasattr(self, '_mc_refresh_all'):
                     self._mc_refresh_all()
                 return
+            if active_key == 'cheatsheet':
+                cheat_sheet = getattr(self, 'p10_cheat_sheet', None)
+                if cheat_sheet is not None and hasattr(cheat_sheet, 'refresh_layout'):
+                    cheat_sheet.refresh_layout()
+                if hasattr(self, '_p10_set_cheat_sheet_status') and cheat_sheet is not None:
+                    self._p10_set_cheat_sheet_status(cheat_sheet.status_text)
+                return
             if hasattr(self, '_p10_refresh_chart'):
                 self._p10_refresh_chart(force_refresh=True)
             return
@@ -1592,6 +1663,10 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p16_refresh'):
                 self._p16_refresh(force=False, auto_trigger=False)
             return
+        if current_index == 37:
+            if hasattr(self, '_p38_refresh_view'):
+                self._p38_refresh_view()
+            return
         if current_index == 17:
             if hasattr(self, '_refresh_run_on_startup_controls'):
                 self._refresh_run_on_startup_controls()
@@ -1609,6 +1684,14 @@ class WindowLifecycleMixin:
         if current_index == 20:
             if hasattr(self, '_p21_refresh_ipo_calendar'):
                 self._p21_refresh_ipo_calendar(force=True)
+            return
+        if current_index == 21:
+            if hasattr(self, '_p22_refresh_current'):
+                self._p22_refresh_current(force=True)
+            return
+        if current_index == 24:
+            if hasattr(self, '_p25_run_backtest'):
+                self._p25_run_backtest()
             return
 
     def _handle_tab_picker_shortcut(self) -> None:
@@ -1734,7 +1817,12 @@ class WindowLifecycleMixin:
 
     def closeEvent(self, event: Any) -> None:
         """Closeevent."""
-        for cleanup_name in ('_stop_recurring_scheduler', '_p31_stop', '_p32_stop'):
+        self._refresh_shutdown = True
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is not None:
+            coordinator.clear()
+        cancel_all_batched(self)
+        for cleanup_name in ('_stop_recurring_scheduler', '_p31_stop', '_p32_stop', '_p36_stop'):
             cleanup = getattr(self, cleanup_name, None)
             if not callable(cleanup):
                 continue

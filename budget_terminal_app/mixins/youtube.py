@@ -9,6 +9,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkReques
 
 from ..compat import *
 from budget_terminal_app.workers.youtube import YouTubeWorker
+from budget_terminal_app.widgets.batched_render import run_batched
 
 
 class _ClickableThumbnailLabel(QLabel):
@@ -35,6 +36,10 @@ class YouTubeMixin:
         self._p16_warnings: list[str] = []
         self._p16_last_summary = self._p16_normalize_summary(None)
         self._p16_loaded_once = False
+        self._p16_render_pending = False
+        self._p16_render_generation = 0
+        self._p16_pending_status: tuple[str, str] | None = None
+        self._p16_pending_empty_state: tuple[str, str] | None = None
         self._p16_follow_newest = True
         self._p16_manual_selected_key = ''
         self._p16_selection_guard = False
@@ -50,6 +55,10 @@ class YouTubeMixin:
         self._p16_thumbnail_timeout = QTimer(self)
         self._p16_thumbnail_timeout.setSingleShot(True)
         self._p16_thumbnail_timeout.timeout.connect(self._p16_on_thumbnail_timeout)
+        self._p16_incremental_render_timer = QTimer(self)
+        self._p16_incremental_render_timer.setSingleShot(True)
+        self._p16_incremental_render_timer.setInterval(40)
+        self._p16_incremental_render_timer.timeout.connect(self._p16_flush_scheduled_render)
 
         layout = QVBoxLayout(self.page16)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -206,7 +215,61 @@ class YouTubeMixin:
             description='Open the YouTube tab and choose a result row to see the thumbnail and summary.',
         )
 
+    def _p16_page_is_visible(self) -> bool:
+        """Return whether YouTube is the active real-app surface."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page16', None)))
+        return True
+
+    def _p16_queue_render(
+        self,
+        *,
+        status_state: tuple[str, str] | None = None,
+        empty_state: tuple[str, str] | None = None,
+        coalesce: bool = False,
+    ) -> None:
+        """Cache one UI update and render it only while this page is visible."""
+        self._p16_render_pending = True
+        if status_state is not None:
+            self._p16_pending_status = (str(status_state[0]), str(status_state[1]))
+        if empty_state is not None:
+            self._p16_pending_empty_state = (str(empty_state[0]), str(empty_state[1]))
+        if not self._p16_page_is_visible():
+            return
+        timer = getattr(self, '_p16_incremental_render_timer', None)
+        if coalesce and timer is not None:
+            timer.start()
+            return
+        self._p16_apply_pending_render()
+
+    def _p16_flush_scheduled_render(self) -> None:
+        self._p16_apply_pending_render()
+
+    def _p16_apply_pending_render(self) -> bool:
+        """Apply the latest cached YouTube state exactly once when visible."""
+        if not self._p16_page_is_visible():
+            return False
+        timer = getattr(self, '_p16_incremental_render_timer', None)
+        if timer is not None:
+            timer.stop()
+        needs_render = bool(getattr(self, '_p16_render_pending', False))
+        pending_status = getattr(self, '_p16_pending_status', None)
+        if not needs_render and pending_status is None:
+            return False
+        self._p16_render_pending = False
+        empty_state = getattr(self, '_p16_pending_empty_state', None)
+        self._p16_pending_empty_state = None
+        if needs_render:
+            self._p16_render_table(empty_state=empty_state)
+            self._p16_apply_warnings(self._p16_warnings)
+        if isinstance(pending_status, tuple) and len(pending_status) == 2:
+            self._p16_pending_status = None
+            self.set_status_text(self.p16_status_lbl, pending_status[0], status=pending_status[1])
+        return True
+
     def _p16_on_show(self) -> None:
+        self._p16_apply_pending_render()
         if not self._p16_loaded_once and (self._p16_thread is None or not self._p16_thread.isRunning()):
             self._p16_refresh(force=False, auto_trigger=True)
 
@@ -218,13 +281,13 @@ class YouTubeMixin:
             message = 'yt-dlp is not installed. Install requirements.txt to enable the YouTube tab.'
             self._p16_warnings = [message]
             self._p16_last_summary = self._p16_normalize_summary({'tickers_total': 0, 'from_cache_count': 0, 'fetched_count': 0})
-            self._p16_render_table()
-            self._p16_apply_warnings(self._p16_warnings)
-            self._p16_clear_detail_panel(
-                title='YouTube tab unavailable',
-                description='Install project requirements to enable YouTube video results.',
+            self._p16_queue_render(
+                status_state=(message, 'warning'),
+                empty_state=(
+                    'YouTube tab unavailable',
+                    'Install project requirements to enable YouTube video results.',
+                ),
             )
-            self.set_status_text(self.p16_status_lbl, message, status='warning')
             self._p16_save_session_snapshot()
             return
         tickers = list(self._get_fetch_tickers()) if hasattr(self, '_get_fetch_tickers') else []
@@ -235,9 +298,9 @@ class YouTubeMixin:
             self._p16_last_summary = self._p16_normalize_summary({'tickers_total': 0, 'from_cache_count': 0, 'fetched_count': 0})
             self._p16_follow_newest = True
             self._p16_manual_selected_key = ''
-            self._p16_render_table()
-            self._p16_apply_warnings(self._p16_warnings)
-            self.set_status_text(self.p16_status_lbl, 'No saved portfolio tickers are available yet.', status='warning')
+            self._p16_queue_render(
+                status_state=('No saved portfolio tickers are available yet.', 'warning'),
+            )
             self._p16_save_session_snapshot()
             return
         self._p16_loaded_once = True
@@ -301,10 +364,8 @@ class YouTubeMixin:
         self._p16_last_summary = summary
         self._p16_follow_newest = True
         self._p16_manual_selected_key = ''
-        self._p16_render_table()
-        self._p16_apply_warnings(warnings)
         status_text, status = self._p16_status_state(self._p16_items, warnings, summary, restored=True)
-        self.set_status_text(self.p16_status_lbl, status_text, status=status)
+        self._p16_queue_render(status_state=(status_text, status))
         return True
 
     def _p16_restore_startup_session(self, snapshot: Any) -> None:
@@ -317,13 +378,16 @@ class YouTubeMixin:
             self._p16_refresh(force=False, auto_trigger=True)
 
     def _p16_on_worker_status(self, text: str) -> None:
-        self.set_status_text(self.p16_status_lbl, text, status='muted')
+        if self._p16_page_is_visible():
+            self.set_status_text(self.p16_status_lbl, text, status='muted')
+        else:
+            self._p16_pending_status = (str(text), 'muted')
 
     def _p16_on_item_ready(self, item: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             return
         if self._p16_merge_items([item]):
-            self._p16_render_table()
+            self._p16_queue_render(coalesce=True)
 
     def _p16_on_data(self, payload: dict[str, Any]) -> None:
         self._p16_set_busy(False)
@@ -331,22 +395,21 @@ class YouTubeMixin:
         self._p16_items = self._p16_sorted_items(payload_items)
         self._p16_warnings = self._p16_normalize_warnings(payload.get('warnings'))
         self._p16_last_summary = self._p16_normalize_summary(payload)
-        self._p16_render_table()
-        self._p16_apply_warnings(self._p16_warnings)
         status_text, status = self._p16_status_state(self._p16_items, self._p16_warnings, self._p16_last_summary)
-        self.set_status_text(self.p16_status_lbl, status_text, status=status)
+        self._p16_queue_render(status_state=(status_text, status))
         self._p16_save_session_snapshot()
 
     def _p16_on_error(self, message: str) -> None:
         self._p16_set_busy(False)
         error_text = f'YouTube refresh failed: {message}'
-        self._p16_apply_warnings([message])
+        self._p16_warnings = self._p16_normalize_warnings([message])
+        empty_state = None
         if not self._p16_items:
-            self._p16_clear_detail_panel(
-                title='No video selected',
-                description='YouTube results could not be loaded.',
-            )
-        self.set_status_text(self.p16_status_lbl, error_text, status='negative')
+            empty_state = ('No video selected', 'YouTube results could not be loaded.')
+        self._p16_queue_render(
+            status_state=(error_text, 'negative'),
+            empty_state=empty_state,
+        )
 
     def _p16_on_thread_finished(self) -> None:
         if self._p16_worker is not None:
@@ -587,9 +650,13 @@ class YouTubeMixin:
         status = 'warning' if warnings else 'positive'
         return (f'Loaded {len(items)} video result(s) for {total} ticker(s) ({cached} cached, {fetched} fresh).', status)
 
-    def _p16_render_table(self) -> None:
+    def _p16_render_table(self, *, empty_state: tuple[str, str] | None = None) -> None:
+        if not self._p16_page_is_visible():
+            self._p16_render_pending = True
+            if empty_state is not None:
+                self._p16_pending_empty_state = empty_state
+            return
         display_items = self._p16_filtered_items()
-        self._p16_update_result_count(len(display_items))
         target_key = ''
         if not self._p16_follow_newest and self._p16_manual_selected_key:
             if any(self._p16_video_key(item) == self._p16_manual_selected_key for item in display_items):
@@ -603,30 +670,85 @@ class YouTubeMixin:
                         break
             if selected_row < 0:
                 selected_row = 0
-        self._p16_selection_guard = True
-        self.p16_table.setUpdatesEnabled(False)
-        try:
+        self._p16_render_generation = int(getattr(self, '_p16_render_generation', 0)) + 1
+        generation = self._p16_render_generation
+        table = self.p16_table
+        previous_signals = table.signalsBlocked()
+        previous_updates = table.updatesEnabled()
+        sorting_enabled = table.isSortingEnabled()
+        previous_selection_guard = bool(getattr(self, '_p16_selection_guard', False))
+        prepared = False
+
+        def _prepare() -> None:
+            nonlocal prepared
+            prepared = True
+            self._p16_update_result_count(len(display_items))
+            self._p16_selection_guard = True
+            table.blockSignals(True)
+            table.setUpdatesEnabled(False)
+            table.setSortingEnabled(False)
+            table.clearSelection()
+            table.setRowCount(0)
+
+        def _apply(_row_index: int, item: dict[str, Any]) -> None:
+            self._p16_append_table_row(item)
+
+        def _finish() -> None:
+            is_current = generation == getattr(self, '_p16_render_generation', 0)
+            is_visible = self._p16_page_is_visible()
+            if is_current and not is_visible:
+                self._p16_render_pending = True
+                if empty_state is not None:
+                    self._p16_pending_empty_state = empty_state
+            if not prepared:
+                return
             self.p16_table.clearSelection()
-            self.p16_table.setRowCount(0)
-            for item in display_items:
-                self._p16_append_table_row(item)
+            if is_current and is_visible and selected_row >= 0:
+                table.selectRow(selected_row)
+            table.setSortingEnabled(sorting_enabled)
+            table.blockSignals(previous_signals)
+            table.setUpdatesEnabled(previous_updates)
+            self._p16_selection_guard = previous_selection_guard
+            if not is_current or not is_visible:
+                return
             if selected_row >= 0:
-                self.p16_table.selectRow(selected_row)
-        finally:
-            self.p16_table.setUpdatesEnabled(True)
-            self._p16_selection_guard = False
-        if selected_row >= 0:
-            self._p16_show_detail_item(dict(display_items[selected_row]))
-        else:
-            has_filter = bool(str(getattr(self, '_p16_filter_text', '') or '').strip())
-            self._p16_clear_detail_panel(
-                title='No matching videos' if has_filter and self._p16_items else 'No video selected',
-                description=(
-                    'Clear or adjust the filter to see loaded videos.'
-                    if has_filter and self._p16_items
-                    else 'No YouTube results are currently loaded.'
-                ),
-            )
+                self._p16_show_detail_item(dict(display_items[selected_row]))
+            else:
+                has_filter = bool(str(getattr(self, '_p16_filter_text', '') or '').strip())
+                title, description = empty_state or (
+                    'No matching videos' if has_filter and self._p16_items else 'No video selected',
+                    (
+                        'Clear or adjust the filter to see loaded videos.'
+                        if has_filter and self._p16_items
+                        else 'No YouTube results are currently loaded.'
+                    ),
+                )
+                self._p16_clear_detail_panel(title=title, description=description)
+            if previous_updates:
+                table.viewport().update()
+
+        if not callable(getattr(self, '_is_current_page', None)):
+            _prepare()
+            try:
+                for row_index, item in enumerate(display_items):
+                    _apply(row_index, item)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            'youtube-table',
+            display_items,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == getattr(self, '_p16_render_generation', 0),
+            is_visible=self._p16_page_is_visible,
+            max_batch_ms=8,
+            max_items=50,
+        )
 
     def _p16_append_table_row(self, item: dict[str, Any]) -> None:
         row = self.p16_table.rowCount()
@@ -676,6 +798,9 @@ class YouTubeMixin:
         self._p16_show_detail_item(dict(payload))
 
     def _p16_show_detail_item(self, item: dict[str, Any]) -> None:
+        if not self._p16_page_is_visible():
+            self._p16_render_pending = True
+            return
         self._p16_selected_item = dict(item)
         self.p16_watch_btn.setEnabled(bool(str(item.get('url', '') or '').strip()))
         self.p16_video_title_lbl.setText(str(item.get('title', '') or 'Untitled'))
@@ -757,6 +882,9 @@ class YouTubeMixin:
     def _p16_fetch_next_thumbnail_candidate(self, *, token: int) -> None:
         if token != self._p16_thumbnail_request_token:
             return
+        if not self._p16_page_is_visible():
+            self._p16_render_pending = True
+            return
         if not self._p16_selected_item or str(self._p16_selected_item.get('url', '') or '').strip() != self._p16_thumbnail_video_url:
             return
         if not self._p16_pending_thumbnail_candidates:
@@ -813,6 +941,9 @@ class YouTubeMixin:
         if token != self._p16_thumbnail_request_token:
             return
         if not self._p16_selected_item or str(self._p16_selected_item.get('url', '') or '').strip() != self._p16_thumbnail_video_url:
+            return
+        if not self._p16_page_is_visible():
+            self._p16_render_pending = True
             return
         if error_code != QNetworkReply.NetworkError.NoError:
             detail = 'request timed out' if timed_out else (error_text or f'network error {int(error_code)}')

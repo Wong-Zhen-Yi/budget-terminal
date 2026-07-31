@@ -130,9 +130,50 @@ P18_WHY_METRICS = (
     ('Volume', 'volume'),
     ('Timeframes', 'timeframes'),
 )
+P18_PATTERN_MODE_LABELS = {
+    'breakout': 'Breakout',
+    'consolidation': 'Consolidation',
+    'downtrend': 'Downtrend',
+    'double_bottom': 'Double Bottom',
+    'bullish_flag': 'Bullish Flag',
+    'bullish_rsi_divergence': 'Bullish RSI Divergence',
+}
+P18_PATTERN_TOOLTIPS = {
+    'breakout': (
+        'Finds pre-breakout or fresh-breakout setups near 55-day resistance, '
+        'confirmed by price support, momentum, volume, and multiple timeframes.'
+    ),
+    'consolidation': (
+        'Finds stocks inside a tight 20-day range with low directional drift, contracting ATR, '
+        'and orderly volume.'
+    ),
+    'downtrend': (
+        'Finds controlled declines below daily moving averages with bearish price structure '
+        'and momentum, volume, and multi-timeframe confirmation.'
+    ),
+    'double_bottom': (
+        'Finds two comparable lows followed by a rebound toward or through the neckline, '
+        'with momentum, volume, and multi-timeframe confirmation.'
+    ),
+    'bullish_flag': (
+        'Finds a sharp, recent advance followed by an orderly pullback near or through flag resistance, '
+        'with momentum, volume, and multi-timeframe confirmation.'
+    ),
+    'bullish_rsi_divergence': (
+        'Finds a lower price low with a higher RSI low, then checks the rebound, '
+        'price trigger, and supporting confirmation.'
+    ),
+}
 
 
 class RandomRecommenderMixin:
+
+    def _p18_page_is_visible(self) -> bool:
+        """Return whether Roll is the current real-app surface."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page18', None)))
+        return True
 
     def init_page18(self) -> None:
         self._p18_request_seq = 0
@@ -151,6 +192,9 @@ class RandomRecommenderMixin:
         self._p18_candidate_pool = []
         self._p18_full_payloads = {}
         self._p18_pending_payload = {}
+        self._p18_render_pending = False
+        self._p18_pending_complete = False
+        self._p18_pending_status: tuple[str, str, bool] | None = None
         self._p18_payload_request_id = 0
         self._p18_inflight_workers = {}
         self._p18_pattern_checkboxes = []
@@ -209,20 +253,26 @@ class RandomRecommenderMixin:
         self.p18_double_bottom_checkbox = QCheckBox('Double bottom')
         self.p18_bullish_flag_checkbox = QCheckBox('Bullish flag')
         self.p18_bullish_rsi_divergence_checkbox = QCheckBox('Bullish RSI divergence')
-        for checkbox in (
-            self.p18_breakout_checkbox,
-            self.p18_consolidation_checkbox,
-            self.p18_downtrend_checkbox,
-            self.p18_double_bottom_checkbox,
-            self.p18_bullish_flag_checkbox,
-            self.p18_bullish_rsi_divergence_checkbox,
+        for mode, checkbox in (
+            ('breakout', self.p18_breakout_checkbox),
+            ('consolidation', self.p18_consolidation_checkbox),
+            ('downtrend', self.p18_downtrend_checkbox),
+            ('double_bottom', self.p18_double_bottom_checkbox),
+            ('bullish_flag', self.p18_bullish_flag_checkbox),
+            ('bullish_rsi_divergence', self.p18_bullish_rsi_divergence_checkbox),
         ):
-            checkbox.setToolTip('Filter Roll candidates using daily technical patterns and indicator confirmation.')
+            checkbox.setToolTip(P18_PATTERN_TOOLTIPS[mode])
             self._p18_pattern_checkboxes.append(checkbox)
         self.p18_header_controls_grid.addWidget(self.p18_roll_btn, 0, 0)
         self.p18_header_controls_grid.addWidget(self.p18_pattern_host, 0, 1)
         self.p18_header_controls_grid.setColumnStretch(1, 1)
         top_layout.addLayout(self.p18_header_controls_grid)
+        self.p18_pattern_hint = QLabel(
+            'Pattern filters: selected modes use OR matching; no selection uses a balanced roll.'
+        )
+        self.p18_pattern_hint.setWordWrap(True)
+        self.set_theme_role(self.p18_pattern_hint, 'muted')
+        top_layout.addWidget(self.p18_pattern_hint)
         layout.addWidget(top_frame)
         self._p18_panel_widgets.append(top_frame)
 
@@ -496,7 +546,9 @@ class RandomRecommenderMixin:
         self.p18_candidates_empty.setWordWrap(True)
         self.set_theme_role(self.p18_candidates_empty, 'muted')
         self.p18_candidates_table = QTableWidget(0, 10)
-        self.p18_candidates_table.setHorizontalHeaderLabels(['Rank', 'Ticker', 'Score', 'Setup', 'Pattern', 'Sector', 'Day %', '1Y %', 'Avg Vol', 'Reason'])
+        self.p18_candidates_table.setHorizontalHeaderLabels(
+            ['Rank', 'Ticker', 'Score', 'Pattern', 'Pattern score', 'Sector', 'Day %', '1Y %', 'Avg Vol', 'Reason']
+        )
         self.p18_candidates_table.verticalHeader().setVisible(False)
         self.p18_candidates_table.verticalHeader().setDefaultSectionSize(22)
         self.p18_candidates_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -751,6 +803,28 @@ class RandomRecommenderMixin:
         if include_global and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=status)
 
+    def _p18_publish_status(self, text: Any, status: str='muted', *, include_global: bool=True) -> None:
+        """Publish Roll status only while visible, retaining the newest hidden status."""
+        if self._p18_page_is_visible():
+            self._p18_pending_status = None
+            self._p18_set_status(text, status, include_global=include_global)
+        else:
+            self._p18_pending_status = (str(text or ''), str(status), bool(include_global))
+
+    def _p18_on_show(self) -> None:
+        """Apply the newest cached partial or completed Roll payload once."""
+        if getattr(self, '_p18_render_pending', False):
+            payload = dict(getattr(self, '_p18_pending_payload', {}) or {})
+            complete = bool(getattr(self, '_p18_pending_complete', False))
+            self._p18_render_pending = False
+            self._p18_pending_complete = False
+            if payload:
+                self._p18_apply_payload(payload, save_snapshot=complete)
+        pending_status = getattr(self, '_p18_pending_status', None)
+        if isinstance(pending_status, tuple) and len(pending_status) == 3:
+            self._p18_pending_status = None
+            self._p18_set_status(pending_status[0], pending_status[1], include_global=pending_status[2])
+
     def _p18_set_busy(self, busy: bool, *, status_text: Any=None, include_global: bool=True) -> None:
         self.p18_roll_btn.setEnabled(not busy)
         self.p18_roll_btn.setText('Rolling…' if busy else 'Roll')
@@ -770,6 +844,9 @@ class RandomRecommenderMixin:
         request_id = self._p18_request_seq
         self._p18_active_request = request_id
         self._p18_pending_payload = {}
+        self._p18_render_pending = False
+        self._p18_pending_complete = False
+        self._p18_pending_status = None
         target = str(target_symbol or '').upper().strip()
         pattern_modes = self._p18_selected_pattern_modes()
         loading_text = f'Loading {target}...' if target else ('Scanning patterns...' if pattern_modes else 'Scoring candidates...')
@@ -847,6 +924,12 @@ class RandomRecommenderMixin:
             modes.append('bullish_rsi_divergence')
         return modes
 
+    def _p18_pattern_mode_label(self, mode: Any) -> str:
+        normalized = str(mode or '').strip().casefold()
+        if not normalized:
+            return 'Unknown'
+        return P18_PATTERN_MODE_LABELS.get(normalized, normalized.replace('_', ' ').title())
+
     def _p18_cleanup_worker_refs(self, request_id: int, worker: Any, thread: Any) -> None:
         self._p18_inflight_workers.pop(request_id, None)
         if getattr(self, 'p18_worker', None) is worker:
@@ -902,7 +985,7 @@ class RandomRecommenderMixin:
                 message = f'{message} ({min(int(current), int(total))}/{int(total)})'
         except Exception:
             pass
-        self._p18_set_status(message, 'info')
+        self._p18_publish_status(message, 'info')
 
     def _p18_handle_partial(self, request_id: int, update: Any) -> None:
         if request_id != getattr(self, '_p18_active_request', 0) or not isinstance(update, dict):
@@ -920,6 +1003,12 @@ class RandomRecommenderMixin:
         pending = dict(getattr(self, '_p18_pending_payload', {}) or {})
         pending.update(patch)
         self._p18_pending_payload = pending
+        if not self._p18_page_is_visible():
+            self._p18_loaded_payload = pending
+            self._p18_payload_request_id = request_id
+            self._p18_render_pending = True
+            self._p18_pending_complete = False
+            return
 
         if section == 'candidates':
             candidates = patch.get('candidate_pool') or []
@@ -956,7 +1045,21 @@ class RandomRecommenderMixin:
             return
         self._p18_set_busy(False)
         self._p18_pending_payload = dict(payload or {})
+        self._p18_loaded_payload = dict(payload or {})
+        self._p18_payload_request_id = request_id
+        status_text, status = self._p18_result_status(payload)
+        if not self._p18_page_is_visible():
+            self._p18_render_pending = True
+            self._p18_pending_complete = True
+            self._p18_pending_status = (status_text, status, True)
+            return
+        self._p18_render_pending = False
+        self._p18_pending_complete = False
         self._p18_apply_payload(payload)
+        self._p18_publish_status(status_text, status)
+
+    def _p18_result_status(self, payload: dict[str, Any]) -> tuple[str, str]:
+        """Build the final Roll status without touching widgets."""
         symbol = self._p18_current_symbol()
         score = payload.get('candidate_score')
         score_text = f' score {float(score):.1f}' if isinstance(score, (int, float)) else ''
@@ -970,21 +1073,20 @@ class RandomRecommenderMixin:
         tier_warning = 'Near technical match.' if match_tier == 'near' else ''
         if fallback_reason or warning_text or tier_warning:
             prefix = fallback_reason or warning_text or tier_warning
-            self._p18_set_status(f'{prefix} Loaded {symbol}{score_text}{suffix}.', 'warning')
-        else:
-            self._p18_set_status(f'Loaded {symbol}{score_text}{pattern_text}{suffix}.', 'positive')
+            return f'{prefix} Loaded {symbol}{score_text}{suffix}.', 'warning'
+        return f'Loaded {symbol}{score_text}{pattern_text}{suffix}.', 'positive'
 
     def _p18_handle_error(self, request_id: int, message: Any) -> None:
         if request_id != getattr(self, '_p18_active_request', 0):
             return
         self._p18_set_busy(False)
-        self._p18_set_status(str(message or 'Random roll failed.'), 'negative')
+        self._p18_publish_status(str(message or 'Random roll failed.'), 'negative')
 
     def _p18_handle_cancelled(self, request_id: int) -> None:
         if request_id != getattr(self, '_p18_active_request', 0):
             return
         self._p18_set_busy(False)
-        self._p18_set_status('Roll cancelled.', 'muted')
+        self._p18_publish_status('Roll cancelled.', 'muted')
 
     def _p18_warning_text(self, warnings: Any) -> str:
         if isinstance(warnings, dict):
@@ -1204,6 +1306,31 @@ class RandomRecommenderMixin:
                 if setup_text == 'None':
                     setup_text = 'Balanced'
                 match_tier = str(candidate.get('match_tier') or '').strip().casefold()
+                pattern_tooltip = ''
+                if pattern_active:
+                    tier_label = {
+                        'strict': 'Strict',
+                        'near': 'Near',
+                        'fallback': 'Fallback',
+                        'unavailable': 'Unavailable',
+                    }.get(match_tier, match_tier.title() or 'Not classified')
+                    matched_modes = []
+                    seen_modes = set()
+                    for mode in list(candidate.get('matched_modes') or []):
+                        normalized_mode = str(mode or '').strip().casefold()
+                        if normalized_mode and normalized_mode not in seen_modes:
+                            seen_modes.add(normalized_mode)
+                            matched_modes.append(normalized_mode)
+                    strict_match_text = (
+                        ', '.join(self._p18_pattern_mode_label(mode) for mode in matched_modes)
+                        if matched_modes
+                        else 'None'
+                    )
+                    pattern_tooltip = (
+                        f'Primary pattern: {setup_text}\n'
+                        f'Match tier: {tier_label}\n'
+                        f'Strict matched modes: {strict_match_text}'
+                    )
                 if pattern_active and match_tier in ('fallback', 'unavailable'):
                     setup_text = f'{setup_text} · {match_tier.title()}'
                 pattern_score = candidate.get('pattern_score')
@@ -1233,6 +1360,8 @@ class RandomRecommenderMixin:
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         if symbol == current_symbol:
                             item.setForeground(self.theme_qcolor('accent'))
+                    elif col_index == 3 and pattern_tooltip:
+                        item.setToolTip(pattern_tooltip)
                     elif col_index in (0, 2, 4, 6, 7, 8):
                         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     self.p18_candidates_table.setItem(row_index, col_index, item)
@@ -1503,12 +1632,14 @@ class RandomRecommenderMixin:
         if primary_mode and isinstance(snapshot.get(primary_mode), dict):
             snapshot = {primary_mode: snapshot[primary_mode]}
         breakout = snapshot.get('breakout')
+        consolidation = snapshot.get('consolidation')
         downtrend = snapshot.get('downtrend')
         double_bottom = snapshot.get('double_bottom')
         bullish_flag = snapshot.get('bullish_flag')
         bullish_rsi = snapshot.get('bullish_rsi_divergence')
         if (
             not isinstance(breakout, dict)
+            and not isinstance(consolidation, dict)
             and not isinstance(downtrend, dict)
             and not isinstance(double_bottom, dict)
             and not isinstance(bullish_flag, dict)
@@ -1588,6 +1719,31 @@ class RandomRecommenderMixin:
                 parts.append(volume_state)
             elif timeframe_agreement:
                 parts.append(f'{timeframe_agreement} timeframes')
+            return '; '.join(parts[:3])
+        if isinstance(consolidation, dict):
+            range_pct = consolidation.get('range_pct')
+            atr20 = consolidation.get('atr20')
+            atr60 = consolidation.get('atr60')
+            volume20 = consolidation.get('volume20')
+            volume60 = consolidation.get('volume60')
+            if isinstance(range_pct, (int, float)) and math.isfinite(float(range_pct)):
+                parts.append(f'{float(range_pct):.2f}% 20D range')
+            if (
+                isinstance(atr20, (int, float))
+                and isinstance(atr60, (int, float))
+                and math.isfinite(float(atr20))
+                and math.isfinite(float(atr60))
+                and float(atr60) > 0
+            ):
+                parts.append(f'ATR {float(atr20) / float(atr60):.2f}x 60D')
+            if (
+                isinstance(volume20, (int, float))
+                and isinstance(volume60, (int, float))
+                and math.isfinite(float(volume20))
+                and math.isfinite(float(volume60))
+                and float(volume60) > 0
+            ):
+                parts.append(f'volume {float(volume20) / float(volume60):.2f}x 60D')
             return '; '.join(parts[:3])
         if isinstance(downtrend, dict):
             decline_20d = downtrend.get('decline_20d_pct')
@@ -2123,11 +2279,14 @@ class RandomRecommenderMixin:
 
     def _p18_pattern_reason_text(self, candidate: dict[str, Any]) -> str:
         fallback_reason = str(candidate.get('pattern_fallback_reason') or '').strip()
-        if fallback_reason:
-            return fallback_reason
         reasons = [str(reason or '').strip() for reason in list(candidate.get('pattern_reasons') or []) if str(reason or '').strip()]
+        parts = []
         if reasons:
-            return ', '.join(reasons)
+            parts.append(', '.join(reasons))
+        if fallback_reason:
+            parts.append(fallback_reason)
+        if parts:
+            return ' — '.join(parts)
         return self._p18_candidate_reason_text(candidate)
 
     def _p18_payload_pattern_modes(self, payload: Any) -> list[str]:

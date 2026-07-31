@@ -4,7 +4,7 @@ from .cache import CacheManager
 from .dependencies import *
 from .persistence import *
 from .session_cache import *
-from .widgets.charts import CandlestickItem, DateAxisItem, FmtAxisItem, PercentAxisItem
+from .widgets.charts import CandlestickItem, CompareIntervalLabelsItem, DateAxisItem, FmtAxisItem, PercentAxisItem
 from .widgets.bar_chart import BarChartWidget
 from .widgets.pie_chart import PieChartWidget
 

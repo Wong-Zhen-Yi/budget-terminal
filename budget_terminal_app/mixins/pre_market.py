@@ -157,12 +157,20 @@ class _FearGreedGauge(QWidget):
 class PreMarketMixin:
     _P14_AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 
+    def _p14_page_is_visible(self) -> bool:
+        """Guard result rendering in the real window while keeping small probes usable."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page14', None)))
+        return True
+
     def init_page14(self) -> None:
         """Build the Pre-Market page UI."""
         self._p14_thread: QThread | None = None
         self._p14_worker: PreMarketWorker | None = None
         self._p14_loaded_once = False
         self._p14_last_refresh_ts = 0.0
+        self._p14_pending_result: dict[str, Any] | None = None
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -462,6 +470,10 @@ class PreMarketMixin:
 
     def _p14_on_show(self) -> None:
         """Refresh visible Pre-Market data only when the cached view is stale or empty."""
+        pending = getattr(self, '_p14_pending_result', None)
+        if isinstance(pending, dict):
+            self._p14_pending_result = None
+            self._p14_apply_result(pending)
         if not getattr(self, '_p14_loaded_once', False):
             self._p14_refresh(auto_trigger=True)
             return
@@ -500,6 +512,15 @@ class PreMarketMixin:
     def _p14_on_data(self, result: dict) -> None:
         self._p14_loaded_once = True
         self._p14_last_refresh_ts = datetime.datetime.now().timestamp()
+        payload = dict(result) if isinstance(result, dict) else {}
+        if not self._p14_page_is_visible():
+            self._p14_pending_result = payload
+            return
+        self._p14_pending_result = None
+        self._p14_apply_result(payload)
+
+    def _p14_apply_result(self, result: dict[str, Any]) -> None:
+        """Apply a completed result only while the Pre-Market surface is visible."""
         # Futures
         futures = result.get('futures', [])
         self.p14_futures_table.setRowCount(len(futures))

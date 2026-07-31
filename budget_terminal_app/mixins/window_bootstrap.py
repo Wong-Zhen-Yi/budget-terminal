@@ -6,6 +6,7 @@ from typing import Any
 from .. import __version__
 from ..compat import *
 from ..paper_trading import RecurringTradingService
+from ..services.refresh_control import RefreshCoordinator
 from ..startup_metrics import make_launch_id, upsert_startup_launch, utc_now_iso
 
 
@@ -78,7 +79,7 @@ class WindowBootstrapMixin:
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
     _SESSION_CACHE_PERSIST_DEBOUNCE_MS = 250
     _OPTIONS_FETCH_MAX_WORKERS = 4
-    _PORTFOLIO_TASK_MAX_WORKERS = 4
+    _PORTFOLIO_TASK_MAX_WORKERS = 1
     _DASHBOARD_FETCH_MAX_WORKERS = 2
     _P17_FETCH_MAX_WORKERS = 3
     _STARTUP_METRIC_STAGE_LABELS = {
@@ -795,6 +796,7 @@ class WindowBootstrapMixin:
         self._startup_profiler = startup_profiler
         self._startup_progress = startup_progress
         self._data_service_client = data_service_client
+        self._refresh_coordinator = RefreshCoordinator()
         self._invoke_main.connect(self._on_invoke_main)
         self._init_startup_metrics_state()
         with self._startup_profiler_step('window_init'), self._startup_progress_step('window_init', 'Main window'):
@@ -953,6 +955,8 @@ class WindowBootstrapMixin:
         self._recurring_scheduler_timer = None
         self._recurring_scheduler_stopped = False
         self._recurring_scheduler_inflight = False
+        self._recurring_scheduler_inflight_catch_up = False
+        self._recurring_scheduler_catch_up_pending = True
         self._recurring_scheduler_available = False
         self._recurring_scheduler_activation_pending = True
         self._recurring_scheduler_startup_status = 'pending'
@@ -1055,6 +1059,7 @@ class WindowBootstrapMixin:
                 logger.debug('Unable to release recurring scheduler executor.', exc_info=True)
         self._recurring_scheduler_service = None
         self._recurring_scheduler_inflight = False
+        self._recurring_scheduler_inflight_catch_up = False
 
     def _disable_recurring_scheduler(self, error: Any, *, phase: str) -> None:
         """Disable recurring automation for this session without aborting the application."""
@@ -1092,8 +1097,10 @@ class WindowBootstrapMixin:
         ):
             return
         self._recurring_scheduler_inflight = True
+        catch_up = bool(getattr(self, '_recurring_scheduler_catch_up_pending', False))
+        self._recurring_scheduler_inflight_catch_up = catch_up
         try:
-            future = executor.submit(service.run_due)
+            future = executor.submit(service.run_due, catch_up=catch_up)
         except Exception as exc:
             self._disable_recurring_scheduler(exc, phase='task submission')
             return
@@ -1118,6 +1125,9 @@ class WindowBootstrapMixin:
         except Exception:
             logger.exception('Recurring scheduler check failed.')
             return
+        if getattr(self, '_recurring_scheduler_inflight_catch_up', False):
+            self._recurring_scheduler_catch_up_pending = False
+        self._recurring_scheduler_inflight_catch_up = False
         if not int(result.get('claimed', 0) or 0):
             return
         if self._page_initialized(page_attr='page31') and hasattr(self, '_p31_refresh_all'):

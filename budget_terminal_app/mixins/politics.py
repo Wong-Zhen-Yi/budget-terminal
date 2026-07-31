@@ -2,12 +2,20 @@ from __future__ import annotations
 from typing import Any
 from ..compat import *
 from budget_terminal_app.workers.politics import PoliticsExportWorker, PoliticsWorker
+from budget_terminal_app.widgets.batched_render import run_batched
 
 PARTY_COLORS = {'Democrat': '#2196f3', 'Republican': '#f44336', 'Independent': '#9e9e9e', 'Unknown': '#666666'}
 TRADE_COLORS = {'Purchase': '#00c853', 'Sale (Full)': '#ff1744', 'Sale (Partial)': '#ff5252', 'Exchange': '#ffc107'}
 
 
 class PoliticsMixin:
+
+    def _p15_page_is_visible(self) -> bool:
+        """Return whether Politics is the current real-app page."""
+        checker = getattr(self, '_is_current_page', None)
+        if callable(checker):
+            return bool(checker(getattr(self, 'page15', None)))
+        return True
 
     def init_page15(self) -> None:
         self._p15_thread: QThread | None = None
@@ -19,6 +27,9 @@ class PoliticsMixin:
         self._p15_current_raw_count: int = 0
         self._p15_current_fetched_at: Any = None
         self._p15_loaded_once: bool = False
+        self._p15_render_pending = False
+        self._p15_pending_restored = False
+        self._p15_render_generation = 0
 
         layout = QVBoxLayout(self.page15)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -274,6 +285,11 @@ class PoliticsMixin:
     # -- Data fetching --
 
     def _p15_on_show(self) -> None:
+        if getattr(self, '_p15_render_pending', False):
+            restored = bool(getattr(self, '_p15_pending_restored', False))
+            self._p15_render_pending = False
+            self._p15_pending_restored = False
+            self._p15_render_current_result(restored=restored)
         if not self._p15_loaded_once and (self._p15_thread is None or not self._p15_thread.isRunning()):
             self._p15_refresh(force=False)
 
@@ -370,6 +386,16 @@ class PoliticsMixin:
         self._p15_all_trades = payload.get('trades', [])
         self._p15_current_raw_count = int(payload.get('raw_count', len(self._p15_all_trades)) or len(self._p15_all_trades))
         self._p15_current_fetched_at = payload.get('fetched_at')
+        if not self._p15_page_is_visible():
+            self._p15_render_pending = True
+            self._p15_pending_restored = bool(restored)
+            return
+        self._p15_render_pending = False
+        self._p15_pending_restored = False
+        self._p15_render_current_result(restored=restored)
+
+    def _p15_render_current_result(self, *, restored: bool = False) -> None:
+        """Render the latest cached Politics state after visibility is confirmed."""
         count = len(self._p15_all_trades)
         status_text = f'Page {self._p15_current_page} - {count} trades'
         if restored:
@@ -516,31 +542,89 @@ class PoliticsMixin:
         self._p15_populate_summaries(filtered)
 
     def _p15_populate_trades_table(self, trades: list[dict]) -> None:
-        self.p15_trades_table.setSortingEnabled(False)
-        self.p15_trades_table.setRowCount(len(trades))
-        for r, t in enumerate(trades):
-            self.p15_trades_table.setItem(r, 0, QTableWidgetItem(t.get('politician', '')))
-            self.p15_trades_table.setItem(r, 1, QTableWidgetItem(t.get('chamber', '')))
+        table = self.p15_trades_table
+        rows = list(trades)
+        selected_key = None
+        selected_row = table.currentRow()
+        if selected_row >= 0:
+            selected_key = tuple(
+                table.item(selected_row, column).text() if table.item(selected_row, column) is not None else ''
+                for column in (0, 3, 6, 7)
+            )
+        sorting_enabled = table.isSortingEnabled()
+        previous_updates = table.updatesEnabled()
+        previous_signals = table.signalsBlocked()
+        self._p15_render_generation += 1
+        generation = self._p15_render_generation
+        prepared = False
 
-            party = t.get('party', 'Unknown')
+        def _prepare() -> None:
+            nonlocal prepared
+            prepared = True
+            table.blockSignals(True)
+            table.setUpdatesEnabled(False)
+            table.setSortingEnabled(False)
+            table.setRowCount(len(rows))
+
+        def _apply(row_index: int, trade: dict[str, Any]) -> None:
+            table.setItem(row_index, 0, QTableWidgetItem(trade.get('politician', '')))
+            table.setItem(row_index, 1, QTableWidgetItem(trade.get('chamber', '')))
+            party = trade.get('party', 'Unknown')
             party_item = QTableWidgetItem(party)
             party_item.setForeground(QColor(PARTY_COLORS.get(party, '#666666')))
-            self.p15_trades_table.setItem(r, 2, party_item)
-
-            ticker_item = QTableWidgetItem(t.get('ticker', ''))
+            table.setItem(row_index, 2, party_item)
+            ticker_item = QTableWidgetItem(trade.get('ticker', ''))
             ticker_item.setForeground(QColor('#42a5f5'))
-            self.p15_trades_table.setItem(r, 3, ticker_item)
-
-            trade_type = t.get('trade_type', '')
+            table.setItem(row_index, 3, ticker_item)
+            trade_type = trade.get('trade_type', '')
             type_item = QTableWidgetItem(trade_type)
             type_item.setForeground(QColor(TRADE_COLORS.get(trade_type, '#888888')))
-            self.p15_trades_table.setItem(r, 4, type_item)
+            table.setItem(row_index, 4, type_item)
+            table.setItem(row_index, 5, QTableWidgetItem(trade.get('amount', '')))
+            table.setItem(row_index, 6, QTableWidgetItem(trade.get('transaction_date', '')))
+            table.setItem(row_index, 7, QTableWidgetItem(trade.get('disclosure_date', '')))
 
-            self.p15_trades_table.setItem(r, 5, QTableWidgetItem(t.get('amount', '')))
-            self.p15_trades_table.setItem(r, 6, QTableWidgetItem(t.get('transaction_date', '')))
-            self.p15_trades_table.setItem(r, 7, QTableWidgetItem(t.get('disclosure_date', '')))
-        self._p15_fit_trades_table_to_data()
-        self.p15_trades_table.setSortingEnabled(True)
+        def _finish() -> None:
+            if generation == self._p15_render_generation and not self._p15_page_is_visible():
+                self._p15_render_pending = True
+            if not prepared:
+                return
+            self._p15_fit_trades_table_to_data()
+            table.setSortingEnabled(sorting_enabled)
+            table.blockSignals(previous_signals)
+            table.setUpdatesEnabled(previous_updates)
+            if selected_key is not None:
+                for row_index in range(table.rowCount()):
+                    row_key = tuple(
+                        table.item(row_index, column).text() if table.item(row_index, column) is not None else ''
+                        for column in (0, 3, 6, 7)
+                    )
+                    if row_key == selected_key:
+                        table.selectRow(row_index)
+                        break
+            if previous_updates:
+                table.viewport().update()
+
+        if not callable(getattr(self, '_is_current_page', None)):
+            _prepare()
+            try:
+                for row_index, trade in enumerate(rows):
+                    _apply(row_index, trade)
+            finally:
+                _finish()
+            return
+
+        run_batched(
+            self,
+            'politics-trades',
+            rows,
+            _apply,
+            generation=generation,
+            prepare=_prepare,
+            finish=_finish,
+            is_current=lambda value: value == self._p15_render_generation,
+            is_visible=self._p15_page_is_visible,
+        )
 
     @staticmethod
     def _p15_top_counts(trades: list[dict], key: str, limit: int) -> list[tuple[str, int]]:

@@ -25,6 +25,8 @@ class DataServiceClientProtocol(Protocol):
         allow_non_chart_reuse: bool = False,
     ) -> dict[str, Any]: ...
 
+    def fetch_portfolio_quotes(self, tickers: Any) -> dict[str, Any]: ...
+
     def fetch_month_returns(
         self,
         tickers: Any,
@@ -102,6 +104,10 @@ class InProcessDataServiceClient:
                 "allow_non_chart_reuse": bool(allow_non_chart_reuse),
             }
         )
+
+    def fetch_portfolio_quotes(self, tickers: Any) -> dict[str, Any]:
+        self._require_open()
+        return self._coordinator.fetch_portfolio_quotes({"tickers": list(tickers or [])})
 
     def fetch_month_returns(
         self,
@@ -204,6 +210,11 @@ class DataServiceClient:
                 "allow_non_chart_reuse": bool(allow_non_chart_reuse),
             },
         )
+        response.raise_for_status()
+        return deserialize_dashboard_payload(response.json())
+
+    def fetch_portfolio_quotes(self, tickers: Any) -> dict[str, Any]:
+        response = self._client.post("/portfolio/quotes", json={"tickers": list(tickers or [])})
         response.raise_for_status()
         return deserialize_dashboard_payload(response.json())
 

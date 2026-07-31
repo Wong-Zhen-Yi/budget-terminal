@@ -1,12 +1,14 @@
 from __future__ import annotations
 import calendar as _calendar_mod
+import time
 from typing import Any
 from ..compat import *
 from budget_terminal_app.workers.calendar import (
     CalendarWorker,
+    EconomicCalendarWarmupWorker,
     MarketHolidayWarmupWorker,
+    _economic_events_cached_for_year,
     _get_economic_events,
-    _get_economic_events_for_year,
     _get_market_holiday_events,
     _market_holidays_cached_for_year,
 )
@@ -24,8 +26,200 @@ _P7_MONTHLY_COMPACT_WIDTH = 900
 _P7_MONTHLY_VERY_COMPACT_WIDTH = 760
 _P7_EARNINGS_WEEKDAY_LABELS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri')
 _P7_EARNINGS_VISIBLE_DAY_COUNT = len(_P7_EARNINGS_WEEKDAY_LABELS)
+_P7_ECONOMIC_RETRY_COOLDOWN_SECONDS = 5 * 60
 
 class CalendarPageMixin:
+    def _p7_page_is_visible(self) -> bool:
+        """Return whether the Calendar main page is currently visible."""
+        page = getattr(self, 'page7', None)
+        if page is None:
+            return not hasattr(self, 'stacked_widget')
+        if hasattr(self, '_is_current_page'):
+            try:
+                return bool(self._is_current_page(page))
+            except Exception:
+                pass
+        stack = getattr(self, 'stacked_widget', None)
+        return True if stack is None else stack.currentWidget() is page
+
+    def _p7_calendar_tab_is_active(self) -> bool:
+        """Return whether the monthly Calendar subtab is selected."""
+        tabs = getattr(self, 'p7_tabs', None)
+        calendar_tab = getattr(self, 'p7_calendar_tab', None)
+        return True if tabs is None or calendar_tab is None else tabs.currentWidget() is calendar_tab
+
+    def _p7_calendar_view_is_visible(self) -> bool:
+        """Return whether monthly Calendar widgets may be redrawn now."""
+        return self._p7_page_is_visible() and self._p7_calendar_tab_is_active()
+
+    def _p7_earnings_view_is_visible(self) -> bool:
+        """Return whether earnings results may be rendered now."""
+        return self._p7_page_is_visible() and self._p7_earnings_tab_is_active()
+
+    def _p7_apply_pending_earnings_update(self) -> bool:
+        """Apply the newest earnings completion deferred while its subtab was hidden."""
+        pending = getattr(self, '_p7_earnings_pending_update', None)
+        if not isinstance(pending, tuple) or len(pending) != 2 or not self._p7_earnings_view_is_visible():
+            return False
+        self._p7_earnings_pending_update = None
+        kind, value = pending
+        if kind == 'ready':
+            self._p7_on_earnings_ready(value)
+        else:
+            self._p7_on_earnings_error(value)
+        return True
+
+    def _p7_visible_economic_years(self) -> tuple[int, ...]:
+        """Return the years represented by the current month and look-ahead panels."""
+        year = int(getattr(self, '_p7_year', datetime.date.today().year))
+        month = int(getattr(self, '_p7_month', datetime.date.today().month))
+        years = {year}
+        for month_offset in range(3):
+            event_month = month + month_offset
+            event_year = year
+            if event_month > 12:
+                event_year += 1
+            years.add(event_year)
+        return tuple(sorted(years))
+
+    def _p7_queue_economic_years(self, years: Any, *, force_refresh: bool = False) -> bool:
+        """Queue missing or explicitly refreshed economic years for a background worker."""
+        cleaned = []
+        for value in list(years or []):
+            try:
+                year_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if year_value not in cleaned:
+                cleaned.append(year_value)
+        if not force_refresh:
+            attempted_at = getattr(self, '_p7_economic_attempted_at', {})
+            now = time.monotonic()
+            cleaned = [
+                year
+                for year in cleaned
+                if not _economic_events_cached_for_year(year)
+                and now - float(attempted_at.get(year, 0.0) or 0.0) >= _P7_ECONOMIC_RETRY_COOLDOWN_SECONDS
+            ]
+        if not cleaned:
+            return False
+
+        active = getattr(self, '_p7_economic_active_request', None)
+        if getattr(self, '_p7_economic_fetching', False) and isinstance(active, dict):
+            active_years = {int(year) for year in active.get('years', ())}
+            remaining = [year for year in cleaned if year not in active_years]
+            if not remaining:
+                if tuple(active.get('view', ())) == (int(self._p7_year), int(self._p7_month)):
+                    # The user returned to the view already being fetched.  Any
+                    # queued intermediate view is obsolete and must not prevent
+                    # the active completion from rendering the current month.
+                    self._p7_economic_pending_request = None
+                return False
+            # Retain only the newest changed view.  Years already covered by the
+            # active request will be in cache before this pending request starts.
+            self._p7_economic_pending_request = {
+                'years': tuple(sorted(int(year) for year in remaining)),
+                'force_refresh': bool(force_refresh),
+                'view': (int(self._p7_year), int(self._p7_month)),
+            }
+            return True
+
+        request = {
+            'years': tuple(sorted(cleaned)),
+            'force_refresh': bool(force_refresh),
+            'view': (int(self._p7_year), int(self._p7_month)),
+        }
+        return self._p7_start_economic_warmup(request)
+
+    def _p7_start_economic_warmup(self, request: Any = None) -> bool:
+        """Start the latest queued economic-calendar cache refresh."""
+        if getattr(self, '_p7_economic_fetching', False):
+            return False
+        if not isinstance(request, dict):
+            request = getattr(self, '_p7_economic_pending_request', None)
+            self._p7_economic_pending_request = None
+        if not isinstance(request, dict) or not request.get('years'):
+            return False
+        generation = int(getattr(self, '_p7_economic_generation', 0) or 0) + 1
+        self._p7_economic_generation = generation
+        active = dict(request)
+        active['generation'] = generation
+        self._p7_economic_active_request = active
+        attempted_at = getattr(self, '_p7_economic_attempted_at', None)
+        if not isinstance(attempted_at, dict):
+            attempted_at = {}
+            self._p7_economic_attempted_at = attempted_at
+        attempted_at.update({int(year): time.monotonic() for year in active['years']})
+        worker = EconomicCalendarWarmupWorker(
+            active['years'],
+            generation=generation,
+            force_refresh=bool(active.get('force_refresh', False)),
+        )
+        launched = self._launch_worker(worker, self._p7_on_economic_events_ready, '_p7_economic_fetching')
+        if not launched:
+            self._p7_economic_active_request = None
+        return bool(launched)
+
+    def _p7_on_economic_events_ready(self, generation: int, _results: Any) -> None:
+        """Consume a completed cache refresh without redrawing a hidden Calendar."""
+        active = getattr(self, '_p7_economic_active_request', None)
+        self._p7_economic_fetching = False
+        self._p7_economic_active_request = None
+        pending = getattr(self, '_p7_economic_pending_request', None)
+        is_current = (
+            isinstance(active, dict)
+            and int(active.get('generation', -1)) == int(generation)
+            and tuple(active.get('view', ())) == (int(self._p7_year), int(self._p7_month))
+            and not isinstance(pending, dict)
+        )
+        if is_current:
+            if self._p7_calendar_view_is_visible() and hasattr(self, 'p7_month_label'):
+                self._p7_render_month()
+            else:
+                self._p7_render_pending = True
+        self._p7_start_economic_warmup()
+
+    def _p7_queue_company_events(self) -> bool:
+        """Start one company-event request, retaining only the latest changed ticker set."""
+        signature = tuple(
+            str(ticker or '').upper().strip()
+            for ticker in list(getattr(self, 'tickers', []) or [])
+            if str(ticker or '').strip()
+        )
+        active = getattr(self, '_p7_event_active_request', None)
+        if getattr(self, '_p7_fetching', False):
+            if isinstance(active, dict) and tuple(active.get('signature', ())) == signature:
+                return False
+            self._p7_event_pending_signature = signature
+            return True
+        generation = int(getattr(self, '_p7_event_generation', 0) or 0) + 1
+        self._p7_event_generation = generation
+        request = {'generation': generation, 'signature': signature}
+        self._p7_event_active_request = request
+        launched = self._launch_worker(
+            CalendarWorker(signature, generation=generation, signature=signature),
+            self._p7_on_events_ready,
+            '_p7_fetching',
+        )
+        if not launched:
+            self._p7_event_active_request = None
+        return bool(launched)
+
+    def _p7_start_pending_company_events(self) -> None:
+        """Start the newest changed-ticker Calendar request after the active one finishes."""
+        signature = getattr(self, '_p7_event_pending_signature', None)
+        self._p7_event_pending_signature = None
+        if signature is None:
+            return
+        current_signature = tuple(
+            str(ticker or '').upper().strip()
+            for ticker in list(getattr(self, 'tickers', []) or [])
+            if str(ticker or '').strip()
+        )
+        if tuple(signature) != current_signature:
+            signature = current_signature
+        self._p7_queue_company_events()
+
     def _p7_calendar_display_flags(self) -> Any:
         """Return the current calendar/export category visibility toggles."""
         show_econ = self.p7_export_economic_cb.isChecked() if hasattr(self, 'p7_export_economic_cb') else True
@@ -131,6 +325,11 @@ class CalendarPageMixin:
             return
         if (not force_refresh) and _market_holidays_cached_for_year(year_value):
             return
+        if (
+            getattr(self, '_p7_market_holiday_fetching', False)
+            and year_value in set(getattr(self, '_p7_market_holiday_active_years', ()))
+        ):
+            return
         pending_years = list(getattr(self, '_p7_market_holiday_pending_years', []))
         if year_value not in pending_years:
             pending_years.append(year_value)
@@ -148,6 +347,7 @@ class CalendarPageMixin:
         self._p7_market_holiday_pending_years = []
         force_refresh = bool(getattr(self, '_p7_market_holiday_force_refresh', False))
         self._p7_market_holiday_force_refresh = False
+        self._p7_market_holiday_active_years = tuple(years)
         self._launch_worker(
             MarketHolidayWarmupWorker(years, force_refresh=force_refresh),
             self._p7_on_market_holidays_ready,
@@ -155,10 +355,13 @@ class CalendarPageMixin:
         )
 
     def _p7_on_market_holidays_ready(self, _results: Any) -> None:
-        """Re-render the calendar once background market-holiday data is ready."""
+        """Cache market holidays and redraw only while the monthly Calendar is visible."""
         self._p7_market_holiday_fetching = False
-        if hasattr(self, 'p7_month_label'):
+        self._p7_market_holiday_active_years = ()
+        if self._p7_calendar_view_is_visible() and hasattr(self, 'p7_month_label'):
             self._p7_render_month()
+        else:
+            self._p7_render_pending = True
         self._p7_start_market_holiday_warmup()
 
     def _p7_compact_detail_tables(self, *tables: Any, max_rows: int = 4) -> None:
@@ -477,8 +680,19 @@ class CalendarPageMixin:
         self._p7_apply_detail_table_widths()
 
     def _p7_on_show(self) -> None:
-        """Refresh monthly Calendar layout when page 7 becomes visible."""
+        """Apply one pending Calendar update after the page becomes visible."""
+        if not self._p7_calendar_tab_is_active():
+            self._p7_apply_monthly_responsive_layout()
+            self._p7_apply_pending_earnings_update()
+            return
+        pending_render = bool(getattr(self, '_p7_render_pending', False))
+        self._p7_render_pending = False
+        applied_dashboard_update = False
+        if hasattr(self, '_dashboard_apply_pending_page_data'):
+            applied_dashboard_update = bool(self._dashboard_apply_pending_page_data('calendar'))
         self._p7_apply_monthly_responsive_layout()
+        if pending_render and not applied_dashboard_update and self._p7_calendar_tab_is_active():
+            self._p7_render_month()
 
     def init_page7(self) -> None:
         """Build the Calendar page UI."""
@@ -738,10 +952,20 @@ class CalendarPageMixin:
         self._p7_month = today.month
         self._p7_events = {}
         self._p7_fetching = False
-        self._p7_force_economic_refresh = False
+        self._p7_event_generation = 0
+        self._p7_event_active_request = None
+        self._p7_event_pending_signature = None
+        self._p7_event_cache: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+        self._p7_economic_fetching = False
+        self._p7_economic_generation = 0
+        self._p7_economic_active_request = None
+        self._p7_economic_pending_request = None
+        self._p7_economic_attempted_at: dict[int, float] = {}
+        self._p7_render_pending = False
         self._p7_market_holiday_fetching = False
         self._p7_market_holiday_force_refresh = False
         self._p7_market_holiday_pending_years = []
+        self._p7_market_holiday_active_years = ()
         self._p7_earnings_rows: list[dict[str, Any]] = []
         self._p7_earnings_fetching = False
         self._p7_earnings_loaded = False
@@ -749,6 +973,7 @@ class CalendarPageMixin:
         self._p7_earnings_source = EARNINGS_CALENDAR_SOURCE_NAME
         self._p7_earnings_fetched_at = ''
         self._p7_earnings_request: dict[str, Any] = {}
+        self._p7_earnings_pending_update: tuple[str, Any] | None = None
         self._p7_earnings_panel_widgets: list[Any] = []
         self._p7_earnings_week_start = self._p7_start_of_week(today)
         self._p7_build_earnings_tab()
@@ -941,8 +1166,17 @@ class CalendarPageMixin:
         current_widget = self.p7_tabs.widget(int(index))
         if current_widget is getattr(self, 'p7_calendar_tab', None):
             self._p7_apply_monthly_responsive_layout()
+            pending_render = bool(getattr(self, '_p7_render_pending', False))
+            self._p7_render_pending = False
+            applied_dashboard_update = False
+            if hasattr(self, '_dashboard_apply_pending_page_data'):
+                applied_dashboard_update = bool(self._dashboard_apply_pending_page_data('calendar'))
+            if pending_render and not applied_dashboard_update:
+                self._p7_render_month()
             return
         if current_widget is not getattr(self, 'p7_earnings_tab', None):
+            return
+        if self._p7_apply_pending_earnings_update():
             return
         if not getattr(self, '_p7_earnings_loaded', False) and not getattr(self, '_p7_earnings_fetching', False):
             if not self._p7_restore_cached_earnings():
@@ -1027,10 +1261,13 @@ class CalendarPageMixin:
         return bool(launched)
 
     def _p7_on_earnings_ready(self, payload: Any) -> None:
-        """Render all-market earnings rows returned by the worker."""
+        """Cache an earnings completion and render it only on the visible subtab."""
         self._p7_earnings_fetching = False
         self._p7_earnings_worker = None
         self._p7_update_earnings_refresh_button_state()
+        if not self._p7_earnings_view_is_visible():
+            self._p7_earnings_pending_update = ('ready', payload)
+            return
         self._p7_apply_earnings_payload(payload, restored=False)
         row_count = len(getattr(self, '_p7_earnings_rows', []) or [])
         if hasattr(self, 'status_bar'):
@@ -1046,6 +1283,9 @@ class CalendarPageMixin:
         self._p7_earnings_worker = None
         self._p7_update_earnings_refresh_button_state()
         text = str(message or 'Earnings calendar unavailable').strip()
+        if not self._p7_earnings_view_is_visible():
+            self._p7_earnings_pending_update = ('error', text)
+            return
         request = getattr(self, '_p7_earnings_request', {}) if isinstance(getattr(self, '_p7_earnings_request', {}), dict) else {}
         start_date = request.get('start_date')
         end_date = request.get('end_date')
@@ -1527,17 +1767,51 @@ class CalendarPageMixin:
         self._p7_save_session_snapshot()
 
     def _p7_fetch_events(self) -> None:
-        """Handle p7 fetch events."""
-        self._p7_force_economic_refresh = True
+        """Refresh Calendar sources without performing network work on the UI thread."""
+        self._p7_queue_economic_years(self._p7_visible_economic_years(), force_refresh=True)
         self._p7_queue_market_holiday_year(self._p7_year, force_refresh=True)
-        self._launch_worker(CalendarWorker(self.tickers[:]), self._p7_on_events_ready, '_p7_fetching')
+        self._p7_queue_company_events()
+        if self._p7_calendar_view_is_visible():
+            self._p7_render_month()
+        else:
+            self._p7_render_pending = True
 
-    def _p7_on_events_ready(self, results: Any) -> None:
-        """Handle p7 on events ready."""
+    def _p7_on_events_ready(self, generation: Any, signature: Any = None, results: Any = None) -> None:
+        """Cache company events and redraw only for the current visible request."""
+        if results is None:
+            results = generation
+            generation = int(getattr(self, '_p7_event_generation', 0) or 0)
+            signature = tuple(getattr(self, 'tickers', []) or [])
         self._p7_fetching = False
-        self._p7_events = self._p7_normalize_event_payload(results)
-        self._p7_render_month()
-        self._p7_save_session_snapshot()
+        active = getattr(self, '_p7_event_active_request', None)
+        self._p7_event_active_request = None
+        normalized_signature = tuple(str(ticker or '').upper().strip() for ticker in tuple(signature or ()))
+        normalized_results = self._p7_normalize_event_payload(results)
+        event_cache = getattr(self, '_p7_event_cache', None)
+        if not isinstance(event_cache, dict):
+            event_cache = {}
+            self._p7_event_cache = event_cache
+        event_cache[normalized_signature] = normalized_results
+        current_signature = tuple(
+            str(ticker or '').upper().strip()
+            for ticker in list(getattr(self, 'tickers', []) or [])
+            if str(ticker or '').strip()
+        )
+        pending_signature = getattr(self, '_p7_event_pending_signature', None)
+        is_current = (
+            isinstance(active, dict)
+            and int(active.get('generation', -1)) == int(generation)
+            and normalized_signature == current_signature
+            and pending_signature is None
+        )
+        if is_current:
+            self._p7_events = normalized_results
+            self._p7_save_session_snapshot()
+            if self._p7_calendar_view_is_visible():
+                self._p7_render_month()
+            else:
+                self._p7_render_pending = True
+        self._p7_start_pending_company_events()
 
     def _p7_render_month(self) -> None:
         """Handle p7 render month."""
@@ -1545,18 +1819,9 @@ class CalendarPageMixin:
         today = self._p7_get_reference_today()
         year, month = (self._p7_year, self._p7_month)
         show_econ, show_company, show_options, show_market_holidays = self._p7_calendar_display_flags()
-        economic_years = {year}
-        for m_offset in range(3):
-            em = month + m_offset
-            ey = year
-            if em > 12:
-                em -= 12
-                ey += 1
-            economic_years.add(ey)
-        if show_econ and getattr(self, '_p7_force_economic_refresh', False):
-            for econ_year in sorted(economic_years):
-                _get_economic_events_for_year(econ_year, force_refresh=True)
-            self._p7_force_economic_refresh = False
+        economic_years = self._p7_visible_economic_years()
+        if show_econ:
+            self._p7_queue_economic_years(economic_years)
         self.p7_month_label.setText(f'{calendar.month_name[month]} {year}')
         self._p7_monthly_rendered = True
         self._p7_apply_monthly_grid_shell_style()
@@ -1566,7 +1831,7 @@ class CalendarPageMixin:
         event_font_size = 10 if very_compact else 11 if compact else 15
         event_limit = 2 if very_compact else 3 if compact else 5
         _ECON_COLORS = {'FOMC Decision': '#e040fb', 'PCE Inflation': '#7c4dff', 'GDP Report': '#69f0ae'}
-        econ_events = _get_economic_events(year, month) if show_econ else []
+        econ_events = _get_economic_events(year, month, allow_network=False) if show_econ else []
         if show_market_holidays:
             self._p7_queue_market_holiday_year(year)
         market_holiday_events = _get_market_holiday_events(year, month, blocking=False) if show_market_holidays else []
@@ -1656,7 +1921,7 @@ class CalendarPageMixin:
             if em > 12:
                 em -= 12
                 ey += 1
-            for d, name, imp in _get_economic_events(ey, em):
+            for d, name, imp in _get_economic_events(ey, em, allow_network=False):
                 if d >= today:
                     days_away = (d - today).days
                     economic_events.append((d, 'ECON', name, f'in {days_away}d', _ECON_COLORS.get(name, '#aaa')))
@@ -1693,7 +1958,7 @@ class CalendarPageMixin:
         # --- Collect economic events ---
         econ_events = []
         if inc_econ:
-            for d, name, imp in _get_economic_events(year, month):
+            for d, name, imp in _get_economic_events(year, month, allow_network=False):
                 econ_events.append((d, name, imp))
             econ_events.sort(key=lambda x: x[0])
 

@@ -622,14 +622,51 @@ def _get_economic_events_for_year(year: Any, *, force_refresh: bool = False) -> 
         _ECONOMIC_EVENTS_MEMORY_CACHE[year_value] = (now_ts, [])
     return []
 
+
+def _get_cached_economic_events_for_year(year: Any) -> list[tuple[datetime.date, str, str]]:
+    """Return cached events without ever contacting an external source."""
+    year_value = int(year)
+    with _ECONOMIC_EVENTS_CACHE_LOCK:
+        cached = _ECONOMIC_EVENTS_MEMORY_CACHE.get(year_value)
+    if cached is not None:
+        return _filter_disabled_economic_events(list(cached[1]))
+    disk_cache = _load_economic_events_cache(year_value)
+    if disk_cache is None:
+        return []
+    events, fetched_at = disk_cache
+    normalized = _filter_disabled_economic_events(list(events))
+    with _ECONOMIC_EVENTS_CACHE_LOCK:
+        _ECONOMIC_EVENTS_MEMORY_CACHE[year_value] = (float(fetched_at), list(normalized))
+    return normalized
+
+
+def _economic_events_cached_for_year(year: Any, *, fresh_only: bool = True) -> bool:
+    """Return whether a usable economic-event cache exists for one year."""
+    year_value = int(year)
+    now_ts = _now_timestamp()
+    with _ECONOMIC_EVENTS_CACHE_LOCK:
+        cached = _ECONOMIC_EVENTS_MEMORY_CACHE.get(year_value)
+    if cached is not None:
+        return (not fresh_only) or (now_ts - float(cached[0])) < _ECONOMIC_EVENTS_CACHE_TTL_SECONDS
+    disk_cache = _load_economic_events_cache(year_value)
+    if disk_cache is None:
+        return False
+    events, fetched_at = disk_cache
+    normalized = _filter_disabled_economic_events(list(events))
+    with _ECONOMIC_EVENTS_CACHE_LOCK:
+        _ECONOMIC_EVENTS_MEMORY_CACHE[year_value] = (float(fetched_at), list(normalized))
+    return (not fresh_only) or (now_ts - float(fetched_at)) < _ECONOMIC_EVENTS_CACHE_TTL_SECONDS
+
 class CalendarWorker(QObject):
     """Fetches earnings dates, ex-dividend dates, and analyst ratings for portfolio tickers."""
-    finished = pyqtSignal(dict)
+    finished = pyqtSignal(int, object, dict)
 
-    def __init__(self, tickers: Any) -> None:
+    def __init__(self, tickers: Any, *, generation: int = 0, signature: Any = None) -> None:
         """Initialize the object."""
         super().__init__()
-        self.tickers = tickers
+        self.tickers = list(tickers or [])
+        self.generation = int(generation)
+        self.signature = tuple(signature if signature is not None else self.tickers)
 
     def run(self) -> Any:
         """Handle run."""
@@ -664,14 +701,15 @@ class CalendarWorker(QObject):
                 except Exception as ex:
                     logger.warning(f'Calendar analyst error {t}: {ex}')
                 return (t, info)
-            with ThreadPoolExecutor(max_workers=30) as executor:
+            max_workers = min(8, max(1, len(self.tickers)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 res_list = list(executor.map(fetch_calendar, self.tickers))
             for t, info in res_list:
                 results[t] = info
-            self.finished.emit(results)
+            self.finished.emit(self.generation, self.signature, results)
         except Exception as ex:
             logger.error(f'CalendarWorker error: {ex}')
-            self.finished.emit({})
+            self.finished.emit(self.generation, self.signature, {})
 
 class MarketHolidayWarmupWorker(QObject):
     """Warm one or more cached market-holiday years without blocking the UI thread."""
@@ -695,14 +733,59 @@ class MarketHolidayWarmupWorker(QObject):
         """Warm cache entries for the requested market-holiday years."""
         results = {}
         for year in self.years:
-            results[year] = _get_market_holiday_events_for_year(year, force_refresh=self.force_refresh, blocking=True)
+            try:
+                results[year] = _get_market_holiday_events_for_year(
+                    year,
+                    force_refresh=self.force_refresh,
+                    blocking=True,
+                )
+            except Exception as ex:
+                logger.warning('Market-holiday warmup failed for %s: %s', year, ex)
+                results[year] = []
         self.finished.emit(results)
 
-def _get_economic_events(year: Any, month: Any) -> Any:
+
+class EconomicCalendarWarmupWorker(QObject):
+    """Refresh official economic-calendar cache entries outside the UI thread."""
+
+    finished = pyqtSignal(int, dict)
+
+    def __init__(self, years: Any, *, generation: int, force_refresh: bool = False) -> None:
+        super().__init__()
+        cleaned = []
+        for value in list(years or []):
+            try:
+                year_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if year_value not in cleaned:
+                cleaned.append(year_value)
+        self.years = cleaned
+        self.generation = int(generation)
+        self.force_refresh = bool(force_refresh)
+
+    def run(self) -> Any:
+        """Refresh the requested years and emit their cached result payloads."""
+        results = {}
+        for year in self.years:
+            try:
+                results[year] = _get_economic_events_for_year(year, force_refresh=self.force_refresh)
+            except Exception as ex:
+                logger.warning('Economic-calendar warmup failed for %s: %s', year, ex)
+                results[year] = _get_cached_economic_events_for_year(year)
+        self.finished.emit(self.generation, results)
+
+
+def _get_economic_events(year: Any, month: Any, *, allow_network: bool = True) -> Any:
     """Return one month's official economic events as (date, name, importance) tuples."""
+    year_events = (
+        _get_economic_events_for_year(year)
+        if allow_network
+        else _get_cached_economic_events_for_year(year)
+    )
     return [
         item
-        for item in _get_economic_events_for_year(year)
+        for item in year_events
         if item[0].year == int(year) and item[0].month == int(month)
     ]
 

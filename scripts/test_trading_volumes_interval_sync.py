@@ -47,7 +47,7 @@ def _build_probe() -> tuple[QApplication, _TradingVolumesProbe]:
     probe._p20_trading_volume_as_of = '2026-06-19 09:00'
     probe.status_messages = []
     probe.p20_status_lbl = QLabel()
-    probe.p20_trading_volume_table = QTableWidget(0, 9)
+    probe.p20_trading_volume_table = QTableWidget(0, 10)
     probe._p20_trading_volume_all_rows = [
         {
             'ticker': 'AAA',
@@ -58,6 +58,7 @@ def _build_probe() -> tuple[QApplication, _TradingVolumesProbe]:
             'thirty_day_avg_dollar_volume': 400,
             'ytd_avg_dollar_volume': None,
             'one_year_avg_dollar_volume': 200,
+            'three_year_avg_dollar_volume': 600,
         },
         {
             'ticker': 'BBB',
@@ -68,6 +69,7 @@ def _build_probe() -> tuple[QApplication, _TradingVolumesProbe]:
             'thirty_day_avg_dollar_volume': 300,
             'ytd_avg_dollar_volume': 100,
             'one_year_avg_dollar_volume': None,
+            'three_year_avg_dollar_volume': 200,
         },
         {
             'ticker': 'CCC',
@@ -78,6 +80,7 @@ def _build_probe() -> tuple[QApplication, _TradingVolumesProbe]:
             'thirty_day_avg_dollar_volume': 500,
             'ytd_avg_dollar_volume': 300,
             'one_year_avg_dollar_volume': 100,
+            'three_year_avg_dollar_volume': None,
         },
         {
             'ticker': 'DDD',
@@ -88,6 +91,7 @@ def _build_probe() -> tuple[QApplication, _TradingVolumesProbe]:
             'thirty_day_avg_dollar_volume': None,
             'ytd_avg_dollar_volume': 200,
             'one_year_avg_dollar_volume': 400,
+            'three_year_avg_dollar_volume': 500,
         },
     ]
     return app, probe
@@ -125,6 +129,7 @@ def test_interval_selector_reranks_table_filters_and_dot_plot() -> None:
         '30d': ['CCC', 'AAA', 'BBB', 'DDD'],
         'ytd': ['CCC', 'DDD', 'BBB', 'AAA'],
         '1y': ['DDD', 'AAA', 'CCC', 'BBB'],
+        '3y': ['AAA', 'DDD', 'BBB', 'CCC'],
     }
 
     try:
@@ -170,6 +175,7 @@ def test_llm_export_contains_all_unfiltered_interval_rankings() -> None:
         '30D': ['CCC', 'AAA', 'BBB', 'DDD'],
         'YTD': ['CCC', 'DDD', 'BBB', 'AAA'],
         '1Y': ['DDD', 'AAA', 'CCC', 'BBB'],
+        '3Y': ['AAA', 'DDD', 'BBB', 'CCC'],
     }
 
     try:
@@ -193,11 +199,11 @@ def test_llm_export_contains_all_unfiltered_interval_rankings() -> None:
         _assert('- Stocks exported per interval: 4' in export_text, 'export should include every loaded stock per interval')
         _assert('| 4 | DDD | Delta | N/A | $4,000 | N/A |' in export_text, 'missing 5D values should rank last as N/A')
         _assert(
-            any('4 stocks across 5 trading-volume intervals' in message for message in probe.status_messages),
+            any('4 stocks across 6 trading-volume intervals' in message for message in probe.status_messages),
             'success status should summarize stocks and intervals',
         )
 
-        probe._p20_dot_metric = '1y'
+        probe._p20_dot_metric = '3y'
         probe._p20_export_trading_volume_for_llm()
         _assert(
             _export_without_timestamp(QApplication.clipboard().text()) == _export_without_timestamp(export_text),

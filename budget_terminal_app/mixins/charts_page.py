@@ -5,6 +5,7 @@ from typing import Any
 from ..compat import (
     QAction,
     CandlestickItem,
+    CompareIntervalLabelsItem,
     DateAxisItem,
     PercentAxisItem,
     QButtonGroup,
@@ -58,6 +59,7 @@ from budget_terminal_app.services.technical_analysis import (
     calculate_rsi_average,
 )
 from budget_terminal_app.widgets.chart_workspace import NativeChartDrawingController
+from budget_terminal_app.widgets.chart_pattern_cheat_sheet import ChartPatternCheatSheet
 
 
 P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS = [
@@ -154,7 +156,7 @@ P10_PLAYBACK_SPEEDS = {
     '10x': (50, 10),
 }
 P10_COMPARE_MAX_WORKERS = 4
-P10_MULTI_INTERVAL_MAX_WORKERS = 4
+P10_MULTI_INTERVAL_MAX_WORKERS = 2
 P10_MULTI_INTERVAL_RSI_OVERBOUGHT = 70.0
 P10_MULTI_INTERVAL_RSI_OVERSOLD = 30.0
 P10_MULTI_INTERVAL_MFI_OVERBOUGHT = 80.0
@@ -246,6 +248,7 @@ class ChartsPageMixin:
         self.p10_drawings_by_context = dict(state.get('drawings_by_context', {}) or {})
         self.p10_compare_interval_label = str(state.get('compare_interval_label', '1 Day') or '1 Day')
         self.p10_compare_range_label = str(state.get('compare_range_label', '5Y') or '5Y')
+        self.p10_compare_interval_labels_enabled = bool(state.get('compare_interval_labels_enabled', True))
         self.p10_custom_watchlist = list(state.get('watchlist', []))
         self.p10_compare_symbols = list(state.get('compare_symbols', []))
         self.p10_compare_presets = list(state.get('compare_presets', []))
@@ -325,12 +328,17 @@ class ChartsPageMixin:
         self._p10_compare_series_cache = {}
         self._p10_compare_plot_items = {}
         self._p10_compare_label_items = {}
+        self._p10_compare_interval_label_items = {}
         self._p10_compare_zero_line = None
         self._p10_compare_render_signature = None
         self._p10_compare_executor = ThreadPoolExecutor(max_workers=P10_COMPARE_MAX_WORKERS)
         self._p10_multi_interval_executor = ThreadPoolExecutor(max_workers=P10_MULTI_INTERVAL_MAX_WORKERS)
         self._p10_multi_interval_request_token = 0
+        self._p10_multi_interval_finalized_request_token = None
         self._p10_multi_interval_cache = {}
+        self._p10_multi_interval_pending_labels = set()
+        self._p10_multi_interval_failed_labels = {}
+        self._p10_multi_interval_refresh_contexts = {}
         self._p10_playback_timer = QTimer(self)
         self._p10_playback_timer.timeout.connect(self._p10_step_playback)
         self._p10_poll_timer = QTimer(self)
@@ -395,9 +403,14 @@ class ChartsPageMixin:
         self.p10_chart_tab = QWidget()
         self.p10_multi_tab = QWidget()
         self.p10_compare_tab = QWidget()
+        self.p10_cheat_sheet = ChartPatternCheatSheet(self.theme_color, self.p10_tabs)
+        self.p10_cheat_tab = self.p10_cheat_sheet
+        self.p10_cheat_status_label = self.p10_cheat_sheet.status_label
+        self.p10_cheat_sheet.status_changed.connect(self._p10_set_cheat_sheet_status)
         self.p10_tabs.addTab(self.p10_chart_tab, 'Main')
         self.p10_tabs.addTab(self.p10_multi_tab, 'Multi Charts')
         self.p10_tabs.addTab(self.p10_compare_tab, 'Compare')
+        self.p10_tabs.addTab(self.p10_cheat_tab, 'Cheat Sheet')
         self.p10_tabs.currentChanged.connect(self._p10_on_subtab_changed)
         layout.addWidget(self.p10_tabs, 1)
         self._p10_build_chart_tab()
@@ -906,6 +919,13 @@ class ChartsPageMixin:
             self._p10_compare_timeframe_group.addButton(btn)
             self._p10_compare_timeframe_buttons[label] = btn
             toolbar.addWidget(btn)
+        self.p10_compare_interval_labels_btn = QPushButton('Interval %')
+        self.p10_compare_interval_labels_btn.setCheckable(True)
+        self.p10_compare_interval_labels_btn.setMinimumHeight(26)
+        self.p10_compare_interval_labels_btn.setToolTip('Show each ticker\'s close-to-close change at every interval point.')
+        self.p10_compare_interval_labels_btn.clicked.connect(self._p10_toggle_compare_interval_labels)
+        toolbar.addWidget(self.p10_compare_interval_labels_btn)
+        self._p10_update_compare_interval_labels_button_style()
         toolbar.addSpacing(10)
         range_label = QLabel('Range')
         self.set_theme_role(range_label, 'muted')
@@ -1009,10 +1029,39 @@ class ChartsPageMixin:
         if self._p10_active_subtab_key() == 'compare' and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
+    def _p10_update_compare_interval_labels_button_style(self) -> None:
+        """Keep the Compare interval-label toggle state and theme in sync."""
+        button = getattr(self, 'p10_compare_interval_labels_btn', None)
+        if button is None:
+            return
+        enabled = bool(getattr(self, 'p10_compare_interval_labels_enabled', True))
+        button.blockSignals(True)
+        button.setChecked(enabled)
+        button.blockSignals(False)
+        self.set_theme_variant(button, 'accent' if enabled else None)
+        button.setProperty('bt_checked', 'true' if enabled else 'false')
+        self._repolish_widget(button)
+
+    def _p10_toggle_compare_interval_labels(self, checked: Any=False) -> None:
+        """Show or hide per-interval Compare labels without refetching data."""
+        self.p10_compare_interval_labels_enabled = bool(checked)
+        self._p10_update_compare_interval_labels_button_style()
+        self._p10_save_state()
+        if isinstance(self.p10_compare_df, pd.DataFrame) and not self.p10_compare_df.empty:
+            self._p10_render_compare_chart(self.p10_compare_df, self.p10_compare_interval, force=True)
+            return
+        self._p10_clear_compare_interval_label_items()
+
     def _p10_set_multi_interval_status(self, text: Any, status: Any='muted') -> None:
         """Set multi-interval subtab status text."""
         self.set_status_text(self.p10_multi_interval_status_label, text, status=str(status))
         if self._p10_active_subtab_key() == 'multiintervals' and hasattr(self, 'status_bar'):
+            self.set_status_text(self.status_bar, text, status=str(status))
+
+    def _p10_set_cheat_sheet_status(self, text: Any, status: Any='muted') -> None:
+        """Set the offline Cheat Sheet status text without refreshing market data."""
+        self.set_status_text(self.p10_cheat_status_label, text, status=str(status))
+        if self._p10_active_subtab_key() == 'cheatsheet' and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
     def _p10_sync_active_status_to_status_bar(self) -> None:
@@ -1026,6 +1075,8 @@ class ChartsPageMixin:
             source = self.p10_multi_interval_status_label
         elif active_key == 'multicharts' and hasattr(self, '_mc_status'):
             source = self._mc_status
+        elif active_key == 'cheatsheet':
+            source = self.p10_cheat_status_label
         else:
             source = self.p10_status_label
         self.set_status_text(
@@ -1045,6 +1096,8 @@ class ChartsPageMixin:
             return 'multiintervals'
         if current is getattr(self, 'p10_multi_tab', None):
             return 'multicharts'
+        if current is getattr(self, 'p10_cheat_tab', None):
+            return 'cheatsheet'
         return 'chart'
 
     def _p10_on_subtab_changed(self, _: int) -> None:
@@ -1066,6 +1119,7 @@ class ChartsPageMixin:
             'drawings_by_context': self.p10_drawings_by_context,
             'compare_interval_label': self.p10_compare_interval_label,
             'compare_range_label': self.p10_compare_range_label,
+            'compare_interval_labels_enabled': self.p10_compare_interval_labels_enabled,
             'watchlist': self.p10_custom_watchlist,
             'compare_symbols': self.p10_compare_symbols,
             'compare_presets': self.p10_compare_presets,
@@ -1444,6 +1498,10 @@ class ChartsPageMixin:
         if active_key == 'multicharts':
             self._mc_on_show()
             return
+        if active_key == 'cheatsheet':
+            self.p10_cheat_sheet.refresh_layout()
+            self._p10_set_cheat_sheet_status(self.p10_cheat_sheet.status_text)
+            return
         if force or self._p10_chart_dirty or self.p10_chart_df is None:
             self._p10_chart_dirty = False
             self._p10_refresh_chart()
@@ -1740,7 +1798,11 @@ class ChartsPageMixin:
     def _p10_build_compare_render_signature(self, frame: Any, interval: Any) -> Any:
         """Build a lightweight signature so no-op compare rerenders can be skipped."""
         if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return ('empty', str(interval or ''))
+            return (
+                'empty',
+                str(interval or ''),
+                bool(getattr(self, 'p10_compare_interval_labels_enabled', True)),
+            )
         numeric_frame = frame.apply(pd.to_numeric, errors='coerce')
         last_values = []
         valid_counts = []
@@ -1758,7 +1820,71 @@ class ChartsPageMixin:
             last_stamp,
             tuple(valid_counts),
             tuple(last_values),
+            bool(getattr(self, 'p10_compare_interval_labels_enabled', True)),
         )
+
+    def _p10_calculate_compare_interval_changes(self, series: Any) -> pd.Series:
+        """Derive close-to-close returns from one cumulative Compare series."""
+        changes = {}
+        previous_cumulative = None
+        source = pd.Series(series).copy()
+        for timestamp, raw_value in source.items():
+            try:
+                cumulative_value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(cumulative_value):
+                continue
+            if previous_cumulative is not None:
+                previous_base = 100.0 + previous_cumulative
+                current_base = 100.0 + cumulative_value
+                if math.isfinite(previous_base) and math.isfinite(current_base) and previous_base != 0.0:
+                    interval_change = ((current_base / previous_base) - 1.0) * 100.0
+                    if math.isfinite(interval_change):
+                        changes[timestamp] = interval_change
+            previous_cumulative = cumulative_value
+        return pd.Series(changes, dtype=float)
+
+    def _p10_build_compare_interval_label_points(self, series: Any, ordered_index: Any) -> list[tuple[float, float, str, bool]]:
+        """Build fixed-size label payloads positioned on cumulative Compare points."""
+        numeric_series = pd.to_numeric(pd.Series(series), errors='coerce')
+        interval_changes = self._p10_calculate_compare_interval_changes(numeric_series)
+        positions = {timestamp: index for index, timestamp in enumerate(ordered_index)}
+        points = []
+        for timestamp, interval_change in interval_changes.items():
+            if timestamp not in positions:
+                continue
+            try:
+                cumulative_value = float(numeric_series.loc[timestamp])
+                change_value = float(interval_change)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(cumulative_value) or not math.isfinite(change_value):
+                continue
+            sign = '+' if change_value > 0 else ''
+            points.append((
+                float(positions[timestamp]),
+                cumulative_value,
+                f'{sign}{change_value:.1f}%',
+                change_value >= 0.0,
+            ))
+        return points
+
+    def _p10_remove_compare_interval_label_symbol(self, symbol: Any) -> None:
+        """Remove one ticker's batched interval-label overlay."""
+        symbol_text = str(symbol or '').upper().strip()
+        item = self._p10_compare_interval_label_items.pop(symbol_text, None)
+        if item is not None and hasattr(self, 'p10_compare_plot'):
+            try:
+                self.p10_compare_plot.removeItem(item)
+            except Exception:
+                pass
+
+    def _p10_clear_compare_interval_label_items(self) -> None:
+        """Remove every per-interval label overlay while preserving Compare lines."""
+        for symbol in list(self._p10_compare_interval_label_items):
+            self._p10_remove_compare_interval_label_symbol(symbol)
+        self._p10_compare_interval_label_items = {}
 
     def _p10_remove_compare_plot_symbol(self, symbol: Any) -> None:
         """Remove one compare line and its label from the plot."""
@@ -1775,6 +1901,7 @@ class ChartsPageMixin:
                 self.p10_compare_plot.removeItem(label_item)
             except Exception:
                 pass
+        self._p10_remove_compare_interval_label_symbol(symbol_text)
 
     def _p10_clear_compare_plot_items(self) -> None:
         """Remove all dynamic compare lines and labels while preserving the zero line."""
@@ -1782,6 +1909,7 @@ class ChartsPageMixin:
             self._p10_remove_compare_plot_symbol(symbol)
         self._p10_compare_plot_items = {}
         self._p10_compare_label_items = {}
+        self._p10_clear_compare_interval_label_items()
         self._p10_compare_render_signature = None
         if self._p10_compare_zero_line is not None:
             self._p10_compare_zero_line.hide()
@@ -2778,6 +2906,7 @@ class ChartsPageMixin:
         self.update_checked_button_state(self._p10_compare_timeframe_buttons, self.p10_compare_interval_label)
         for label, btn in self._p10_compare_timeframe_buttons.items():
             btn.setChecked(label == self.p10_compare_interval_label)
+        self._p10_update_compare_interval_labels_button_style()
         combo = getattr(self, 'p10_compare_range_combo', None)
         if combo is not None:
             index = combo.findText(self.p10_compare_range_label)
@@ -3250,24 +3379,58 @@ class ChartsPageMixin:
         self.p10_multi_interval_empty_label.hide()
 
     def _p10_refresh_multi_interval_views(self, *, force: bool=False) -> None:
-        """Refresh the selected timeframe indicators for the active symbol."""
+        """Coordinate one multi-interval batch and retain only the newest inputs."""
         if not hasattr(self, 'p10_multi_interval_panel_layout'):
             return
         self.p10_multi_interval_labels = self._p10_normalize_multi_interval_labels(self.p10_multi_interval_labels)
         self._p10_update_multi_interval_button_styles()
         labels = list(self.p10_multi_interval_labels)
-        self._p10_multi_interval_request_token += 1
-        request_token = self._p10_multi_interval_request_token
         symbol_input = getattr(self, 'p10_multi_interval_symbol_input', None)
         input_text = symbol_input.text() if symbol_input is not None else ''
         symbol = str(self.p10_symbol or input_text or 'SPY').upper().strip() or 'SPY'
         self.p10_symbol = symbol
         self._p10_update_multi_interval_button_styles()
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None:
+            from budget_terminal_app.services.refresh_control import RefreshCoordinator
+
+            coordinator = RefreshCoordinator()
+            self._refresh_coordinator = coordinator
+        key = ('charts', 'multiintervals')
+        token, should_start = coordinator.request(key, (symbol, tuple(labels), bool(force)))
+        contexts = getattr(self, '_p10_multi_interval_refresh_contexts', None)
+        if not isinstance(contexts, dict):
+            contexts = {}
+            self._p10_multi_interval_refresh_contexts = contexts
+        contexts.setdefault(
+            token.generation,
+            {'symbol': symbol, 'labels': tuple(labels), 'force': bool(force)},
+        )
+        retained = {
+            item.generation
+            for item in (coordinator.active_token(key), coordinator.pending_token(key))
+            if item is not None
+        }
+        self._p10_multi_interval_refresh_contexts = {
+            generation: value for generation, value in contexts.items() if generation in retained
+        }
+        if should_start:
+            self._p10_start_multi_interval_refresh(token, contexts[token.generation])
+
+    def _p10_start_multi_interval_refresh(self, request_token: Any, context: dict[str, Any]) -> None:
+        """Launch at most two label jobs for the active coordinated generation."""
+        symbol = str(context.get('symbol') or 'SPY').upper().strip() or 'SPY'
+        labels = list(context.get('labels', ()))
+        force = bool(context.get('force', False))
+        self._p10_multi_interval_request_token = int(request_token.generation)
+        self._p10_multi_interval_pending_labels = set()
+        self._p10_multi_interval_failed_labels = {}
         if not labels:
             self._p10_clear_multi_interval_plot()
             self.p10_multi_interval_empty_label.setText('Select one or more timeframes to load RSI, MFI, and MACD panels.')
             self.p10_multi_interval_empty_label.show()
             self._p10_set_multi_interval_status('Select one or more timeframes.', 'muted')
+            self._p10_finish_multi_interval_refresh(request_token)
             return
         cached_payloads = {}
         refresh_labels = []
@@ -3285,30 +3448,44 @@ class ChartsPageMixin:
             'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd', cached_payloads),
             'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal', cached_payloads),
         }
-        if self._p10_multi_interval_has_data(frames):
+        is_current = self._p10_multi_interval_request_is_current(request_token, context)
+        if is_current and self._p10_multi_interval_has_data(frames):
             self._p10_render_multi_interval_chart(symbol, frames, labels)
             self.p10_multi_interval_empty_label.setText('Select one or more timeframes to load RSI, MFI, and MACD panels.')
-        else:
+        elif is_current:
             self._p10_clear_multi_interval_plot()
             self.p10_multi_interval_empty_label.setText('Loading selected timeframe panels...')
             self.p10_multi_interval_empty_label.show()
         if not refresh_labels:
-            self._p10_set_multi_interval_status(
-                f'Loaded RSI, MFI, and MACD panels for {len(labels)} timeframe(s) from memory cache.',
-                'positive',
-            )
+            self._p10_finalize_multi_interval_request(request_token, symbol)
             return
+        self._p10_multi_interval_pending_labels = set(refresh_labels)
+        self._p10_multi_interval_failed_labels = {}
         self._p10_set_multi_interval_status(
             f'Loading indicator panels for {len(refresh_labels)} timeframe(s)...',
             'info',
         )
         executor = getattr(self, '_p10_multi_interval_executor', None)
         if executor is None:
+            self._p10_finish_multi_interval_refresh(request_token)
             return
         for label in refresh_labels:
             executor.submit(self._p10_request_multi_interval_payload, request_token, symbol, label, force)
 
-    def _p10_request_multi_interval_payload(self, request_token: int, symbol: str, label: str, force_refresh: bool=False) -> None:
+    def _p10_multi_interval_request_is_current(self, request_token: Any, context: Any = None) -> bool:
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None or not coordinator.is_current(request_token):
+            return False
+        if not isinstance(context, dict):
+            context = getattr(self, '_p10_multi_interval_refresh_contexts', {}).get(request_token.generation, {})
+        active_symbol = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
+        active_labels = tuple(self._p10_normalize_multi_interval_labels(self.p10_multi_interval_labels))
+        return (
+            str(context.get('symbol') or '').upper().strip() == active_symbol
+            and tuple(context.get('labels', ())) == active_labels
+        )
+
+    def _p10_request_multi_interval_payload(self, request_token: Any, symbol: str, label: str, force_refresh: bool=False) -> None:
         """Background worker that fetches one selected indicator payload."""
         try:
             payload = self._p10_fetch_multi_interval_payload(symbol, label, force_refresh=force_refresh)
@@ -3345,44 +3522,35 @@ class ChartsPageMixin:
         payload['macd_signal'] = signal_line
         return payload
 
-    def _p10_apply_multi_interval_payload(self, request_token: int, symbol: str, label: str, payload: Any) -> None:
-        """Merge one fetched timeframe payload into the indicator view."""
-        active_symbol = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
-        if request_token != self._p10_multi_interval_request_token or label not in self.p10_multi_interval_labels or symbol != active_symbol:
+    def _p10_apply_multi_interval_payload(self, request_token: Any, symbol: str, label: str, payload: Any) -> None:
+        """Cache one timeframe payload and redraw only after the request batch completes."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        context = getattr(self, '_p10_multi_interval_refresh_contexts', {}).get(request_token.generation, {})
+        if coordinator is None or not coordinator.is_active(request_token) or label not in context.get('labels', ()):
             return
         if isinstance(payload, dict):
             self._p10_multi_interval_cache[self._p10_multi_interval_cache_key(symbol, label)] = payload
-        labels = list(self.p10_multi_interval_labels)
-        frames = {
-            'rsi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi'),
-            'rsi_ma': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi_ma'),
-            'mfi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'mfi'),
-            'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd'),
-            'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal'),
-        }
-        if self._p10_multi_interval_has_data(frames):
-            self._p10_render_multi_interval_chart(symbol, frames, labels)
-            loaded_count = sum(
-                1
-                for current_label in labels
-                if isinstance(self._p10_multi_interval_cache.get(self._p10_multi_interval_cache_key(symbol, current_label)), dict)
-            )
-            self._p10_set_multi_interval_status(
-                f'Loaded timeframe panels for {loaded_count}/{len(labels)} timeframe(s).',
-                'positive' if loaded_count >= len(labels) else 'info',
-            )
+        self._p10_multi_interval_pending_labels.discard(label)
+        if self._p10_multi_interval_pending_labels:
+            if self._p10_multi_interval_request_is_current(request_token, context):
+                loaded_count = len(context.get('labels', ())) - len(self._p10_multi_interval_pending_labels)
+                self._p10_set_multi_interval_status(
+                    f'Loaded timeframe panels for {loaded_count}/{len(context.get("labels", ()))} timeframe(s).',
+                    'info',
+                )
             return
-        self._p10_clear_multi_interval_plot()
-        self.p10_multi_interval_empty_label.setText('No timeframe panel data could be loaded.')
-        self.p10_multi_interval_empty_label.show()
-        self._p10_set_multi_interval_status('No multi-interval timeframe data was available.', 'warning')
+        self._p10_finalize_multi_interval_request(request_token, symbol)
 
-    def _p10_handle_multi_interval_error(self, request_token: int, symbol: str, label: str, message: str) -> None:
-        """Show a fetch failure for one selected indicator timeframe."""
-        active_symbol = str(self.p10_symbol or 'SPY').upper().strip() or 'SPY'
-        if request_token != self._p10_multi_interval_request_token or label not in self.p10_multi_interval_labels or symbol != active_symbol:
+    def _p10_finalize_multi_interval_request(self, request_token: Any, symbol: str) -> None:
+        """Render a completed multi-interval generation once, and only while visible."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None or not coordinator.is_active(request_token):
             return
-        labels = list(self.p10_multi_interval_labels)
+        if getattr(self, '_p10_multi_interval_finalized_request_token', None) == request_token.generation:
+            return
+        self._p10_multi_interval_finalized_request_token = request_token.generation
+        context = getattr(self, '_p10_multi_interval_refresh_contexts', {}).get(request_token.generation, {})
+        labels = list(context.get('labels', ()))
         frames = {
             'rsi': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi'),
             'rsi_ma': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'rsi_ma'),
@@ -3390,13 +3558,62 @@ class ChartsPageMixin:
             'macd': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd'),
             'signal': self._p10_build_multi_interval_indicator_frame(symbol, labels, 'macd_signal'),
         }
-        if self._p10_multi_interval_has_data(frames):
-            self._p10_render_multi_interval_chart(symbol, frames, labels)
+        if self._p10_multi_interval_request_is_current(request_token, context):
+            is_visible = self._is_current_page(getattr(self, 'page10', None)) and self._p10_active_subtab_key() == 'multiintervals'
+            if not is_visible:
+                self._p10_multi_interval_dirty = True
+            elif self._p10_multi_interval_has_data(frames):
+                self._p10_render_multi_interval_chart(symbol, frames, labels)
+                loaded_count = sum(
+                    1
+                    for current_label in labels
+                    if isinstance(self._p10_multi_interval_cache.get(self._p10_multi_interval_cache_key(symbol, current_label)), dict)
+                )
+                failed_count = len(getattr(self, '_p10_multi_interval_failed_labels', {}))
+                self._p10_set_multi_interval_status(
+                    f'Loaded timeframe panels for {loaded_count}/{len(labels)} timeframe(s)'
+                    + (f'; {failed_count} failed.' if failed_count else '.'),
+                    'positive' if loaded_count >= len(labels) and not failed_count else 'warning',
+                )
+            else:
+                self._p10_clear_multi_interval_plot()
+                self.p10_multi_interval_empty_label.setText('No timeframe panel data could be loaded.')
+                self.p10_multi_interval_empty_label.show()
+                self._p10_set_multi_interval_status('No multi-interval timeframe data was available.', 'warning')
+        self._p10_finish_multi_interval_refresh(request_token)
+
+    def _p10_finish_multi_interval_refresh(self, request_token: Any) -> None:
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        if coordinator is None:
+            return
+        contexts = getattr(self, '_p10_multi_interval_refresh_contexts', {})
+        if isinstance(contexts, dict):
+            contexts.pop(request_token.generation, None)
+        next_token = coordinator.complete(request_token)
+        if next_token is None:
+            return
+        next_context = contexts.get(next_token.generation) if isinstance(contexts, dict) else None
+        if isinstance(next_context, dict):
+            self._p10_start_multi_interval_refresh(next_token, next_context)
         else:
-            self._p10_clear_multi_interval_plot()
-            self.p10_multi_interval_empty_label.setText('No timeframe panel data could be loaded.')
-            self.p10_multi_interval_empty_label.show()
-        self._p10_set_multi_interval_status(f'{label} timeframe load failed: {message}', 'negative')
+            coordinator.complete(next_token)
+
+    def _p10_handle_multi_interval_error(self, request_token: Any, symbol: str, label: str, message: str) -> None:
+        """Record a timeframe failure and finish the generation without redraw storms."""
+        coordinator = getattr(self, '_refresh_coordinator', None)
+        context = getattr(self, '_p10_multi_interval_refresh_contexts', {}).get(request_token.generation, {})
+        if coordinator is None or not coordinator.is_active(request_token) or label not in context.get('labels', ()):
+            return
+        self._p10_multi_interval_failed_labels[label] = str(message or 'Unavailable')
+        self._p10_multi_interval_pending_labels.discard(label)
+        if self._p10_multi_interval_pending_labels and self._p10_multi_interval_request_is_current(request_token, context):
+            self._p10_set_multi_interval_status(
+                f'{label} failed; waiting for {len(self._p10_multi_interval_pending_labels)} timeframe(s)...',
+                'warning',
+            )
+        if self._p10_multi_interval_pending_labels:
+            return
+        self._p10_finalize_multi_interval_request(request_token, symbol)
 
     def _p10_apply_multi_interval_theme(self) -> None:
         """Restyle the multi-interval timeframe panels after a theme change."""
@@ -4032,6 +4249,8 @@ class ChartsPageMixin:
         for symbol in list(self._p10_compare_plot_items):
             if symbol not in active_symbols:
                 self._p10_remove_compare_plot_symbol(symbol)
+        if not self.p10_compare_interval_labels_enabled:
+            self._p10_clear_compare_interval_label_items()
         right_padding = max(2.0, len(x_values) * 0.06) if x_values else 2.0
         global_min = ordered_frame.min(skipna=True).min(skipna=True)
         global_max = ordered_frame.max(skipna=True).max(skipna=True)
@@ -4066,6 +4285,16 @@ class ChartsPageMixin:
                 else:
                     plot_data_item.setPen(pg.mkPen(color=color, width=2))
                 plot_data_item.setData(x_values, series.to_list(), antialias=False, connect='finite')
+                if self.p10_compare_interval_labels_enabled:
+                    interval_label_points = self._p10_build_compare_interval_label_points(series, ordered_frame.index)
+                    interval_label_item = self._p10_compare_interval_label_items.get(symbol)
+                    if interval_label_item is None:
+                        interval_label_item = CompareIntervalLabelsItem(interval_label_points, color=color)
+                        self.p10_compare_plot.addItem(interval_label_item, ignoreBounds=True)
+                        self._p10_compare_interval_label_items[symbol] = interval_label_item
+                    else:
+                        interval_label_item.set_data(interval_label_points, color=color)
+                    interval_label_item.setVisible(bool(interval_label_points))
                 label_item = self._p10_compare_label_items.get(symbol)
                 valid_series = series.dropna()
                 if valid_series.empty:
@@ -4927,6 +5156,8 @@ class ChartsPageMixin:
         self._p10_apply_multi_interval_theme()
         if getattr(self, '_mc_initialized', False):
             self._mc_apply_theme()
+        if hasattr(self, 'p10_cheat_sheet'):
+            self.p10_cheat_sheet.apply_theme()
         self.p10_symbol_label.setStyleSheet(f'font-size: 22px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.p10_price_label.setStyleSheet(f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.p10_position_label.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {self.theme_color("text_secondary")};')

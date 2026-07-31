@@ -132,6 +132,9 @@ def test_up_down_page_smoke() -> None:
         _assert(window.p27_custom_symbols == ["AAA", "BBB"], "custom symbols should normalize on save")
         saved = load_up_down_page_settings()
         _assert(saved["custom_symbols"] == ["AAA", "BBB"], "custom symbols should persist")
+        _assert(custom_table.rowCount() == 0, "hidden Up/Down completion should defer table rendering")
+        window.switch_page(26)
+        app.processEvents()
         _assert(custom_table.rowCount() == 2, "custom tab should render fake service rows")
         _assert(custom_table.item(0, 1).text() == "AAA", "highest days-up ticker should render first")
     finally:

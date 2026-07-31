@@ -62,6 +62,20 @@ class DashboardFetchCoordinator:
         result["request_id"] = int(request.get("request_id", 0) or 0)
         return result
 
+    def fetch_portfolio_quotes(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Fetch and coalesce the quote-only Portfolio refresh payload."""
+        tickers = self._symbols(request.get("tickers", []))
+        return self._coalesced_fetch(
+            "portfolio_quotes",
+            (tuple(tickers),),
+            lambda: DataWorker(
+                tickers,
+                [],
+                cache_manager=self._cache_manager,
+                refresh_reason="portfolio_quotes",
+            ).fetch_portfolio_quotes(),
+        )
+
     def fetch_month_returns(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._coalesced_fetch(
             "month_returns",

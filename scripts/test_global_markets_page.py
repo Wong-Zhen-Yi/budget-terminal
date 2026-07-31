@@ -270,6 +270,7 @@ def test_global_page_smoke() -> None:
         window._p26_market_status_now_override = datetime.datetime(2025, 1, 10, 15, 0, tzinfo=datetime.timezone.utc)
         window._global_markets_data_service = _FakeGlobalService()
         window._p26_executor = _InlineExecutor()
+        window.switch_page(25)
         window._p26_request_refresh(force=True)
         app.processEvents()
         assert window.p26_table.rowCount() == 5

@@ -420,11 +420,27 @@ class SectorsMixin:
 
     def _p8_on_show(self) -> None:
         """Refresh sector data when the tab is shown."""
-        self._p8_relayout_cards()
+        if getattr(self, '_p8_render_pending', False) and getattr(self, '_p8_all_results', None) is not None:
+            self._p8_render_pending = False
+            self._p8_apply_all_data(self._p8_all_results)
+        else:
+            self._p8_relayout_cards()
         self._p8_request_refresh()
+
+    def _p8_page_is_visible(self) -> bool:
+        page = getattr(self, 'page8', None)
+        page_check = getattr(self, '_is_current_page', None)
+        if page is None or not callable(page_check):
+            return True
+        try:
+            return bool(page_check(page))
+        except (AttributeError, RuntimeError):
+            return False
 
     def _p8_request_refresh(self, *, force: bool=False, status_text: str='Refreshing sector data...') -> bool:
         """Start a sectors refresh if it is not throttled or already running."""
+        if getattr(self, '_refresh_shutdown', False):
+            return False
         if getattr(self, 'p8_fetch_in_progress', False):
             return False
         now = datetime.datetime.now().timestamp()
@@ -532,7 +548,8 @@ class SectorsMixin:
                 if hasattr(self, '_record_data_health_fallback'):
                     self._record_data_health_fallback('Sectors market caps', exc, symbols=needed)
                 results = MarketCapWorker(needed).fetch()
-            self._invoke_main.emit(lambda payload=results: self._p8_on_market_caps_ready(payload))
+            if not getattr(self, '_refresh_shutdown', False):
+                self._invoke_main.emit(lambda payload=results: self._p8_on_market_caps_ready(payload))
 
         threading.Thread(target=_run, daemon=True).start()
         return True
@@ -558,8 +575,10 @@ class SectorsMixin:
                 if snapshot is not None:
                     snapshot.mkt_cap = mc.get('size_value') if isinstance(mc, dict) else mc
         self._p8_apply_mktcap_cache_updates(updates)
-        if self._p8_selected_sector:
+        if self._p8_selected_sector and self._p8_page_is_visible():
             self._p8_populate_detail_table(self._p8_selected_sector)
+        elif self._p8_selected_sector:
+            self._p8_render_pending = True
         queued = list(getattr(self, '_p8_mktcap_queued_tickers', set()))
         self._p8_mktcap_queued_tickers = set()
         if queued:
@@ -640,17 +659,23 @@ class SectorsMixin:
                         if price is not None:
                             all_results[ticker].price = price
                             all_results[ticker].change = change
-            self._invoke_main.emit(lambda results=all_results: self._p8_complete_refresh(results))
+            if not getattr(self, '_refresh_shutdown', False):
+                self._invoke_main.emit(lambda results=all_results: self._p8_complete_refresh(results))
         except Exception as e:
             logger.error(f'Failed to fetch all sector data: {e}')
-            self._invoke_main.emit(self._p8_fail_refresh)
+            if not getattr(self, '_refresh_shutdown', False):
+                self._invoke_main.emit(self._p8_fail_refresh)
 
     def _p8_complete_refresh(self, all_results: Any, mktcap_updates: Any=None) -> None:
         """Apply fetched sector data and clear the active refresh flag."""
         self.p8_fetch_in_progress = False
         self._p8_apply_mktcap_cache_updates(mktcap_updates if isinstance(mktcap_updates, dict) else {})
         self._p8_all_results = all_results
-        self._p8_apply_all_data(all_results)
+        if self._p8_page_is_visible():
+            self._p8_render_pending = False
+            self._p8_apply_all_data(all_results)
+        else:
+            self._p8_render_pending = True
 
     def _p8_fail_refresh(self) -> None:
         """Handle a failed sector refresh and allow retries."""
