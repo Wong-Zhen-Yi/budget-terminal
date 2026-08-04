@@ -52,6 +52,11 @@ from budget_terminal_app.data_service.results import (
     market_data_meta,
 )
 from budget_terminal_app.services.chart_data import ChartDataService
+from budget_terminal_app.services.relationship_analysis import (
+    RELATIONSHIP_MIN_OBSERVATIONS,
+    build_relationship_analysis,
+    normalize_relationship_symbols,
+)
 from budget_terminal_app.services.technical_analysis import (
     calculate_macd,
     calculate_mfi,
@@ -60,6 +65,7 @@ from budget_terminal_app.services.technical_analysis import (
 )
 from budget_terminal_app.widgets.chart_workspace import NativeChartDrawingController
 from budget_terminal_app.widgets.chart_pattern_cheat_sheet import ChartPatternCheatSheet
+from budget_terminal_app.widgets.relationship_lab import RelationshipLabWidget
 
 
 P10_MULTI_INTERVAL_TIMEFRAME_OPTIONS = [
@@ -126,6 +132,15 @@ P10_COMPARE_RANGE_OPTIONS = [
     ('3M', '3mo'),
     ('1M', '1mo'),
 ]
+P10_RELATIONSHIP_RANGE_PERIODS = {
+    '1M': '1mo',
+    '3M': '3mo',
+    '6M': '6mo',
+    '1Y': '1y',
+    '5Y': '5y',
+    'Max': 'max',
+}
+P10_RELATIONSHIP_WINDOWS = (30, 60, 120, 252)
 P10_AUTO_ANCHOR = 0.85
 P10_DEFAULT_STARTUP_SPAN = 80.0
 P10_MIN_REUSABLE_SPAN = 10.0
@@ -252,6 +267,21 @@ class ChartsPageMixin:
         self.p10_custom_watchlist = list(state.get('watchlist', []))
         self.p10_compare_symbols = list(state.get('compare_symbols', []))
         self.p10_compare_presets = list(state.get('compare_presets', []))
+        saved_relationship_symbols = list(state.get('relationship_symbols', []))
+        if len(saved_relationship_symbols) == 2:
+            self.p10_relationship_symbols = [str(value or '').upper().strip() for value in saved_relationship_symbols]
+        else:
+            default_left = self.p10_symbol if self.p10_symbol != 'SPY' else 'QQQ'
+            self.p10_relationship_symbols = [default_left, 'SPY']
+        self.p10_relationship_range_label = str(state.get('relationship_range_label', '1Y') or '1Y')
+        if self.p10_relationship_range_label not in P10_RELATIONSHIP_RANGE_PERIODS:
+            self.p10_relationship_range_label = '1Y'
+        try:
+            self.p10_relationship_window = int(state.get('relationship_window', 120) or 120)
+        except (TypeError, ValueError):
+            self.p10_relationship_window = 120
+        if self.p10_relationship_window not in P10_RELATIONSHIP_WINDOWS:
+            self.p10_relationship_window = 120
         self.p10_multi_interval_labels = self._p10_initial_multi_interval_labels(state.get('multi_interval_labels', []))
         self.p10_active_indicators = list(state.get('indicators', ['Volume', '200 MA', P10_AVG_PRICE_LABEL]))
         self.p10_active_indicators = [indicator for indicator in P10_INDICATOR_ORDER if indicator in self.p10_active_indicators]
@@ -308,6 +338,11 @@ class ChartsPageMixin:
         self._p10_active_request = 0
         self._p10_compare_request_seq = 0
         self._p10_compare_active_request = 0
+        self._p10_relationship_request_seq = 0
+        self._p10_relationship_active_request = 0
+        self._p10_relationship_dirty = True
+        self._p10_relationship_display_signature = None
+        self._p10_relationship_last_payload = None
         self._p10_timeframe_buttons = {}
         self._p10_compare_timeframe_buttons = {}
         self._p10_multi_interval_buttons = {}
@@ -403,6 +438,8 @@ class ChartsPageMixin:
         self.p10_chart_tab = QWidget()
         self.p10_multi_tab = QWidget()
         self.p10_compare_tab = QWidget()
+        self.p10_relationship_widget = RelationshipLabWidget(self.theme_color, self.p10_tabs)
+        self.p10_relationship_tab = self.p10_relationship_widget
         self.p10_cheat_sheet = ChartPatternCheatSheet(self.theme_color, self.p10_tabs)
         self.p10_cheat_tab = self.p10_cheat_sheet
         self.p10_cheat_status_label = self.p10_cheat_sheet.status_label
@@ -410,12 +447,20 @@ class ChartsPageMixin:
         self.p10_tabs.addTab(self.p10_chart_tab, 'Main')
         self.p10_tabs.addTab(self.p10_multi_tab, 'Multi Charts')
         self.p10_tabs.addTab(self.p10_compare_tab, 'Compare')
+        self.p10_tabs.addTab(self.p10_relationship_tab, 'Relationship')
         self.p10_tabs.addTab(self.p10_cheat_tab, 'Cheat Sheet')
         self.p10_tabs.currentChanged.connect(self._p10_on_subtab_changed)
         layout.addWidget(self.p10_tabs, 1)
         self._p10_build_chart_tab()
         self.init_page11(container=self.p10_multi_tab, show_title=False)
         self._p10_build_compare_tab()
+        self.p10_relationship_widget.set_settings(
+            self.p10_relationship_symbols,
+            self.p10_relationship_range_label,
+            self.p10_relationship_window,
+        )
+        self.p10_relationship_widget.analyze_requested.connect(self._p10_analyze_relationship)
+        self.p10_relationship_widget.settings_changed.connect(self._p10_relationship_settings_changed)
         self.p10_tabs.setCurrentIndex(0)
         self._p10_update_timeframe_button_styles()
         self._p10_update_auto_button_style()
@@ -1029,6 +1074,15 @@ class ChartsPageMixin:
         if self._p10_active_subtab_key() == 'compare' and hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
+    def _p10_set_relationship_status(self, text: Any, status: Any='muted') -> None:
+        """Set relationship-subtab status text."""
+        widget = getattr(self, 'p10_relationship_widget', None)
+        if widget is None:
+            return
+        self.set_status_text(widget.status_label, text, status=str(status))
+        if self._p10_active_subtab_key() == 'relationship' and hasattr(self, 'status_bar'):
+            self.set_status_text(self.status_bar, text, status=str(status))
+
     def _p10_update_compare_interval_labels_button_style(self) -> None:
         """Keep the Compare interval-label toggle state and theme in sync."""
         button = getattr(self, 'p10_compare_interval_labels_btn', None)
@@ -1071,6 +1125,8 @@ class ChartsPageMixin:
         active_key = self._p10_active_subtab_key()
         if active_key == 'compare':
             source = self.p10_compare_status_label
+        elif active_key == 'relationship':
+            source = self.p10_relationship_widget.status_label
         elif active_key == 'multiintervals':
             source = self.p10_multi_interval_status_label
         elif active_key == 'multicharts' and hasattr(self, '_mc_status'):
@@ -1092,6 +1148,8 @@ class ChartsPageMixin:
         current = self.p10_tabs.currentWidget()
         if current is getattr(self, 'p10_compare_tab', None):
             return 'compare'
+        if current is getattr(self, 'p10_relationship_tab', None):
+            return 'relationship'
         if current is getattr(self, 'p10_multi_interval_tab', None):
             return 'multiintervals'
         if current is getattr(self, 'p10_multi_tab', None):
@@ -1123,6 +1181,9 @@ class ChartsPageMixin:
             'watchlist': self.p10_custom_watchlist,
             'compare_symbols': self.p10_compare_symbols,
             'compare_presets': self.p10_compare_presets,
+            'relationship_symbols': self.p10_relationship_symbols,
+            'relationship_range_label': self.p10_relationship_range_label,
+            'relationship_window': self.p10_relationship_window,
             'multi_interval_labels': self.p10_multi_interval_labels,
             'indicators': self.p10_active_indicators,
             'auto': self.p10_auto_follow,
@@ -1492,6 +1553,9 @@ class ChartsPageMixin:
         if active_key == 'compare':
             self._p10_refresh_compare_view(force=force)
             return
+        if active_key == 'relationship':
+            self._p10_refresh_relationship(force=force)
+            return
         if active_key == 'multiintervals':
             self._p10_refresh_multi_interval_views(force=force)
             return
@@ -1507,6 +1571,208 @@ class ChartsPageMixin:
             self._p10_refresh_chart()
             return
         self._p10_sync_active_status_to_status_bar()
+
+    def _p10_read_relationship_controls(self) -> tuple[tuple[str, str], str, str, int]:
+        """Return validated Relationship controls without starting a request."""
+        settings = self.p10_relationship_widget.settings()
+        symbols = normalize_relationship_symbols(settings.get('symbols', []))
+        range_label = str(settings.get('range_label', '1Y') or '1Y')
+        if range_label not in P10_RELATIONSHIP_RANGE_PERIODS:
+            range_label = '1Y'
+        try:
+            rolling_window = int(settings.get('window', 120) or 120)
+        except (TypeError, ValueError):
+            rolling_window = 120
+        if rolling_window not in P10_RELATIONSHIP_WINDOWS:
+            rolling_window = 120
+        return symbols, range_label, P10_RELATIONSHIP_RANGE_PERIODS[range_label], rolling_window
+
+    def _p10_commit_relationship_controls(self, *, refresh: bool) -> bool:
+        """Persist valid Relationship controls and optionally analyze them."""
+        try:
+            symbols, range_label, _period, rolling_window = self._p10_read_relationship_controls()
+        except ValueError as exc:
+            self._p10_relationship_request_seq += 1
+            self._p10_relationship_active_request = self._p10_relationship_request_seq
+            self.p10_relationship_widget.set_busy(False)
+            self.p10_relationship_widget.clear_analysis()
+            self._p10_relationship_display_signature = None
+            self._p10_relationship_dirty = True
+            self._p10_set_relationship_status(str(exc), 'warning')
+            return False
+        self.p10_relationship_symbols = list(symbols)
+        self.p10_relationship_range_label = range_label
+        self.p10_relationship_window = rolling_window
+        self.p10_relationship_widget.left_input.setText(symbols[0])
+        self.p10_relationship_widget.right_input.setText(symbols[1])
+        self._p10_relationship_dirty = True
+        self._p10_save_state()
+        if refresh:
+            self._p10_refresh_relationship(force=False)
+        return True
+
+    def _p10_analyze_relationship(self) -> None:
+        """Analyze the ticker pair entered in Relationship."""
+        self._p10_commit_relationship_controls(refresh=True)
+
+    def _p10_relationship_settings_changed(self) -> None:
+        """Persist Swap/range/window changes and refresh while Relationship is visible."""
+        self._p10_commit_relationship_controls(refresh=self._p10_active_subtab_key() == 'relationship')
+
+    def _p10_relationship_signature(self) -> tuple[Any, ...]:
+        return (
+            tuple(self.p10_relationship_symbols),
+            self.p10_relationship_range_label,
+            int(self.p10_relationship_window),
+        )
+
+    def _p10_refresh_relationship(self, *, force: bool=False) -> None:
+        """Load adjusted price history and calculate the active pair relationship."""
+        try:
+            symbols, range_label, period, rolling_window = self._p10_read_relationship_controls()
+        except ValueError as exc:
+            self._p10_relationship_request_seq += 1
+            self._p10_relationship_active_request = self._p10_relationship_request_seq
+            self.p10_relationship_widget.set_busy(False)
+            self.p10_relationship_widget.clear_analysis()
+            self._p10_relationship_display_signature = None
+            self._p10_relationship_dirty = True
+            self._p10_set_relationship_status(str(exc), 'warning')
+            return
+        self.p10_relationship_symbols = list(symbols)
+        self.p10_relationship_range_label = range_label
+        self.p10_relationship_window = rolling_window
+        signature = (symbols, range_label, rolling_window)
+        if (
+            not force
+            and not self._p10_relationship_dirty
+            and self._p10_relationship_display_signature == signature
+        ):
+            self._p10_sync_active_status_to_status_bar()
+            return
+
+        self._p10_relationship_request_seq += 1
+        request_id = self._p10_relationship_request_seq
+        self._p10_relationship_active_request = request_id
+        if self._p10_relationship_display_signature != signature:
+            self.p10_relationship_widget.clear_analysis()
+            self._p10_relationship_display_signature = None
+        self.p10_relationship_widget.set_busy(True)
+        self._p10_set_relationship_status(
+            f'Analyzing {symbols[0]} versus {symbols[1]} with adjusted daily history...',
+            'muted',
+        )
+
+        def _run() -> None:
+            try:
+                frame_payload = self._get_chart_data_service().fetch_relationship_frames_payload(
+                    symbols,
+                    period=period,
+                    force_refresh=force,
+                )
+                frames = frame_payload.get('frames', {}) if isinstance(frame_payload, dict) else {}
+                missing = [symbol for symbol in symbols if symbol not in frames]
+                if missing:
+                    unavailable = {
+                        'symbols': symbols,
+                        'signature': signature,
+                        'frame_payload': frame_payload,
+                    }
+                    self._invoke_main.emit(
+                        lambda payload=unavailable, req=request_id: self._p10_apply_relationship_unavailable(
+                            req,
+                            payload,
+                        )
+                    )
+                    return
+                analysis = build_relationship_analysis(
+                    frames[symbols[0]],
+                    frames[symbols[1]],
+                    rolling_window=rolling_window,
+                )
+                result = {
+                    'symbols': symbols,
+                    'signature': signature,
+                    'frame_payload': frame_payload,
+                    'analysis': analysis,
+                }
+                self._invoke_main.emit(
+                    lambda payload=result, req=request_id: self._p10_apply_relationship_payload(req, payload)
+                )
+            except Exception as exc:
+                self._invoke_main.emit(
+                    lambda message=str(exc), req=request_id, sig=signature: self._p10_handle_relationship_error(req, sig, message)
+                )
+
+        executor = getattr(self, '_p10_compare_executor', None)
+        if executor is None:
+            _run()
+        else:
+            executor.submit(_run)
+
+    def _p10_apply_relationship_payload(self, request_id: int, payload: dict[str, Any]) -> None:
+        """Render the latest Relationship request on the Qt thread."""
+        if request_id != self._p10_relationship_active_request:
+            return
+        signature = payload.get('signature')
+        if signature != self._p10_relationship_signature():
+            self.p10_relationship_widget.set_busy(False)
+            return
+        analysis = payload.get('analysis')
+        symbols = payload.get('symbols')
+        if not isinstance(analysis, dict) or not isinstance(symbols, tuple):
+            self._p10_handle_relationship_error(request_id, signature, 'Relationship analysis returned an invalid payload.')
+            return
+        self.p10_relationship_widget.render_analysis(symbols, analysis)
+        self.p10_relationship_widget.set_busy(False)
+        self._p10_relationship_display_signature = signature
+        self._p10_relationship_last_payload = payload
+        self._p10_relationship_dirty = False
+
+        frame_payload = payload.get('frame_payload', {})
+        status_text, status_level = describe_market_data_status(
+            frame_payload,
+            success_text=f'{symbols[0]}/{symbols[1]} relationship analysis loaded.',
+        )
+        observations = int((analysis.get('stats') or {}).get('observations', 0) or 0)
+        if observations < RELATIONSHIP_MIN_OBSERVATIONS:
+            status_text = (
+                f'Adjusted prices loaded, but at least {RELATIONSHIP_MIN_OBSERVATIONS} aligned returns '
+                'are required for regression statistics.'
+            )
+            status_level = 'warning'
+        self._p10_set_relationship_status(status_text, status_level)
+        if hasattr(self, '_set_data_collection_info'):
+            self._set_data_collection_info(data_sources_from_meta(frame_payload, 'yfinance adjusted history'))
+
+    def _p10_apply_relationship_unavailable(self, request_id: int, payload: dict[str, Any]) -> None:
+        """Show the latest partial or failed adjusted-history result without stale labels."""
+        if request_id != self._p10_relationship_active_request:
+            return
+        signature = payload.get('signature')
+        if signature != self._p10_relationship_signature():
+            self.p10_relationship_widget.set_busy(False)
+            return
+        self.p10_relationship_widget.set_busy(False)
+        self.p10_relationship_widget.clear_analysis()
+        self._p10_relationship_display_signature = None
+        self._p10_relationship_dirty = True
+        frame_payload = payload.get('frame_payload', {})
+        status_text, status_level = describe_market_data_status(frame_payload)
+        self._p10_set_relationship_status(status_text, status_level)
+        if hasattr(self, '_set_data_collection_info'):
+            self._set_data_collection_info(data_sources_from_meta(frame_payload, 'yfinance adjusted history'))
+
+    def _p10_handle_relationship_error(self, request_id: int, signature: Any, message: Any) -> None:
+        """Show a Relationship failure without relabeling an older result."""
+        if request_id != self._p10_relationship_active_request:
+            return
+        self.p10_relationship_widget.set_busy(False)
+        if self._p10_relationship_display_signature != signature:
+            self.p10_relationship_widget.clear_analysis()
+            self._p10_relationship_display_signature = None
+        self._p10_relationship_dirty = True
+        self._p10_set_relationship_status(str(message or 'Relationship analysis failed.'), 'negative')
 
     def _p10_refresh_compare_symbol_list(self) -> None:
         """Rebuild the saved compare-symbol list."""
@@ -5156,6 +5422,8 @@ class ChartsPageMixin:
         self._p10_apply_multi_interval_theme()
         if getattr(self, '_mc_initialized', False):
             self._mc_apply_theme()
+        if hasattr(self, 'p10_relationship_widget'):
+            self.p10_relationship_widget.apply_theme()
         if hasattr(self, 'p10_cheat_sheet'):
             self.p10_cheat_sheet.apply_theme()
         self.p10_symbol_label.setStyleSheet(f'font-size: 22px; font-weight: bold; color: {self.theme_color("text_primary")};')
@@ -5169,6 +5437,11 @@ class ChartsPageMixin:
             self.p10_compare_status_label.text(),
             self.p10_compare_status_label.property('bt_status') or 'muted',
         )
+        if hasattr(self, 'p10_relationship_widget'):
+            self._p10_set_relationship_status(
+                self.p10_relationship_widget.status_label.text(),
+                self.p10_relationship_widget.status_label.property('bt_status') or 'muted',
+            )
         self._p10_update_quote_header(self.p10_chart_stats or {'close': 0.0, 'change_value': 0.0, 'change_pct': 0.0})
         self._p10_update_auto_button_style()
         self._p10_update_timeframe_button_styles()

@@ -86,7 +86,6 @@ class WindowSetupMixin:
         18: 'Roll',
         19: 'Trading Volumes',
         20: 'IPO',
-        21: 'DATAROMA',
         22: 'Valuation',
         23: 'Institutions',
         24: 'Backtest',
@@ -95,7 +94,6 @@ class WindowSetupMixin:
         27: 'Projections',
         28: 'Cards',
         29: 'Price',
-        30: 'Paper',
         31: 'Virtual',
         33: 'News',
         37: 'Dictionary',
@@ -169,8 +167,6 @@ class WindowSetupMixin:
         self.btn_page34.setCheckable(True)
         self.btn_page4 = QPushButton('Portfolio')
         self.btn_page4.setCheckable(True)
-        self.btn_page31 = QPushButton('Paper')
-        self.btn_page31.setCheckable(True)
         self.btn_page32 = QPushButton('Virtual')
         self.btn_page32.setCheckable(True)
         self.btn_page29 = QPushButton('Cards')
@@ -199,8 +195,6 @@ class WindowSetupMixin:
         self.btn_page17.setCheckable(True)
         self.btn_page15 = QPushButton('Politics')
         self.btn_page15.setCheckable(True)
-        self.btn_page22 = QPushButton('DATAROMA')
-        self.btn_page22.setCheckable(True)
         self.btn_page24 = QPushButton('Institutions')
         self.btn_page24.setCheckable(True)
         self.btn_page16 = QPushButton('YouTube')
@@ -229,7 +223,6 @@ class WindowSetupMixin:
             self.btn_page1,
             self.btn_page26,
             self.btn_page4,
-            self.btn_page31,
             self.btn_page32,
             self.btn_page29,
             self.btn_page6,
@@ -253,7 +246,6 @@ class WindowSetupMixin:
             self.btn_page18,
             self.btn_page21,
             self.btn_page24,
-            self.btn_page22,
             self.btn_page15,
             self.btn_page16,
             self.btn_page38,
@@ -976,7 +968,7 @@ class WindowSetupMixin:
             {'index': 18, 'page_attr': 'page18', 'init_method': 'init_page18', 'theme_hook': '_apply_random_recommender_theme'},
             {'index': 19, 'page_attr': 'page20', 'init_method': 'init_page20'},
             {'index': 20, 'page_attr': 'page21', 'init_method': 'init_page21', 'theme_hook': '_apply_ipo_theme'},
-            {'index': 21, 'page_attr': 'page22', 'init_method': 'init_page22', 'theme_hook': '_apply_dataroma_theme'},
+            {'index': 21, 'page_attr': '_retired_page21', 'placeholder_only': True},
             {'index': 22, 'page_attr': 'page23', 'init_method': 'init_page23', 'theme_hook': '_apply_valuation_theme'},
             {'index': 23, 'page_attr': 'page24', 'init_method': 'init_page24', 'theme_hook': '_apply_institutions_theme'},
             {'index': 24, 'page_attr': 'page25', 'init_method': 'init_page25', 'theme_hook': '_apply_backtest_theme'},
@@ -985,7 +977,7 @@ class WindowSetupMixin:
             {'index': 27, 'page_attr': 'page28', 'init_method': 'init_page28', 'theme_hook': '_apply_charts_options_top_volume_theme'},
             {'index': 28, 'page_attr': 'page29', 'init_method': 'init_page29', 'theme_hook': '_apply_strategies_theme'},
             {'index': 29, 'page_attr': 'page30', 'init_method': 'init_page30'},
-            {'index': 30, 'page_attr': 'page31', 'init_method': 'init_page31', 'theme_hook': '_apply_paper_trading_theme', 'rollback_hook': '_p31_stop'},
+            {'index': 30, 'page_attr': '_retired_page30', 'placeholder_only': True},
             {'index': 31, 'page_attr': 'page32', 'init_method': 'init_page32', 'theme_hook': '_apply_virtual_trading_theme', 'rollback_hook': '_p32_stop'},
             {'index': 32, 'page_attr': '_retired_page32', 'placeholder_only': True},
             {'index': 33, 'page_attr': 'page34', 'init_method': 'init_page34', 'theme_hook': '_apply_news_theme', 'hydrate_hook': '_hydrate_lazy_page34'},

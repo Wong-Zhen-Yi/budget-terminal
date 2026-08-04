@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from ..cache import CacheManager
-from ..data_service.results import attach_market_data_result, make_market_data_meta
+from ..data_service.results import (
+    attach_market_data_result,
+    make_market_data_error,
+    make_market_data_meta,
+)
 from ..data_service.tasks import MarketDataTaskRunner
 from ..dependencies import logger, pd, yf
 
@@ -288,6 +292,165 @@ class ChartDataService:
             result.meta["is_partial"] = True
             result.meta["failure_reason"] = f"{len(payload.get('missing', []))} compare ticker(s) returned no data."
         return attach_market_data_result(payload, meta=result.meta, errors=result.errors)
+
+    def fetch_relationship_frames_payload(
+        self,
+        symbols: Any,
+        *,
+        period: Any,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch two adjusted daily history frames without touching ordinary chart caches."""
+        normalized = []
+        for value in list(symbols or []):
+            symbol = str(value or "").upper().strip()
+            if symbol:
+                normalized.append(symbol)
+        if len(normalized) != 2 or normalized[0] == normalized[1]:
+            reason = "Enter two different ticker symbols."
+            return attach_market_data_result(
+                {"frames": {}, "missing": normalized},
+                meta=make_market_data_meta(source="input", freshness="failed", failure_reason=reason),
+                errors=make_market_data_error(source="input", reason=reason, operation="relationship_history"),
+            )
+
+        period_text = str(period or "1y").strip().lower()
+        if period_text not in {"1mo", "3mo", "6mo", "1y", "5y", "max"}:
+            period_text = "1y"
+        cache_interval = "1d_adj"
+        frames: dict[str, Any] = {}
+        fresh_cache_ages = []
+        stale_frames: dict[str, Any] = {}
+        stale_cache_ages = []
+
+        for symbol in normalized:
+            if not force_refresh and period_text != "max":
+                cached = self.cache_manager.get_data(
+                    symbol,
+                    cache_interval,
+                    return_metadata=True,
+                )
+                if cached:
+                    cached_frame = self.normalize_frame(symbol, cached[0])
+                    cached_meta = cached[1] if isinstance(cached[1], dict) else {}
+                    if cached_frame is not None and not cached_frame.empty and self.cache_covers_period(cached_frame, period_text):
+                        frames[symbol] = cached_frame
+                        fresh_cache_ages.append(cached_meta.get("cache_age_seconds"))
+            stale = self.cache_manager.get_data(
+                symbol,
+                cache_interval,
+                allow_stale=True,
+                return_metadata=True,
+            )
+            if stale:
+                stale_frame = self.normalize_frame(symbol, stale[0])
+                stale_meta = stale[1] if isinstance(stale[1], dict) else {}
+                if stale_frame is not None and not stale_frame.empty:
+                    stale_frames[symbol] = stale_frame
+                    stale_cache_ages.append(stale_meta.get("cache_age_seconds"))
+
+        pending = [symbol for symbol in normalized if symbol not in frames]
+        errors = []
+        used_live = False
+        used_stale = False
+        missing_from_live: list[str] = []
+        if pending:
+            def download_adjusted() -> dict[str, Any]:
+                raw = yf.download(
+                    pending,
+                    period=period_text,
+                    interval="1d",
+                    group_by="ticker",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=True,
+                )
+                downloaded = {}
+                unavailable = []
+                for symbol in pending:
+                    frame = self.normalize_frame(symbol, raw)
+                    if frame is None or frame.empty:
+                        unavailable.append(symbol)
+                        continue
+                    downloaded[symbol] = frame
+                    self.cache_manager.save_data(symbol, cache_interval, frame)
+                if not downloaded:
+                    raise ValueError("No adjusted relationship history was returned.")
+                return {"frames": downloaded, "missing": unavailable}
+
+            fallback_payload = {
+                "frames": {symbol: stale_frames[symbol] for symbol in pending if symbol in stale_frames},
+                "missing": [symbol for symbol in pending if symbol not in stale_frames],
+            }
+            result = self.task_runner.run(
+                f"relationship_history:{','.join(pending)}:{period_text}",
+                download_adjusted,
+                source="yfinance adjusted history",
+                cache_fallback=(lambda: fallback_payload) if fallback_payload["frames"] else None,
+                cache_source="adjusted history cache",
+                cache_age_seconds=max(
+                    (float(value) for value in stale_cache_ages if value is not None),
+                    default=None,
+                ),
+                success_check=lambda payload: isinstance(payload, dict) and bool(payload.get("frames")),
+                failure_reason="Adjusted relationship history could not be loaded.",
+            )
+            errors.extend(result.errors)
+            downloaded_payload = result.data if isinstance(result.data, dict) else {"frames": {}, "missing": pending}
+            downloaded_frames = downloaded_payload.get("frames", {}) if isinstance(downloaded_payload.get("frames"), dict) else {}
+            frames.update(downloaded_frames)
+            missing_from_live = list(downloaded_payload.get("missing", []))
+            used_stale = str(result.meta.get("freshness")) == "stale"
+            used_live = bool(downloaded_frames) and not used_stale
+
+            if used_live and missing_from_live:
+                for symbol in list(missing_from_live):
+                    stale_frame = stale_frames.get(symbol)
+                    if stale_frame is None or stale_frame.empty:
+                        continue
+                    frames[symbol] = stale_frame
+                    missing_from_live.remove(symbol)
+                    used_stale = True
+
+        missing = [symbol for symbol in normalized if symbol not in frames]
+        source_parts = []
+        if fresh_cache_ages:
+            source_parts.append("adjusted history cache")
+        if used_live:
+            source_parts.append("yfinance adjusted history")
+        if used_stale:
+            source_parts.append("stale adjusted history cache")
+        source = ", ".join(source_parts) or "adjusted history cache"
+
+        if not frames:
+            freshness = "failed"
+            reason = "Adjusted relationship history could not be loaded."
+        elif missing:
+            freshness = "partial"
+            reason = f"No adjusted history was available for {', '.join(missing)}."
+        elif used_stale:
+            freshness = "stale"
+            reason = "Showing cached adjusted history because part of the live refresh failed."
+        else:
+            freshness = "fresh"
+            reason = ""
+
+        cache_ages = [*fresh_cache_ages]
+        if used_stale:
+            cache_ages.extend(stale_cache_ages)
+        return attach_market_data_result(
+            {"frames": frames, "missing": missing},
+            meta=make_market_data_meta(
+                source=source,
+                freshness=freshness,
+                failure_reason=reason,
+                cache_age_seconds=max(
+                    (float(value) for value in cache_ages if value is not None),
+                    default=None,
+                ),
+            ),
+            errors=errors,
+        )
 
     def fetch_daily_ma200_payload(self, symbol: Any, source_df: Any) -> dict[str, Any]:
         symbol_text = str(symbol or "").upper().strip()

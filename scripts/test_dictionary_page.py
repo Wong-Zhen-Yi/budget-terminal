@@ -111,11 +111,16 @@ def _build_window():
 def test_dictionary_page_offscreen_smoke() -> None:
     app, window = _build_window()
     try:
+        window.resize(1500, 900)
+        window.show()
+        app.processEvents()
         assert 37 in window._pages
         assert not window._page_initialized(index=37)
         assert window._ensure_page_initialized(37)
         assert window._page_initialized(index=37)
         assert window.stacked_widget.indexOf(window.page38) == 37
+        window.switch_page(37)
+        app.processEvents()
         assert len(window.p38_visible_entries) == len(DICTIONARY_ENTRIES)
 
         window.p38_search_input.setText("P/E")
@@ -135,6 +140,17 @@ def test_dictionary_page_offscreen_smoke() -> None:
         app.processEvents()
         assert window.p38_detail_title.text() == "Head and Shoulders"
         assert window.p38_pattern_diagram is not None
+        diagram = window.p38_pattern_diagram
+        assert diagram.hasHeightForWidth()
+        assert abs(diagram.height() - diagram.width() * 9 / 16) <= 1
+        window._p38_update_responsive_layout(700)
+        assert window.p38_splitter.orientation() == Qt.Orientation.Vertical
+        app.processEvents()
+        assert abs(diagram.height() - diagram.width() * 9 / 16) <= 1
+        window._p38_update_responsive_layout(1100)
+        assert window.p38_splitter.orientation() == Qt.Orientation.Horizontal
+        app.processEvents()
+        assert abs(diagram.height() - diagram.width() * 9 / 16) <= 1
 
         window._p38_open_related("bid")
         app.processEvents()
@@ -146,10 +162,6 @@ def test_dictionary_page_offscreen_smoke() -> None:
         window._refresh_current_page()
         assert window.p38_selected_entry_id == selected_before_refresh
 
-        window._p38_update_responsive_layout(700)
-        assert window.p38_splitter.orientation() == Qt.Orientation.Vertical
-        window._p38_update_responsive_layout(1100)
-        assert window.p38_splitter.orientation() == Qt.Orientation.Horizontal
         window._apply_dictionary_theme()
 
         window.p38_search_input.setText("term-that-does-not-exist-anywhere")

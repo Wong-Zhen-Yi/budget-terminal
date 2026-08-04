@@ -56,7 +56,7 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class PaperTradingStore:
-    """Transactional SQLite persistence for isolated paper accounts."""
+    """Transactional SQLite persistence for isolated Virtual Trading accounts."""
 
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path or PAPER_DATABASE_FILE)
@@ -77,7 +77,7 @@ class PaperTradingStore:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version > PAPER_DATABASE_VERSION:
                 raise RuntimeError(
-                    f"Paper database version {version} is newer than supported version {PAPER_DATABASE_VERSION}."
+                    f"Virtual Trading database version {version} is newer than supported version {PAPER_DATABASE_VERSION}."
                 )
             connection.executescript(
                 """
@@ -310,7 +310,7 @@ class PaperTradingStore:
         with self._connect() as connection:
             account_count = int(connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
             if account_count >= 5:
-                raise ValueError("Paper trading supports up to five accounts, including archived accounts.")
+                raise ValueError("Virtual Trading supports up to five accounts, including archived accounts.")
             try:
                 connection.execute(
                     """INSERT INTO accounts
@@ -319,7 +319,7 @@ class PaperTradingStore:
                     (account_id, clean_name, cash, slippage, commission, now, now),
                 )
             except sqlite3.IntegrityError as exc:
-                raise ValueError(f"An active paper account named {clean_name!r} already exists.") from exc
+                raise ValueError(f"An active Virtual Trading account named {clean_name!r} already exists.") from exc
             connection.execute(
                 """INSERT INTO cash_events (id, account_id, fill_id, event_type, amount, created_at)
                    VALUES (?, ?, NULL, ?, ?, ?)""",
@@ -341,7 +341,7 @@ class PaperTradingStore:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
         if row is None:
-            raise ValueError("Paper account was not found.")
+            raise ValueError("Virtual Trading account was not found.")
         return dict(row)
 
     def update_account(
@@ -360,7 +360,7 @@ class PaperTradingStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
             if row is None:
-                raise ValueError("Paper account was not found.")
+                raise ValueError("Virtual Trading account was not found.")
             account = dict(row)
             clean_name = str(name if name is not None else account["name"]).strip()[:80]
             if not clean_name:
@@ -425,7 +425,7 @@ class PaperTradingStore:
                         (str(uuid.uuid4()), account_id, event_type, cash_delta, iso_utc()),
                     )
             except sqlite3.IntegrityError as exc:
-                raise ValueError(f"An active paper account named {clean_name!r} already exists.") from exc
+                raise ValueError(f"An active Virtual Trading account named {clean_name!r} already exists.") from exc
         return self.get_account(account_id)
 
     def can_edit_initial_cash(self, account_id: str) -> bool:
@@ -751,7 +751,7 @@ class PaperTradingStore:
         with self._connect() as connection:
             row = connection.execute("SELECT status FROM accounts WHERE id = ?", (account_id,)).fetchone()
             if row is None:
-                raise ValueError("Paper account was not found.")
+                raise ValueError("Virtual Trading account was not found.")
             if row["status"] == AccountStatus.ARCHIVED:
                 return
             pending = connection.execute(
@@ -784,10 +784,10 @@ class PaperTradingStore:
                 connection.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'").fetchone()[0]
             )
             if active_count >= 5:
-                raise ValueError("Paper trading supports up to five active accounts.")
+                raise ValueError("Virtual Trading supports up to five active accounts.")
             account = connection.execute("SELECT name FROM accounts WHERE id = ?", (account_id,)).fetchone()
             if account is None:
-                raise ValueError("Paper account was not found.")
+                raise ValueError("Virtual Trading account was not found.")
             try:
                 connection.execute(
                     "UPDATE accounts SET status = 'active', updated_at = ? WHERE id = ?",
@@ -879,7 +879,7 @@ class PaperTradingStore:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if row is None:
-            raise ValueError("Paper order was not found.")
+            raise ValueError("Virtual Trading order was not found.")
         return dict(row)
 
     def list_orders(
@@ -915,7 +915,7 @@ class PaperTradingStore:
         with self._connect() as connection:
             order = connection.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
             if order is None:
-                raise ValueError("Paper order was not found.")
+                raise ValueError("Virtual Trading order was not found.")
             if order["status"] != OrderStatus.PENDING:
                 raise ValueError("Only pending orders can be cancelled.")
             self._transition_order(
@@ -971,7 +971,7 @@ class PaperTradingStore:
     ) -> None:
         row = connection.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
         if row is None:
-            raise ValueError("Paper order was not found.")
+            raise ValueError("Virtual Trading order was not found.")
         prior = str(row["status"])
         if prior != OrderStatus.PENDING:
             return
@@ -1071,7 +1071,7 @@ class PaperTradingStore:
             connection.execute("BEGIN IMMEDIATE")
             order_row = connection.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
             if order_row is None:
-                raise ValueError("Paper order was not found.")
+                raise ValueError("Virtual Trading order was not found.")
             order = dict(order_row)
             if order["status"] != OrderStatus.PENDING:
                 existing = connection.execute("SELECT * FROM fills WHERE order_id = ?", (order_id,)).fetchone()
@@ -1392,15 +1392,15 @@ class PaperTradingStore:
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError("Unable to read the paper-trading backup.") from exc
+            raise ValueError("Unable to read the Virtual Trading backup.") from exc
         if not isinstance(payload, dict) or payload.get("backup_type") != "budget_terminal_paper_trading":
-            raise ValueError("The selected file is not a Budget Terminal paper-trading backup.")
+            raise ValueError("The selected file is not a Budget Terminal Virtual Trading backup.")
         version = int(payload.get("version", 0) or 0)
         if version not in SUPPORTED_PAPER_BACKUP_VERSIONS:
-            raise ValueError("The paper-trading backup version is not supported.")
+            raise ValueError("The Virtual Trading backup version is not supported.")
         tables = payload.get("tables")
         if not isinstance(tables, dict):
-            raise ValueError("The paper-trading backup is incomplete.")
+            raise ValueError("The Virtual Trading backup is incomplete.")
         if version < 4:
             payload = dict(payload)
             tables = dict(tables)
@@ -1408,7 +1408,7 @@ class PaperTradingStore:
             tables.setdefault("recurring_runs", [])
             payload["tables"] = tables
         if any(not isinstance(tables.get(table), list) for table in _TABLES):
-            raise ValueError("The paper-trading backup is incomplete.")
+            raise ValueError("The Virtual Trading backup is incomplete.")
         return payload
 
     def _rollback_path(self, reason: str) -> Path:
@@ -1434,7 +1434,7 @@ class PaperTradingStore:
     def import_backup(self, payload: dict[str, Any]) -> str:
         tables = payload.get("tables") if isinstance(payload, dict) else None
         if not isinstance(tables, dict):
-            raise ValueError("The paper-trading backup is incomplete.")
+            raise ValueError("The Virtual Trading backup is incomplete.")
         self._validate_backup_tables(tables)
         rollback = self.create_rollback_backup(reason="before_import")
         try:
@@ -1467,24 +1467,24 @@ class PaperTradingStore:
     def _validate_backup_tables(tables: dict[str, Any]) -> None:
         accounts = tables.get("accounts", [])
         if len(accounts) > 5:
-            raise ValueError("A paper backup cannot contain more than five accounts.")
+            raise ValueError("A Virtual Trading backup cannot contain more than five accounts.")
         for account in accounts:
             if not isinstance(account, dict):
                 raise ValueError("The accounts table contains an invalid row.")
             if account.get("currency") != "USD" or account.get("status") not in {"active", "archived"}:
-                raise ValueError("A paper account has an unsupported currency or status.")
+                raise ValueError("A Virtual Trading account has an unsupported currency or status.")
             if float(account.get("initial_cash") or 0.0) <= 0:
-                raise ValueError("A paper account has invalid starting cash.")
+                raise ValueError("A Virtual Trading account has invalid starting cash.")
         valid_cash_types = {"initial_deposit", "deposit", "withdrawal", "trade"}
         for event in tables.get("cash_events", []):
             if not isinstance(event, dict) or event.get("event_type") not in valid_cash_types:
-                raise ValueError("A paper cash event has an unsupported type.")
+                raise ValueError("A Virtual Trading cash event has an unsupported type.")
             amount = float(event.get("amount") or 0.0)
             event_type = str(event.get("event_type") or "")
             if event_type in {"initial_deposit", "deposit"} and amount <= 0:
-                raise ValueError("A paper deposit must be greater than zero.")
+                raise ValueError("A Virtual Trading deposit must be greater than zero.")
             if event_type == "withdrawal" and amount >= 0:
-                raise ValueError("A paper withdrawal must be less than zero.")
+                raise ValueError("A Virtual Trading withdrawal must be less than zero.")
         schedule_ids = set()
         for schedule in tables.get("recurring_schedules", []):
             if not isinstance(schedule, dict):
@@ -1518,23 +1518,23 @@ class PaperTradingStore:
             quantity = float(order.get("quantity") or 0.0)
             filled = float(order.get("filled_quantity") or 0.0)
             if quantity <= 0 or not (abs(filled) < 1e-7 or abs(filled - quantity) < 1e-7):
-                raise ValueError("A paper order violates the full-fill quantity contract.")
+                raise ValueError("A Virtual Trading order violates the full-fill quantity contract.")
             if order.get("order_type") == "market" and order.get("tif") != "day":
                 raise ValueError("A market order in the backup does not use DAY time-in-force.")
             execution_session = str(order.get("execution_session") or "regular")
             if execution_session not in {"regular", "extended"}:
-                raise ValueError("A paper order has an unsupported trading-hours session.")
+                raise ValueError("A Virtual Trading order has an unsupported trading-hours session.")
             if execution_session == "extended" and (
                 order.get("order_type") != "limit" or order.get("tif") != "day"
             ):
                 raise ValueError("A pre-market eligible order must be a DAY limit order.")
             if order.get("status") == "filled" and abs(filled - quantity) >= 1e-7:
-                raise ValueError("A filled paper order has an invalid filled quantity.")
+                raise ValueError("A filled Virtual Trading order has an invalid filled quantity.")
             if order.get("status") != "filled" and abs(filled) >= 1e-7:
-                raise ValueError("A non-filled paper order cannot contain a fill quantity.")
+                raise ValueError("A non-filled Virtual Trading order cannot contain a fill quantity.")
         for position in tables.get("positions", []):
             if not isinstance(position, dict) or float(position.get("quantity") or 0.0) < 0:
-                raise ValueError("A paper position contains an invalid quantity.")
+                raise ValueError("A Virtual Trading position contains an invalid quantity.")
 
     def reset(self) -> str:
         rollback = self.create_rollback_backup(reason="before_reset")

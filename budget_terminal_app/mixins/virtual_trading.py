@@ -32,7 +32,7 @@ P32_SYMBOL_CHART_RANGES = {
 
 
 class VirtualTradingMixin:
-    """Robinhood-inspired presentation for the shared paper-trading ledger."""
+    """Robinhood-inspired presentation for the Virtual Trading ledger."""
 
     _P32_ENGINE_INTERVAL_MS = 30_000
     _P32_MARK_INTERVAL_MS = 60_000
@@ -113,7 +113,7 @@ class VirtualTradingMixin:
         title_row.addWidget(title)
         title_row.addWidget(badge)
         title_row.addStretch(1)
-        subtitle = QLabel("A focused stock and ETF brokerage view powered by the Paper ledger")
+        subtitle = QLabel("A focused stock and ETF brokerage view powered by the Virtual Trading ledger")
         self.set_theme_role(subtitle, "muted")
         self.p32_inspiration_note = QLabel(
             "Interface inspired by Robinhood, adapted freely for Budget Terminal rather than treated as a strict replica."
@@ -161,8 +161,8 @@ class VirtualTradingMixin:
         title.setObjectName("virtualEmptyTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail = QLabel(
-            "Create a paper account with simulated cash. Virtual and Paper share the same accounts, "
-            "positions, orders, fills, and backup controls."
+            "Create a virtual account with simulated cash. Accounts, positions, orders, fills, "
+            "and backup controls remain local to Budget Terminal."
         )
         detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail.setWordWrap(True)
@@ -209,7 +209,7 @@ class VirtualTradingMixin:
         top = QHBoxLayout()
         heading = QLabel("Investing")
         heading.setObjectName("virtualSectionHeading")
-        self.p32_market_state_label = QLabel("Paper market")
+        self.p32_market_state_label = QLabel("Virtual market")
         self.p32_market_state_label.setObjectName("virtualMarketBadge")
         top.addWidget(heading)
         top.addStretch(1)
@@ -868,10 +868,6 @@ class VirtualTradingMixin:
         return table
 
     def _p32_on_show(self) -> None:
-        for timer_name in ("_p31_engine_timer", "_p31_mark_timer"):
-            timer = getattr(self, timer_name, None)
-            if timer is not None:
-                timer.stop()
         self._p32_refresh_accounts(self._p32_shared_account_id())
         if not self._p32_engine_started:
             self._p32_engine_started = True
@@ -903,9 +899,7 @@ class VirtualTradingMixin:
         self._p32_owns_chart_data_service = False
 
     def _p32_shared_account_id(self) -> str:
-        if getattr(self, "_p32_active_account_id", ""):
-            return str(self._p32_active_account_id)
-        return str(getattr(self, "_p31_active_account_id", "") or "")
+        return str(getattr(self, "_p32_active_account_id", "") or "")
 
     def _p32_refresh_accounts(self, select_account_id: str | None = None) -> None:
         desired = str(select_account_id or self._p32_active_account_id or "")
@@ -1095,9 +1089,9 @@ class VirtualTradingMixin:
 
         hint_text = (
             "Cash changes are recorded as deposits or withdrawals. Positions stay unchanged, and external cash flows "
-            "do not count as investment returns. These account settings are shared with the Paper page."
+            "do not count as investment returns. These settings apply to this Virtual account."
             if editing
-            else "The account and its future-order settings are shared with the Paper page."
+            else "These account settings will apply to its future simulated orders."
         )
         hint = QLabel(hint_text)
         hint.setWordWrap(True)
@@ -1118,7 +1112,7 @@ class VirtualTradingMixin:
             elif archived:
                 change_label.setText("Restore this account before changing its cash balance.")
             elif not valid_amount:
-                change_label.setText(f"Keep at least ${reserved_cash:,.2f} for pending Paper buy orders.")
+                change_label.setText(f"Keep at least ${reserved_cash:,.2f} for pending Virtual buy orders.")
             elif delta > 0.005:
                 change_label.setText(f"Deposit ${delta:,.2f} · New cash balance ${desired_cash:,.2f}")
             elif delta < -0.005:
@@ -1911,7 +1905,7 @@ class VirtualTradingMixin:
                 badge += f" · {stale} stale"
             self.p32_market_state_label.setText(badge)
         else:
-            self.p32_market_state_label.setText("Live paper marks" if not stale else f"{stale} stale mark(s)")
+            self.p32_market_state_label.setText("Live virtual marks" if not stale else f"{stale} stale mark(s)")
 
     def _p32_refresh_performance(self, *_: Any, snapshot: Any = None) -> None:
         if not getattr(self, "_p32_active_account_id", ""):

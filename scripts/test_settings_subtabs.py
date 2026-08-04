@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from budget_terminal_app.compat import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, Qt, QWidget
+from budget_terminal_app.compat import QApplication, QCheckBox, QGroupBox, QLabel, QPushButton, QScrollArea, Qt, QWidget
 from budget_terminal_app.mixins import settings as settings_module
 from budget_terminal_app.mixins.settings import SettingsMixin
 
@@ -44,10 +44,6 @@ class _SettingsHarness(SettingsMixin, QWidget):
 
     def _toggle_time_format(self) -> None:
         self._time_12h = not self._time_12h
-
-    def _on_toggle_run_on_startup(self, *_args) -> None:
-        pass
-
 
 def _assert(condition: bool, message: str) -> None:
     if not condition:
@@ -114,12 +110,16 @@ def main() -> None:
         preferences_harness = _SettingsHarness({'active_tab': 'general'})
         preferences_box = preferences_harness._build_settings_preferences_box()
         button_texts = [button.text() for button in preferences_box.findChildren(QPushButton)]
-        _assert('Check for Updates' in button_texts, 'General settings should expose Check for Updates')
+        _assert('Check for Updates' not in button_texts, 'General settings should not expose application updates')
         label_texts = [label.text() for label in preferences_box.findChildren(QLabel)]
-        _assert(any(text == 'Application Updates' for text in label_texts), 'General settings should label the update section')
         _assert(
-            any(text.startswith('Current version v') for text in label_texts),
-            'General settings should show current packaged update status',
+            not any(text in {'Windows Startup', 'Application Updates'} for text in label_texts),
+            'General settings should not expose Windows startup or application updates sections',
+        )
+        checkbox_texts = [checkbox.text() for checkbox in preferences_box.findChildren(QCheckBox)]
+        _assert(
+            not any('sign in to Windows' in text for text in checkbox_texts),
+            'General settings should not expose the Windows startup toggle',
         )
 
         harness.resize(640, 480)

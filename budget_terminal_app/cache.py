@@ -13,7 +13,7 @@ from .dependencies import logger, pd
 from .paths import user_data_path
 
 class CacheManager:
-    _CACHE_META_TABLES = {'meta', 'meta_options'}
+    _CACHE_META_TABLES = {'meta', 'meta_options', 'json_payload_cache'}
     _SIMPLE_IDENTIFIER_PART = re.compile(r'^[A-Za-z0-9_]+$')
     _SAFE_IDENTIFIER_CHARS = re.compile(r'[^A-Za-z0-9_]+')
 
@@ -29,6 +29,15 @@ class CacheManager:
             with self._connect(configure_journal=True) as conn:
                 conn.execute('\n                    CREATE TABLE IF NOT EXISTS meta (\n                        ticker TEXT,\n                        interval TEXT,\n                        last_updated TIMESTAMP,\n                        PRIMARY KEY (ticker, interval)\n                    )\n                ')
                 conn.execute('\n                    CREATE TABLE IF NOT EXISTS meta_options (\n                        ticker TEXT PRIMARY KEY,\n                        expirations TEXT,\n                        last_updated TIMESTAMP\n                    )\n                ')
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS json_payload_cache (
+                        namespace TEXT,
+                        cache_key TEXT,
+                        payload TEXT,
+                        last_updated TIMESTAMP,
+                        PRIMARY KEY (namespace, cache_key)
+                    )
+                ''')
         except Exception as e:
             logger.error(f'Failed to initialize cache DB: {e}')
 
@@ -83,6 +92,7 @@ class CacheManager:
                 conn.execute(f'DROP TABLE IF EXISTS {self._quote_identifier(table_name)}')
         conn.execute('DELETE FROM meta')
         conn.execute('DELETE FROM meta_options')
+        conn.execute('DELETE FROM json_payload_cache')
         conn.commit()
         return bool(data_tables or table_names)
 
@@ -172,6 +182,63 @@ class CacheManager:
                 conn.execute('INSERT OR REPLACE INTO meta (ticker, interval, last_updated) VALUES (?, ?, ?)', (ticker, interval, datetime.datetime.now().isoformat()))
         except Exception as e:
             logger.warning(f'Failed to save cache for {ticker}: {e}')
+
+    def get_json_payload(
+        self,
+        namespace: Any,
+        cache_key: Any,
+        *,
+        max_age_seconds: Any,
+        allow_stale: bool = False,
+        return_metadata: bool = False,
+    ) -> Any:
+        """Return one JSON payload when it is fresh, or when stale reads are allowed."""
+        namespace_text = str(namespace or '').strip()
+        key_text = str(cache_key or '').strip()
+        if not namespace_text or not key_text:
+            return None
+        try:
+            max_age = max(float(max_age_seconds), 0.0)
+        except (TypeError, ValueError):
+            max_age = 0.0
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    'SELECT payload, last_updated FROM json_payload_cache WHERE namespace=? AND cache_key=?',
+                    (namespace_text, key_text),
+                ).fetchone()
+            if not row:
+                return None
+            payload_json, last_updated_text = row
+            last_updated = datetime.datetime.fromisoformat(str(last_updated_text))
+            age_seconds = max(0.0, (datetime.datetime.now() - last_updated).total_seconds())
+            if not allow_stale and age_seconds >= max_age:
+                return None
+            payload = json.loads(payload_json)
+            return self._cache_return(payload, age_seconds, return_metadata=return_metadata)
+        except Exception as exc:
+            logger.debug('JSON cache read failed for %s %s: %s', namespace_text, key_text, exc)
+            return None
+
+    def save_json_payload(self, namespace: Any, cache_key: Any, payload: Any) -> None:
+        """Persist a JSON-serializable payload under a namespaced cache key."""
+        namespace_text = str(namespace or '').strip()
+        key_text = str(cache_key or '').strip()
+        if not namespace_text or not key_text or payload is None:
+            return
+        try:
+            payload_json = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+            with self._connect() as conn:
+                conn.execute(
+                    '''
+                    INSERT OR REPLACE INTO json_payload_cache
+                        (namespace, cache_key, payload, last_updated)
+                    VALUES (?, ?, ?, ?)
+                    ''',
+                    (namespace_text, key_text, payload_json, datetime.datetime.now().isoformat()),
+                )
+        except Exception as exc:
+            logger.warning('Failed to save JSON cache for %s %s: %s', namespace_text, key_text, exc)
 
     def get_options_expiries(self, ticker: Any, max_age_hours: Any=24, *, allow_stale: bool=False, return_metadata: bool=False) -> Any:
         """Handle get options expiries."""

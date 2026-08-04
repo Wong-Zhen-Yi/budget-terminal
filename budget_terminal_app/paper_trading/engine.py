@@ -487,19 +487,19 @@ class PaperTradingEngine:
             raise ValueError("Yahoo returned an empty symbol.")
         if quote.quote_type not in self.SUPPORTED_QUOTE_TYPES:
             raise ValueError(
-                "Paper accepts US-listed stocks and ETFs only "
+                "Virtual Trading accepts US-listed stocks and ETFs only "
                 f"(received type={quote.quote_type or 'missing'}, exchange={quote.exchange or 'missing'}, "
                 f"currency={quote.currency or 'missing'})."
             )
         if quote.currency != "USD":
             raise ValueError(
-                "Paper accepts USD securities only "
+                "Virtual Trading accepts USD securities only "
                 f"(received type={quote.quote_type or 'missing'}, exchange={quote.exchange or 'missing'}, "
                 f"currency={quote.currency or 'missing'})."
             )
         if quote.exchange not in self.MAJOR_US_ETF_EXCHANGES:
             raise ValueError(
-                "Paper accepts stocks and ETFs listed on NYSE, Nasdaq, NYSE American, NYSE Arca, "
+                "Virtual Trading accepts stocks and ETFs listed on NYSE, Nasdaq, NYSE American, NYSE Arca, "
                 f"and Cboe BZX only (received type={quote.quote_type or 'missing'}, "
                 f"exchange={quote.exchange or 'missing'}, currency={quote.currency or 'missing'})."
             )

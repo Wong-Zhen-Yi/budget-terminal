@@ -44,6 +44,9 @@ DEFAULT_CHART_PAGE_SETTINGS = {
     'compare_interval_labels_enabled': True,
     'watchlist': [],
     'compare_symbols': [],
+    'relationship_symbols': [],
+    'relationship_range_label': '1Y',
+    'relationship_window': 120,
     'compare_presets': [],
     'multi_interval_labels': [],
     'indicators': ['Volume', '200 MA', 'Avg Price'],
@@ -115,9 +118,9 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 30, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 21, 15, 16, 37, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
 SETTINGS_PAGE_INDEX = 17
-DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': [21, 30]}
+DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
 SETTINGS_PAGE_TAB_KEYS = ('general', 'workspace', 'data', 'diagnostics')
 DEFAULT_SETTINGS_PAGE_SETTINGS = {'active_tab': 'general'}
@@ -793,7 +796,6 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 continue
             if page_index in valid_indexes and page_index not in order:
                 order.append(page_index)
-    paper_page_was_missing = 30 not in order
     for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
         if page_index not in order:
             if page_index == 25 and 0 in order:
@@ -804,10 +806,8 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.insert(order.index(9) + 1, page_index)
             elif page_index == 29 and 19 in order:
                 order.insert(order.index(19) + 1, page_index)
-            elif page_index == 30 and 1 in order:
+            elif page_index == 31 and 1 in order:
                 order.insert(order.index(1) + 1, page_index)
-            elif page_index == 31 and 30 in order:
-                order.insert(order.index(30) + 1, page_index)
             elif page_index == 33 and 5 in order:
                 order.insert(order.index(5) + 1, page_index)
             elif page_index == 37 and SETTINGS_PAGE_INDEX in order:
@@ -826,8 +826,6 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 continue
             if page_index in valid_indexes and page_index not in hidden_pages:
                 hidden_pages.append(page_index)
-    if paper_page_was_missing and 30 not in hidden_pages:
-        hidden_pages.append(30)
     return {'page_order': order, 'hidden_pages': hidden_pages}
 
 
@@ -1729,6 +1727,28 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
     if not isinstance(raw_compare_symbols, list):
         raw_compare_symbols = []
     compare_symbols = _normalize_unique_symbol_list(raw_compare_symbols)
+    raw_relationship_symbols = saved.get('relationship_symbols', [])
+    if not isinstance(raw_relationship_symbols, list):
+        raw_relationship_symbols = []
+    relationship_symbols = _normalize_unique_symbol_list(raw_relationship_symbols)[:2]
+    if len(relationship_symbols) != 2:
+        relationship_symbols = []
+    relationship_range_label = str(
+        saved.get('relationship_range_label', DEFAULT_CHART_PAGE_SETTINGS['relationship_range_label'])
+        or DEFAULT_CHART_PAGE_SETTINGS['relationship_range_label']
+    ).strip()
+    if relationship_range_label.upper() == 'MAX':
+        relationship_range_label = 'Max'
+    if relationship_range_label not in {'1M', '3M', '6M', '1Y', '5Y', 'Max'}:
+        relationship_range_label = DEFAULT_CHART_PAGE_SETTINGS['relationship_range_label']
+    try:
+        relationship_window = int(
+            saved.get('relationship_window', DEFAULT_CHART_PAGE_SETTINGS['relationship_window'])
+        )
+    except (TypeError, ValueError):
+        relationship_window = DEFAULT_CHART_PAGE_SETTINGS['relationship_window']
+    if relationship_window not in {30, 60, 120, 252}:
+        relationship_window = DEFAULT_CHART_PAGE_SETTINGS['relationship_window']
     compare_presets = _normalize_compare_presets(saved.get('compare_presets', []))
     raw_multi_interval_labels = saved.get('multi_interval_labels', [])
     if not isinstance(raw_multi_interval_labels, list):
@@ -1768,6 +1788,9 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         'compare_interval_labels_enabled': compare_interval_labels_enabled,
         'watchlist': watchlist,
         'compare_symbols': compare_symbols,
+        'relationship_symbols': relationship_symbols,
+        'relationship_range_label': relationship_range_label,
+        'relationship_window': relationship_window,
         'compare_presets': compare_presets,
         'multi_interval_labels': multi_interval_labels,
         'indicators': indicators,

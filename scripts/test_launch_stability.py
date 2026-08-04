@@ -163,8 +163,8 @@ def test_reentrant_lazy_build_initializes_once(window: Any, app: Any) -> None:
     assert window.stacked_widget.currentWidget() is page, 'deferred navigation did not show the built page'
 
 
-def test_close_before_lazy_trading_pages_initialize(window: Any, app: Any) -> None:
-    assert not window._page_initialized(page_attr='page31')
+def test_close_before_lazy_virtual_page_initializes(window: Any, app: Any) -> None:
+    assert 30 not in window._lazy_page_registry
     assert not window._page_initialized(page_attr='page32')
 
     callback_errors: list[tuple[type[BaseException], BaseException]] = []
@@ -185,9 +185,6 @@ def test_close_before_lazy_trading_pages_initialize(window: Any, app: Any) -> No
         sys.excepthook = original_excepthook
 
     if callback_errors:
-        # Let cleanup finish on the pre-fix path so the assertion is reported cleanly.
-        if not hasattr(window, '_p31_chart_request_id'):
-            window._p31_chart_request_id = 0
         window.close()
         app.processEvents()
 
@@ -232,12 +229,10 @@ def main() -> int:
             window = BudgetTerminalApp()
             test_failed_lazy_build_rolls_back(window, app)
             test_reentrant_lazy_build_initializes_once(window, app)
-            test_close_before_lazy_trading_pages_initialize(window, app)
+            test_close_before_lazy_virtual_page_initializes(window, app)
             window = None
         finally:
             if window is not None:
-                if not hasattr(window, '_p31_chart_request_id'):
-                    window._p31_chart_request_id = 0
                 window.close()
                 app.processEvents()
             WindowBootstrapMixin._init_recurring_scheduler = original_init_recurring_scheduler

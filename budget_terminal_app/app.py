@@ -4,7 +4,6 @@ from .mixins.calendar_page import CalendarPageMixin
 from .mixins.crypto import CryptoMixin
 from .mixins.dashboard import DashboardMixin
 from .mixins.data_health import DataHealthMixin
-from .mixins.dataroma import DataromaMixin
 from .mixins.dictionary_page import DictionaryPageMixin
 from .mixins.etf_analyser import EtfAnalyserMixin
 from .mixins.politics import PoliticsMixin
@@ -24,7 +23,6 @@ from .mixins.options_fetch import OptionsFetchMixin
 from .mixins.options_table_events import OptionsTableEventsMixin
 from .mixins.options_table_rows import OptionsTableRowsMixin
 from .mixins.overview import OverviewMixin
-from .mixins.paper_trading import PaperTradingMixin
 from .mixins.price_page import PricePageMixin
 from .mixins.portfolio_metrics import PortfolioMetricsMixin
 from .mixins.portfolio_setup import PortfolioSetupMixin
@@ -48,5 +46,5 @@ from .mixins.window_lifecycle import WindowLifecycleMixin
 from .mixins.window_setup import WindowSetupMixin
 
 
-class BudgetTerminalApp(ThemeSupportMixin, DataHealthMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, GlobalPageMixin, StrategiesPageMixin, UpDownPageMixin, ValuationMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, PaperTradingMixin, VirtualTradingMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, CryptoMixin, RandomRecommenderMixin, IpoPageMixin, PoliticsMixin, DataromaMixin, InstitutionsMixin, YouTubeMixin, NewsMixin, DictionaryPageMixin, NetWorthMixin, CalendarPageMixin, OverviewMixin, PricePageMixin, SectorsMixin, SpyHeatmapMixin, SettingsMixin, ChartsPageMixin, ChartsOptionsTopVolumeMixin, BacktestPageMixin, StocksPageMixin, MultiChartsMixin, QMainWindow):
+class BudgetTerminalApp(ThemeSupportMixin, DataHealthMixin, WindowBootstrapMixin, WindowSetupMixin, WindowLifecycleMixin, DashboardMixin, GlobalPageMixin, StrategiesPageMixin, UpDownPageMixin, ValuationMixin, FundamentalsSetupMixin, FundamentalsRenderMixin, EarningsMatrixExtractMixin, EarningsMatrixTablesMixin, SimpleChartsMixin, PortfolioSetupMixin, OptionsFetchMixin, OptionsTableRowsMixin, OptionsTableEventsMixin, PortfolioMetricsMixin, VirtualTradingMixin, OptionsChainMixin, EtfAnalyserMixin, PreMarketMixin, CryptoMixin, RandomRecommenderMixin, IpoPageMixin, PoliticsMixin, InstitutionsMixin, YouTubeMixin, NewsMixin, DictionaryPageMixin, NetWorthMixin, CalendarPageMixin, OverviewMixin, PricePageMixin, SectorsMixin, SpyHeatmapMixin, SettingsMixin, ChartsPageMixin, ChartsOptionsTopVolumeMixin, BacktestPageMixin, StocksPageMixin, MultiChartsMixin, QMainWindow):
     _invoke_main = pyqtSignal(object)

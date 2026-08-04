@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -32,6 +32,11 @@ ThemeColor = Callable[[str], str]
 class ChartPatternDiagramWidget(QWidget):
     """Render one deterministic chart-pattern diagram without a plotting engine."""
 
+    ASPECT_WIDTH = 16
+    ASPECT_HEIGHT = 9
+    PREFERRED_WIDTH = 480
+    MINIMUM_WIDTH = 320
+
     def __init__(self, pattern: ChartPatternDefinition, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.pattern = pattern
@@ -45,10 +50,28 @@ class ChartPatternDiagramWidget(QWidget):
             "neutral": "#60a5fa",
             "marker": "#fbbf24",
         }
-        self.setMinimumHeight(150)
-        self.setMaximumHeight(170)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        size_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        size_policy.setHeightForWidth(True)
+        self.setSizePolicy(size_policy)
         self.setAccessibleName(f"{pattern.name} schematic chart pattern")
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt virtual method
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt virtual method
+        return round(max(0, int(width)) * self.ASPECT_HEIGHT / self.ASPECT_WIDTH)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt virtual method
+        return QSize(self.PREFERRED_WIDTH, self.heightForWidth(self.PREFERRED_WIDTH))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt virtual method
+        return QSize(self.MINIMUM_WIDTH, self.heightForWidth(self.MINIMUM_WIDTH))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
+        target_height = self.heightForWidth(event.size().width())
+        if self.minimumHeight() != target_height or self.maximumHeight() != target_height:
+            self.setFixedHeight(target_height)
+        super().resizeEvent(event)
 
     @property
     def colors(self) -> dict[str, str]:

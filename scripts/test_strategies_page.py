@@ -289,25 +289,25 @@ def test_strategies_page_smoke(temp_dir: Path) -> None:
             window._ensure_page_initialized(17)
             settings_buttons = [button.text() for button in window.page9.findChildren(type(window.btn_page1))]
         _assert(
-            "Export User Data, Cards and Paper Trading" in settings_buttons,
+            "Export User Data, Cards and Virtual Trading" in settings_buttons,
             "Settings should expose one combined backup-folder export",
         )
         _assert(
-            "Import User Data, Cards and Paper Trading" in settings_buttons,
+            "Import User Data, Cards and Virtual Trading" in settings_buttons,
             "Settings should expose one combined backup-folder import",
         )
         for old_label in (
             "Export User Data",
             "Export Custom Cards",
-            "Export Paper Trading",
+            "Export Virtual Trading",
             "Import User Data",
             "Import Custom Cards",
-            "Import Paper Trading",
+            "Import Virtual Trading",
         ):
             _assert(old_label not in settings_buttons, f"Settings should remove {old_label!r}")
         _assert("Clear All User Data and Cards" in settings_buttons, "combined backups should not change clearing")
         _assert("Reset Cache" in settings_buttons, "combined backups should not change cache reset")
-        _assert("Reset Paper Trading" in settings_buttons, "combined backups should not change Paper reset")
+        _assert("Reset Virtual Trading" in settings_buttons, "Settings should expose the Virtual Trading reset")
 
         window._refresh_main_tab_picker_items()
         picker_labels = [entry["label"] for entry in window._tab_picker_entries]

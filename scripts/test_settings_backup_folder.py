@@ -141,7 +141,7 @@ def test_content_discovery_and_strict_completeness(root: Path) -> None:
     try:
         discover_backup_bundle(folder)
     except BackupBundleError as exc:
-        assert "Missing a valid Paper Trading JSON file" in str(exc)
+        assert "Missing a valid Virtual Trading JSON file" in str(exc)
     else:
         raise AssertionError("a missing required type should fail discovery")
     hidden_path.rename(paper_path)
@@ -266,13 +266,11 @@ def test_initialized_runtime_refresh_hooks() -> None:
             self.strategies_state = None
             self._p29_performance_cache = {"stale": object()}
             self.cards_refreshes = 0
-            self.paper_refreshes = 0
             self.virtual_refreshes = 0
-            self._p31_engine = SimpleNamespace(store=None)
             self._p32_engine = SimpleNamespace(store=None)
 
         def _page_initialized(self, *, page_attr: str) -> bool:
-            return page_attr in {"page29", "page31", "page32"}
+            return page_attr in {"page29", "page32"}
 
         def _apply_runtime_user_data(self, payload: Any) -> None:
             self.runtime_payload = payload
@@ -280,9 +278,6 @@ def test_initialized_runtime_refresh_hooks() -> None:
         def _p29_refresh_cards(self, *, request_data: bool) -> None:
             assert request_data is False
             self.cards_refreshes += 1
-
-        def _p31_refresh_accounts(self) -> None:
-            self.paper_refreshes += 1
 
         def _p32_refresh_accounts(self) -> None:
             self.virtual_refreshes += 1
@@ -308,10 +303,8 @@ def test_initialized_runtime_refresh_hooks() -> None:
     assert harness.strategies_state == result.cards["state"]
     assert harness._p29_performance_cache == {}
     assert harness.cards_refreshes == 1
-    assert harness.paper_refreshes == 1
     assert harness.virtual_refreshes == 1
-    assert harness._p31_engine.store is stores[0]
-    assert harness._p32_engine.store is stores[1]
+    assert harness._p32_engine.store is stores[0]
 
 
 def main() -> None:

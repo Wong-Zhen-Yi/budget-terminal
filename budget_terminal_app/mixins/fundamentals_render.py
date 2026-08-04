@@ -9,9 +9,11 @@ class FundamentalsRenderMixin:
         self.p2_current_data = data
         ticker = data['ticker']
         info = data['info']
-        source = 'Alpha Vantage' if data.get('av_used') else 'yfinance'
+        source = self._p2_source_label(data) if hasattr(self, '_p2_source_label') else 'yfinance only'
         if update_collection_info:
-            self._set_data_collection_info([source])
+            sec = data.get('sec') if isinstance(data.get('sec'), dict) else {}
+            collection_sources = ['SEC EDGAR', 'yfinance'] if sec.get('statements_available') else ['yfinance']
+            self._set_data_collection_info(collection_sources)
         self.set_status_text(
             self.p2_status_lbl,
             status_text or f'{ticker}  |  source: {source}',
@@ -38,6 +40,31 @@ class FundamentalsRenderMixin:
             """Handle sg."""
             v = info.get(key)
             return None if v is None or v == 'N/A' else v
+
+        def reported_flow(family: str, aliases: list[str]) -> float | None:
+            quarterly = self._p2_statement_frame(data, family, 'quarterly')
+            values, _, columns = self._p2_extract_statement_series(quarterly, aliases, 'quarterly')
+            if len(values) >= 4 and len(columns) >= 4:
+                latest_values = values[-4:]
+                latest_columns = columns[-4:]
+                try:
+                    dates = sorted(pd.Timestamp(column).normalize() for column in latest_columns)
+                    gaps = [(dates[index + 1] - dates[index]).days for index in range(3)]
+                except (TypeError, ValueError):
+                    gaps = []
+                if len(gaps) == 3 and all(50 <= gap <= 140 for gap in gaps):
+                    return float(sum(latest_values))
+            annual = self._p2_statement_frame(data, family, 'annual')
+            annual_values, _, _ = self._p2_extract_statement_series(annual, aliases, 'annual')
+            return float(annual_values[-1]) if annual_values else None
+
+        def reported_instant(aliases: list[str]) -> float | None:
+            for period in ('quarterly', 'annual'):
+                frame = self._p2_statement_frame(data, 'balance_sheet', period)
+                values, _, _ = self._p2_extract_statement_series(frame, aliases, period)
+                if values:
+                    return float(values[-1])
+            return None
 
         def fmt_ratio(v: Any, suffix: Any='x', decimals: Any=2) -> Any:
             """Handle fmt ratio."""
@@ -82,14 +109,23 @@ class FundamentalsRenderMixin:
         beta = sg('beta')
         mktcap = sg('marketCap')
         ev = sg('enterpriseValue')
-        total_rev = sg('totalRevenue')
-        fcf = sg('freeCashflow')
-        total_cash = sg('totalCash')
-        total_debt = sg('totalDebt')
-        if total_debt is None:
-            total_debt = self._p2_latest_total_debt_value(data, 'quarterly')
+        total_rev = reported_flow('financials', ['total revenue', 'revenue'])
+        if total_rev is None:
+            total_rev = sg('totalRevenue')
+        fcf = reported_flow('cashflow', ['free cash flow'])
+        if fcf is None:
+            fcf = sg('freeCashflow')
+        total_cash = reported_instant([
+            'cash cash equivalents and short term investments',
+            'cash and cash equivalents',
+        ])
+        if total_cash is None:
+            total_cash = sg('totalCash')
+        total_debt = self._p2_latest_total_debt_value(data, 'quarterly')
         if total_debt is None:
             total_debt = self._p2_latest_total_debt_value(data, 'annual')
+        if total_debt is None:
+            total_debt = sg('totalDebt')
         ebitda = sg('ebitda')
         fcf_margin = fcf / total_rev * 100 if fcf is not None and total_rev else None
         ev_rev = ev / total_rev if ev is not None and total_rev else None
@@ -106,6 +142,51 @@ class FundamentalsRenderMixin:
         self.p2_metric_vals['beta'].setText(fmt_ratio(beta, suffix=''))
         self.p2_metric_vals['mktcap'].setText(fmt_num(mktcap) if mktcap is not None else 'N/A')
         self._on_period_toggle()
+        self._p2_render_sec_filings(data)
         QTimer.singleShot(0, self._p2_relayout_charts)
         if hasattr(self, '_p2_save_session_snapshot'):
             self._p2_save_session_snapshot()
+
+    def _p2_render_sec_filings(self, data: Any) -> None:
+        """Render compact filing metadata and a clear SEC fallback state."""
+        if not hasattr(self, 'p2_filings_table'):
+            return
+        payload = data if isinstance(data, dict) else {}
+        sec = payload.get('sec') if isinstance(payload.get('sec'), dict) else {}
+        filings = sec.get('filings') if isinstance(sec.get('filings'), list) else []
+        self.p2_filings = list(filings)
+        self.p2_filings_table.setSortingEnabled(False)
+        self.p2_filings_table.setRowCount(len(filings))
+        for row, filing in enumerate(filings):
+            entry = filing if isinstance(filing, dict) else {}
+            description = str(entry.get('description') or '').strip()
+            items = str(entry.get('items') or '').strip()
+            detail = ' | '.join(value for value in (description, items) if value)
+            values = (
+                entry.get('form'),
+                entry.get('filed_date'),
+                entry.get('report_period'),
+                detail,
+                entry.get('accession_number'),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ''))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, str(entry.get('document_url') or ''))
+                self.p2_filings_table.setItem(row, column, item)
+        self.p2_filings_table.setSortingEnabled(True)
+        if filings:
+            self.p2_filings_table.sortItems(1, Qt.SortOrder.DescendingOrder)
+
+        warnings = sec.get('warnings') if isinstance(sec.get('warnings'), list) else []
+        warning = str(warnings[0]) if warnings else ''
+        if sec.get('available'):
+            cik = str(sec.get('cik') or '').lstrip('0') or 'N/A'
+            freshness = str(sec.get('freshness') or 'live')
+            status = f'{len(filings)} recent SEC filings | CIK {cik} | {freshness}'
+            if warning:
+                status = f'{status} | {warning}'
+        else:
+            status = warning or 'SEC statements are unavailable for this ticker; Yahoo data remains active.'
+        self.p2_filings_status.setText(status)
+        self._p2_filter_filings()

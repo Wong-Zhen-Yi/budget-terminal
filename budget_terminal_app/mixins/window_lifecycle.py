@@ -24,7 +24,6 @@ REFRESH_ROUTE_ARCHITECTURE = {
     18: 'background-single-flight',
     19: 'background-single-flight',
     20: 'background-single-flight',
-    21: 'background-single-flight',
     22: 'background-single-flight',
     23: 'background-single-flight',
     24: 'background-single-flight',
@@ -33,14 +32,13 @@ REFRESH_ROUTE_ARCHITECTURE = {
     27: 'background-single-flight',
     28: 'background-single-flight',
     29: 'background-single-flight',
-    30: 'background-active-subtab',
     31: 'background-active-subtab',
     33: 'background-single-flight',
     37: 'local-only',
 }
 
 _MIGRATED_REFRESH_ROUTES = {
-    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33,
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 31, 33,
 }
 REFRESH_ROUTE_CLASSIFICATION = {
     page_index: (
@@ -115,7 +113,6 @@ class WindowLifecycleMixin:
         self._register_page(0, self.btn_page1, on_show=self._dashboard_on_show if hasattr(self, '_dashboard_on_show') else None)
         self._register_page(25, self.btn_page26, on_show=self._p26_on_show if hasattr(self, '_p26_on_show') else None)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
-        self._register_page(30, self.btn_page31, on_show=self._p31_on_show if hasattr(self, '_p31_on_show') else None)
         self._register_page(31, self.btn_page32, on_show=self._p32_on_show if hasattr(self, '_p32_on_show') else None, on_hide=self._p32_on_hide if hasattr(self, '_p32_on_hide') else None)
         self._register_page(28, self.btn_page29, on_show=self._p29_on_show if hasattr(self, '_p29_on_show') else None)
         self._register_page(2, self.btn_page6, on_show=self._p6_on_show if hasattr(self, '_p6_on_show') else None)
@@ -142,7 +139,6 @@ class WindowLifecycleMixin:
         self._register_page(13, self.btn_page14, on_show=self._p14_on_show)
         self._register_page(14, self.btn_page19, on_show=self._p19_on_show if hasattr(self, '_p19_on_show') else None)
         self._register_page(15, self.btn_page15, on_show=self._p15_on_show)
-        self._register_page(21, self.btn_page22, on_show=self._p22_on_show)
         self._register_page(23, self.btn_page24, on_show=self._p24_on_show)
         self._register_page(16, self.btn_page16, on_show=self._p16_on_show)
         self._register_page(37, self.btn_page38)
@@ -822,6 +818,8 @@ class WindowLifecycleMixin:
             active_key = self._p10_active_subtab_key() if hasattr(self, '_p10_active_subtab_key') else 'chart'
             if active_key == 'compare':
                 _dispatch('Charts compare', getattr(self, '_p10_refresh_compare_view', None), force=False)
+            elif active_key == 'relationship':
+                _dispatch('Charts relationship', getattr(self, '_p10_refresh_relationship', None), force=False)
             elif active_key == 'multiintervals':
                 _dispatch('Charts intervals', getattr(self, '_p10_refresh_multi_interval_views', None), force=False)
             elif active_key == 'multicharts':
@@ -922,7 +920,6 @@ class WindowLifecycleMixin:
             13: 90,
             14: 100,
             15: 110,
-            21: 115,
             16: 120,
             17: 130,
             18: 140,
@@ -1090,6 +1087,8 @@ class WindowLifecycleMixin:
         self._restore_window_height_after_page_switch(preserve_height)
         for i, page in self._pages.items():
             page['btn'].setChecked(i == numeric_index)
+        self._ensure_current_navigation_button_visible()
+        QTimer.singleShot(0, self._ensure_current_navigation_button_visible)
         self._page_switch_sequence = int(getattr(self, '_page_switch_sequence', 0) or 0) + 1
         switch_sequence = int(self._page_switch_sequence)
         QTimer.singleShot(0, lambda idx=numeric_index, seq=switch_sequence: self._run_page_show_callback(idx, seq))
@@ -1151,11 +1150,24 @@ class WindowLifecycleMixin:
                 {'tab_widget_attr': 'p7_tabs', 'tab_text': 'Calendar'},
                 {'tab_widget_attr': 'p7_tabs', 'tab_text': 'Earnings'},
             ),
-            9: (
-                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Main'},
-                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Multi Charts', 'aliases': ('Multiple Charts',)},
-                {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Compare', 'aliases': ('Comparison',)},
+            8: (
+                {'tab_widget_attr': 'p2_source_tabs', 'tab_text': 'Statements'},
                 {
+                    'tab_widget_attr': 'p2_source_tabs',
+                    'tab_text': 'SEC Filings',
+                    'aliases': ('Filings', 'EDGAR'),
+                },
+            ),
+            9: (
+                  {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Main'},
+                  {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Multi Charts', 'aliases': ('Multiple Charts',)},
+                  {'tab_widget_attr': 'p10_tabs', 'tab_text': 'Compare', 'aliases': ('Comparison',)},
+                  {
+                      'tab_widget_attr': 'p10_tabs',
+                      'tab_text': 'Relationship',
+                      'aliases': ('Correlation', 'Beta', 'Relative Performance'),
+                  },
+                  {
                     'tab_widget_attr': 'p10_tabs',
                     'tab_text': 'Cheat Sheet',
                     'aliases': ('Chart Patterns', 'Pattern Cheat Sheet'),
@@ -1177,12 +1189,6 @@ class WindowLifecycleMixin:
             12: (
                 {'tab_widget_attr': 'p13_tabs', 'tab_text': 'Holdings', 'aliases': ('ETF Holdings',)},
                 {'tab_widget_attr': 'p13_tabs', 'tab_text': 'Arbitrage', 'aliases': ('ETF Arbitrage',)},
-            ),
-            21: (
-                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Overview'},
-                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Ticker Lookup', 'aliases': ('Ticker',)},
-                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Manager Lookup', 'aliases': ('Manager',)},
-                {'tab_widget_attr': 'p22_tabs', 'tab_text': 'Insider', 'aliases': ('Insiders',)},
             ),
             26: (
                 {'tab_widget_attr': 'p27_tabs', 'tab_text': 'Portfolio', 'aliases': ('Portfolio Up Down', 'Portfolio Up/Down')},
@@ -1352,6 +1358,14 @@ class WindowLifecycleMixin:
         if not hasattr(self, 'stacked_widget'):
             return None
         return self._pages.get(self.stacked_widget.currentIndex(), {}).get('btn')
+
+    def _ensure_current_navigation_button_visible(self) -> None:
+        """Scroll the top navigation so the active page button remains visible."""
+        scroll_area = getattr(self, '_nav_scroll_area', None)
+        current_button = self._current_main_nav_button()
+        if scroll_area is None or current_button is None or not current_button.isVisible():
+            return
+        scroll_area.ensureWidgetVisible(current_button, 8, 0)
 
     def _hide_tab_picker(self) -> None:
         """Collapse the top-bar picker after selection or cancellation."""
@@ -1575,10 +1589,6 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p30_fetch'):
                 self._p30_fetch()
             return
-        if current_index == 30:
-            if hasattr(self, '_p31_run_engine_cycle'):
-                self._p31_run_engine_cycle(mark=True, force=True)
-            return
         if current_index == 31:
             if hasattr(self, '_p32_run_engine_cycle'):
                 self._p32_run_engine_cycle(mark=True, force=True)
@@ -1616,6 +1626,10 @@ class WindowLifecycleMixin:
             if active_key == 'compare':
                 if hasattr(self, '_p10_refresh_compare_view'):
                     self._p10_refresh_compare_view(force=True)
+                return
+            if active_key == 'relationship':
+                if hasattr(self, '_p10_refresh_relationship'):
+                    self._p10_refresh_relationship(force=True)
                 return
             if active_key == 'multiintervals':
                 if hasattr(self, '_p10_refresh_multi_interval_views'):
@@ -1668,8 +1682,6 @@ class WindowLifecycleMixin:
                 self._p38_refresh_view()
             return
         if current_index == 17:
-            if hasattr(self, '_refresh_run_on_startup_controls'):
-                self._refresh_run_on_startup_controls()
             if hasattr(self, '_refresh_settings_log_controls'):
                 self._refresh_settings_log_controls()
             if hasattr(self, '_refresh_startup_performance_views'):
@@ -1684,10 +1696,6 @@ class WindowLifecycleMixin:
         if current_index == 20:
             if hasattr(self, '_p21_refresh_ipo_calendar'):
                 self._p21_refresh_ipo_calendar(force=True)
-            return
-        if current_index == 21:
-            if hasattr(self, '_p22_refresh_current'):
-                self._p22_refresh_current(force=True)
             return
         if current_index == 24:
             if hasattr(self, '_p25_run_backtest'):
@@ -1822,7 +1830,7 @@ class WindowLifecycleMixin:
         if coordinator is not None:
             coordinator.clear()
         cancel_all_batched(self)
-        for cleanup_name in ('_stop_recurring_scheduler', '_p31_stop', '_p32_stop', '_p36_stop'):
+        for cleanup_name in ('_stop_recurring_scheduler', '_p32_stop', '_p36_stop'):
             cleanup = getattr(self, cleanup_name, None)
             if not callable(cleanup):
                 continue

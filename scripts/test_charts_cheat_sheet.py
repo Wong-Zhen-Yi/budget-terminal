@@ -136,12 +136,14 @@ def test_cheat_sheet_filters_reflow_and_theme_offscreen() -> None:
         sheet.search_input.clear()
         sheet.family_combo.setCurrentIndex(0)
         sheet.bias_combo.setCurrentIndex(0)
-        sheet._reflow_cards(width=850)
-        assert sheet.column_count == 1
-        sheet._reflow_cards(width=1000)
-        assert sheet.column_count == 2
-        sheet._reflow_cards(width=1500)
-        assert sheet.column_count == 3
+        for width, expected_columns in ((850, 1), (1000, 2), (1500, 3)):
+            sheet.resize(width, 900)
+            sheet._reflow_cards(width=width)
+            app.processEvents()
+            assert sheet.column_count == expected_columns
+            diagram = sheet.cards["double_bottom"].diagram
+            assert diagram.hasHeightForWidth()
+            assert abs(diagram.height() - diagram.width() * 9 / 16) <= 1
 
         diagram = sheet.cards["double_bottom"].diagram
         assert not diagram.grab().isNull()
@@ -163,6 +165,7 @@ def test_charts_cheat_sheet_tab_and_refresh_isolation() -> None:
             "Main",
             "Multi Charts",
             "Compare",
+            "Relationship",
             "Cheat Sheet",
         ]
         calls: list[str] = []

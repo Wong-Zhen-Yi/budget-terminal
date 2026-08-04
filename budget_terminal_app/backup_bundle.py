@@ -144,7 +144,7 @@ def discover_backup_bundle(folder: str | Path) -> BackupBundle:
         label = {
             USER_DATA_KIND: "user data",
             CARDS_KIND: "Cards",
-            PAPER_TRADING_KIND: "Paper Trading",
+            PAPER_TRADING_KIND: "Virtual Trading",
         }[kind]
         if not matches:
             problems.append(f"Missing a valid {label} JSON file.")

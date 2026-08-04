@@ -1,8 +1,6 @@
 from __future__ import annotations
 from typing import Any
 
-from budget_terminal_app import __version__ as APP_VERSION
-from budget_terminal_app import update_service
 from budget_terminal_app.backup_bundle import (
     CARDS_KIND,
     PAPER_TRADING_KIND,
@@ -21,7 +19,6 @@ from budget_terminal_app.strategies import (
     load_custom_strategies_import,
     merge_custom_strategies_import,
 )
-from budget_terminal_app.startup_integration import get_startup_registration_status, set_run_on_startup
 from budget_terminal_app.startup_metrics import clear_startup_metrics_history, load_startup_metrics_history
 from budget_terminal_app.workers import calendar as calendar_worker
 from budget_terminal_app.workers import earnings_calendar as earnings_calendar_worker
@@ -95,8 +92,6 @@ class SettingsMixin:
         self._bind_settings_log_output(self.settings_log_output)
         self._refresh_data_health_views()
         self._refresh_settings_log_controls()
-        self._refresh_run_on_startup_controls()
-        self._refresh_settings_update_controls()
         self._refresh_startup_performance_views()
         logger.info('Settings page initialization complete.')
 
@@ -118,7 +113,7 @@ class SettingsMixin:
         return header_frame
 
     def _build_settings_preferences_box(self) -> QGroupBox:
-        """Build Settings controls for clock and Windows startup preferences."""
+        """Build Settings controls for top-bar clock preferences."""
         preferences_box = QGroupBox('Preferences')
         self.set_theme_role(preferences_box, 'panel')
         preferences_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -135,36 +130,9 @@ class SettingsMixin:
         self.settings_time_format_checkbox = QCheckBox('Use 12-hour time in the top-bar clock')
         self.settings_time_format_checkbox.setChecked(bool(getattr(self, '_time_12h', True)))
         self.settings_time_format_checkbox.toggled.connect(lambda checked: self._toggle_time_format() if bool(checked) != bool(getattr(self, '_time_12h', False)) else None)
-        self.settings_startup_checkbox = QCheckBox('Run Budget Terminal when I sign in to Windows')
-        self.settings_startup_checkbox.toggled.connect(self._on_toggle_run_on_startup)
-        self.settings_startup_hint = QLabel('Checking startup registration...')
-        self.settings_startup_hint.setWordWrap(True)
-        self.set_theme_role(self.settings_startup_hint, 'muted')
-        self.settings_update_status_label = QLabel('')
-        self.settings_update_status_label.setWordWrap(True)
-        self.set_theme_role(self.settings_update_status_label, 'status_muted')
-        self.settings_update_check_btn = QPushButton('Check for Updates')
-        self.settings_update_check_btn.setMinimumHeight(30)
-        self.set_theme_variant(self.settings_update_check_btn, 'accent')
-        self.settings_update_check_btn.clicked.connect(self._on_check_for_updates)
-        update_toolbar = self._settings_transparent_widget()
-        update_toolbar_layout = QHBoxLayout(update_toolbar)
-        update_toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        update_toolbar_layout.setSpacing(8)
-        update_toolbar_layout.addWidget(self.settings_update_status_label, 1)
-        update_toolbar_layout.addWidget(self.settings_update_check_btn)
         preferences_layout.addWidget(self._settings_section_header('Clock', 'Set the top-bar market country and display format.'))
         preferences_layout.addWidget(self.settings_clock_country_combo)
         preferences_layout.addWidget(self.settings_time_format_checkbox)
-        preferences_layout.addWidget(self._settings_separator())
-        preferences_layout.addWidget(self._settings_section_header('Windows Startup', 'Control whether the packaged app starts when you sign in.'))
-        preferences_layout.addWidget(self.settings_startup_checkbox)
-        preferences_layout.addWidget(self.settings_startup_hint)
-        preferences_layout.addWidget(self._settings_separator())
-        preferences_layout.addWidget(self._settings_section_header('Application Updates', 'Check GitHub Releases and install newer packaged Windows builds.'))
-        preferences_layout.addWidget(update_toolbar)
-        self._set_settings_update_status(self._settings_update_default_status(), 'muted', sync_global=False)
-        self._refresh_settings_update_controls()
         return preferences_box
 
     def _build_settings_privacy_box(self) -> QGroupBox:
@@ -294,21 +262,21 @@ class SettingsMixin:
         actions_layout.setSpacing(6)
         actions_layout.addWidget(self._settings_section_header(
             'Backups and Maintenance',
-            'Export or import one backup folder containing separate user-data, Cards, and Paper Trading JSON files.',
+            'Export or import one backup folder containing separate user-data, Cards, and Virtual Trading JSON files.',
         ))
         export_btn = self._settings_action_button(
-            'Export User Data, Cards and Paper Trading',
+            'Export User Data, Cards and Virtual Trading',
             'accent',
             self._on_export_backup_bundle,
         )
         import_btn = self._settings_action_button(
-            'Import User Data, Cards and Paper Trading',
+            'Import User Data, Cards and Virtual Trading',
             'accent',
             self._on_import_backup_bundle,
         )
         clear_btn = self._settings_action_button('Clear All User Data and Cards', 'danger', self._on_clear_user_data)
         reset_cache_btn = self._settings_action_button('Reset Cache', 'danger', self._on_reset_cache)
-        reset_paper_btn = self._settings_action_button('Reset Paper Trading', 'danger', self._on_reset_paper_trading)
+        reset_paper_btn = self._settings_action_button('Reset Virtual Trading', 'danger', self._on_reset_paper_trading)
         action_grid = QGridLayout()
         action_grid.setContentsMargins(0, 0, 0, 0)
         action_grid.setHorizontalSpacing(8)
@@ -776,176 +744,6 @@ class SettingsMixin:
         if hasattr(self, 'status_bar'):
             self.set_status_text(self.status_bar, text, status=str(status))
 
-    def _settings_update_default_status(self) -> str:
-        """Return the default Settings text for the packaged updater."""
-        status = update_service.packaged_update_status()
-        message = str(status.get('message') or '').strip()
-        if status.get('supported', False):
-            return f'Current version v{APP_VERSION} | Ready to check for updates.'
-        return f'Current version v{APP_VERSION} | {message}'
-
-    def _set_settings_update_status(self, text: Any, status: Any='muted', *, sync_global: bool=True) -> None:
-        """Update the application-update status label."""
-        clean_text = str(text or '').strip() or self._settings_update_default_status()
-        if hasattr(self, 'settings_update_status_label'):
-            self.set_status_text(self.settings_update_status_label, clean_text, status=str(status))
-        if sync_global:
-            self._set_settings_status(clean_text, status)
-
-    def _settings_update_thread_running(self, name: str) -> bool:
-        """Return whether one Settings updater thread is active."""
-        thread = getattr(self, name, None)
-        return bool(thread is not None and thread.isRunning())
-
-    def _settings_update_busy(self) -> bool:
-        """Return whether an update check or download is running."""
-        return (
-            self._settings_update_thread_running('_settings_update_check_thread')
-            or self._settings_update_thread_running('_settings_update_download_thread')
-        )
-
-    def _refresh_settings_update_controls(self) -> None:
-        """Keep Settings update controls aligned with current worker state."""
-        if not hasattr(self, 'settings_update_check_btn'):
-            return
-        checking = self._settings_update_thread_running('_settings_update_check_thread')
-        downloading = self._settings_update_thread_running('_settings_update_download_thread')
-        self.settings_update_check_btn.setEnabled(not checking and not downloading)
-        if downloading:
-            self.settings_update_check_btn.setText('Downloading...')
-        elif checking:
-            self.settings_update_check_btn.setText('Checking...')
-        else:
-            self.settings_update_check_btn.setText('Check for Updates')
-
-    def _on_check_for_updates(self) -> None:
-        """Check GitHub Releases for a newer packaged build."""
-        if self._settings_update_busy():
-            return
-        self._set_settings_update_status('Checking GitHub Releases for updates...', 'info')
-        worker = update_service.UpdateCheckWorker(APP_VERSION)
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.status.connect(lambda message: self._set_settings_update_status(message, 'info'))
-        worker.finished.connect(self._on_settings_update_check_finished)
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._on_settings_update_check_thread_finished)
-        self._settings_update_check_worker = worker
-        self._settings_update_check_thread = thread
-        self._refresh_settings_update_controls()
-        thread.start()
-
-    def _on_settings_update_check_thread_finished(self) -> None:
-        """Release the completed update-check thread."""
-        thread = getattr(self, '_settings_update_check_thread', None)
-        if thread is not None:
-            thread.deleteLater()
-        self._settings_update_check_thread = None
-        self._settings_update_check_worker = None
-        self._refresh_settings_update_controls()
-
-    def _on_settings_update_check_finished(self, result: dict[str, Any]) -> None:
-        """Handle a completed GitHub release update check."""
-        payload = result if isinstance(result, dict) else {}
-        message = str(payload.get('message') or 'Update check returned no details.')
-        if not payload.get('ok', False):
-            self._set_settings_update_status(message, 'negative')
-            QMessageBox.warning(self, 'Update Check Failed', message)
-            return
-        self._settings_latest_update_result = payload
-        if not payload.get('update_available', False):
-            self._set_settings_update_status(message, 'positive')
-            return
-        latest_version = str(payload.get('latest_version') or '').strip()
-        install_status = update_service.packaged_update_status()
-        if not install_status.get('supported', False):
-            detail = str(install_status.get('message') or 'Packaged update install is unavailable.')
-            self._set_settings_update_status(
-                f'Budget Terminal v{latest_version} is available. {detail}',
-                'info',
-            )
-            QMessageBox.information(
-                self,
-                'Update Available',
-                (
-                    f'Budget Terminal v{latest_version} is available.\n\n'
-                    f'{detail}\n\n'
-                    f'Release page:\n{payload.get("release_url") or update_service.RELEASES_URL}'
-                ),
-            )
-            return
-        reply = QMessageBox.question(
-            self,
-            'Update Available',
-            (
-                f'Budget Terminal v{latest_version} is available.\n\n'
-                'Download, install, and restart now?'
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            self._set_settings_update_status(f'Budget Terminal v{latest_version} is available. Update cancelled.', 'info')
-            return
-        self._start_settings_update_download(payload)
-
-    def _start_settings_update_download(self, update_result: dict[str, Any]) -> None:
-        """Download and verify the selected update asset."""
-        if self._settings_update_thread_running('_settings_update_download_thread'):
-            return
-        asset = update_result.get('asset') if isinstance(update_result, dict) else None
-        if not isinstance(asset, dict):
-            self._set_settings_update_status('Update asset is unavailable.', 'negative')
-            return
-        worker = update_service.UpdateDownloadWorker(asset, update_service.updates_dir())
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.status.connect(lambda message: self._set_settings_update_status(message, 'info'))
-        worker.finished.connect(lambda payload: self._on_settings_update_download_finished(payload, update_result))
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._on_settings_update_download_thread_finished)
-        self._settings_update_download_worker = worker
-        self._settings_update_download_thread = thread
-        self._refresh_settings_update_controls()
-        thread.start()
-
-    def _on_settings_update_download_thread_finished(self) -> None:
-        """Release the completed update-download thread."""
-        thread = getattr(self, '_settings_update_download_thread', None)
-        if thread is not None:
-            thread.deleteLater()
-        self._settings_update_download_thread = None
-        self._settings_update_download_worker = None
-        self._refresh_settings_update_controls()
-
-    def _on_settings_update_download_finished(self, result: dict[str, Any], update_result: dict[str, Any]) -> None:
-        """Install a verified packaged update by launching the detached updater."""
-        payload = result if isinstance(result, dict) else {}
-        if not payload.get('ok', False):
-            message = str(payload.get('message') or 'Update download failed.')
-            self._set_settings_update_status(message, 'negative')
-            QMessageBox.warning(self, 'Update Download Failed', message)
-            return
-        latest_version = str(update_result.get('latest_version') or '').strip()
-        try:
-            launch_result = update_service.launch_packaged_update(
-                payload.get('path'),
-                latest_version=latest_version,
-                release_url=str(update_result.get('release_url') or ''),
-            )
-        except Exception as exc:
-            message = f'Update downloaded but could not be installed: {exc}'
-            self._set_settings_update_status(message, 'negative')
-            QMessageBox.critical(self, 'Update Install Failed', message)
-            return
-        self._settings_update_launch_result = launch_result
-        self._set_settings_update_status('Update verified. Closing Budget Terminal to install and restart...', 'positive')
-        QTimer.singleShot(250, self.close)
-
     def _refresh_settings_log_controls(self) -> None:
         """Keep Settings log buttons aligned with the current capture state."""
         if hasattr(self, 'settings_log_pause_btn'):
@@ -1128,12 +926,6 @@ class SettingsMixin:
                 self.settings_data_health_summary_label.text(),
                 status=self.settings_data_health_summary_label.property('bt_status') or 'muted',
             )
-        if hasattr(self, 'settings_update_status_label'):
-            self.set_status_text(
-                self.settings_update_status_label,
-                self.settings_update_status_label.text(),
-                status=self.settings_update_status_label.property('bt_status') or 'muted',
-            )
         for line in getattr(self, 'settings_separator_lines', []):
             line.setStyleSheet(f'background: {self.theme_color("panel_border")}; max-height: 1px; border: 0;')
         self._style_settings_log_output()
@@ -1165,53 +957,6 @@ class SettingsMixin:
             self._dashboard_latest_request_id = next_request_id
         if hasattr(self, 'dashboard_load_btn'):
             self.dashboard_load_btn.setEnabled(True)
-
-    def _refresh_run_on_startup_controls(self, status: Any=None) -> Any:
-        """Refresh the Settings-page startup toggle from Windows registry state."""
-        if not hasattr(self, 'settings_startup_checkbox'):
-            return None
-        if status is None:
-            try:
-                status = get_startup_registration_status()
-            except Exception as exc:
-                logger.exception('Unable to read run-on-startup state.')
-                status = {
-                    'supported': False,
-                    'enabled': False,
-                    'message': f'Run on startup status unavailable: {exc}',
-                    'registered_command': '',
-                    'registered_for_other_build': False,
-                }
-        self._settings_startup_status = status
-        self.settings_startup_checkbox.blockSignals(True)
-        self.settings_startup_checkbox.setChecked(bool(status.get('enabled', False)))
-        self.settings_startup_checkbox.setEnabled(bool(status.get('supported', False)))
-        self.settings_startup_checkbox.blockSignals(False)
-        if hasattr(self, 'settings_startup_hint'):
-            message = str(status.get('message', '') or '')
-            registered_command = str(status.get('registered_command', '') or '').strip()
-            if bool(status.get('registered_for_other_build', False)) and registered_command:
-                message = f'{message}\nCurrent startup command: {registered_command}'
-            self.settings_startup_hint.setText(message)
-        return status
-
-    def _on_toggle_run_on_startup(self, checked: bool) -> None:
-        """Enable or disable packaged Windows startup registration."""
-        action = 'enabled' if checked else 'disabled'
-        try:
-            status = set_run_on_startup(bool(checked))
-        except Exception as exc:
-            logger.exception('Run on startup update failed.')
-            self._refresh_run_on_startup_controls()
-            self._set_settings_status(f'Run on startup update failed: {exc}', 'negative')
-            QMessageBox.critical(
-                self,
-                'Run on Startup Failed',
-                f'Unable to update Windows startup registration.\n\n{exc}',
-            )
-            return
-        self._refresh_run_on_startup_controls(status)
-        self._set_settings_status(f'Run on startup {action}.', 'positive')
 
     def _sync_chart_slot_inputs(self) -> None:
         """Keep dashboard chart controls aligned with the saved workstation state."""
@@ -1582,19 +1327,19 @@ class SettingsMixin:
             f'Cards: {bundle.paths[CARDS_KIND].name}',
             f'  Exported at: {bundle.metadata[CARDS_KIND].get("exported_at") or "-"}',
             f'  Cards: {len(cards)} ({equal_count} equal weight, {custom_count} custom weight)',
-            f'Paper Trading: {bundle.paths[PAPER_TRADING_KIND].name}',
+            f'Virtual Trading: {bundle.paths[PAPER_TRADING_KIND].name}',
             f'  Exported at: {bundle.metadata[PAPER_TRADING_KIND].get("exported_at") or "-"}',
             f'  Accounts: {account_count} | Orders: {order_count}',
             f'Unrecognized JSON files ignored: {ignored_text}',
             '',
-            'User data and the Paper ledger will be replaced with rollback backups.',
+            'User data and the Virtual Trading ledger will be replaced with rollback backups.',
             'Cards merge by ID; unrelated existing cards remain unchanged.',
         ])
 
     def _settings_confirm_backup_bundle_import(self, bundle: Any) -> bool:
         """Confirm the complete three-file import after every file validates."""
         prompt = QMessageBox(self)
-        prompt.setWindowTitle('Import User Data, Cards and Paper Trading')
+        prompt.setWindowTitle('Import User Data, Cards and Virtual Trading')
         prompt.setIcon(QMessageBox.Icon.Warning)
         prompt.setText('Import all data from this backup folder?')
         prompt.setInformativeText(self._settings_backup_bundle_summary(bundle))
@@ -1604,7 +1349,7 @@ class SettingsMixin:
         return prompt.clickedButton() is import_btn
 
     def _on_export_backup_bundle(self) -> None:
-        """Export user data, Cards, and Paper Trading into one timestamped folder."""
+        """Export user data, Cards, and Virtual Trading into one timestamped folder."""
         parent = self._settings_choose_backup_directory('Select Backup Destination')
         if not parent:
             self._set_settings_status('Backup-folder export cancelled.')
@@ -1619,14 +1364,14 @@ class SettingsMixin:
             QMessageBox.critical(
                 self,
                 'Export Failed',
-                f'Unable to export user data, Cards, and Paper Trading.\n\n{exc}',
+                f'Unable to export user data, Cards, and Virtual Trading.\n\n{exc}',
             )
             return
         self._set_settings_status(f'Backup folder exported to {bundle.folder}', 'positive')
         QMessageBox.information(
             self,
             'Export Complete',
-            'User data, Cards, and Paper Trading were exported successfully.\n\n'
+            'User data, Cards, and Virtual Trading were exported successfully.\n\n'
             f'Folder: {bundle.folder}',
         )
 
@@ -1644,10 +1389,6 @@ class SettingsMixin:
                 self._p29_performance_cache.clear()
             if hasattr(self, '_p29_refresh_cards'):
                 self._p29_refresh_cards(request_data=False)
-        if self._page_initialized(page_attr='page31'):
-            self._p31_store = paper_store_factory()
-            self._p31_engine.store = self._p31_store
-            self._p31_refresh_accounts()
         if self._page_initialized(page_attr='page32'):
             self._p32_store = paper_store_factory()
             self._p32_engine.store = self._p32_store
@@ -1655,13 +1396,12 @@ class SettingsMixin:
 
     def _on_import_backup_bundle(self) -> None:
         """Validate and import a complete three-file backup folder."""
-        paper_busy = self._page_initialized(page_attr='page31') and getattr(self, '_p31_task_inflight', False)
         virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if paper_busy or virtual_busy:
+        if virtual_busy:
             QMessageBox.warning(
                 self,
-                'Paper Trading Busy',
-                'Wait for the current Paper quote refresh to finish, then import again.',
+                'Virtual Trading Busy',
+                'Wait for the current Virtual quote refresh to finish, then import again.',
             )
             return
         folder = self._settings_choose_backup_directory('Select Backup Folder to Import')
@@ -1716,12 +1456,12 @@ class SettingsMixin:
         QMessageBox.information(
             self,
             'Import Complete',
-            'User data, Cards, and Paper Trading were imported successfully.\n\n'
+            'User data, Cards, and Virtual Trading were imported successfully.\n\n'
             f'Folder: {bundle.folder}\n'
             f'Cards: {added} added, {updated} updated\n'
             f'Ignored JSON files: {ignored}\n'
             f'User-data rollback: {result.user_data_rollback}\n'
-            f'Paper Trading rollback: {result.paper_trading_rollback}',
+            f'Virtual Trading rollback: {result.paper_trading_rollback}',
         )
 
     def _settings_default_user_data_path(self) -> str:
@@ -1733,7 +1473,7 @@ class SettingsMixin:
         return str(Path.home().joinpath('budget_terminal_cards.json'))
 
     def _settings_default_paper_path(self) -> str:
-        """Return the default JSON path used for paper-trading backups."""
+        """Return the legacy-compatible JSON path used for Virtual Trading backups."""
         return str(Path.home().joinpath('budget_terminal_paper_trading.json'))
 
     def _settings_choose_import_file(self) -> str | None:
@@ -1904,117 +1644,109 @@ class SettingsMixin:
         QMessageBox.information(self, 'Import Complete', summary)
 
     def _on_export_paper_trading(self) -> None:
-        """Export the isolated paper ledger as a versioned JSON document."""
+        """Export the Virtual Trading ledger as a versioned JSON document."""
         path, _ = QFileDialog.getSaveFileName(
             self,
-            'Export Paper Trading',
+            'Export Virtual Trading',
             self._settings_default_paper_path(),
             'JSON files (*.json)',
         )
         export_path = str(path or '').strip()
         if not export_path:
-            self._set_settings_status('Paper-trading export cancelled.')
+            self._set_settings_status('Virtual Trading export cancelled.')
             return
         if not export_path.lower().endswith('.json'):
             export_path = f'{export_path}.json'
         try:
             PaperTradingStore().export_backup(export_path)
         except Exception as exc:
-            self._set_settings_status(f'Paper-trading export failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'Export Failed', f'Unable to export paper trading.\n\n{exc}')
+            self._set_settings_status(f'Virtual Trading export failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Export Failed', f'Unable to export Virtual Trading.\n\n{exc}')
             return
-        self._set_settings_status(f'Paper trading exported to {export_path}', 'positive')
-        QMessageBox.information(self, 'Export Complete', f'Paper trading exported successfully.\n\nFile: {export_path}')
+        self._set_settings_status(f'Virtual Trading exported to {export_path}', 'positive')
+        QMessageBox.information(self, 'Export Complete', f'Virtual Trading exported successfully.\n\nFile: {export_path}')
 
     def _on_import_paper_trading(self) -> None:
-        """Replace the isolated paper ledger from a validated JSON backup."""
-        paper_busy = self._page_initialized(page_attr='page31') and getattr(self, '_p31_task_inflight', False)
+        """Replace the Virtual Trading ledger from a validated JSON backup."""
         virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if paper_busy or virtual_busy:
-            QMessageBox.warning(self, 'Paper Trading Busy', 'Wait for the current Paper quote refresh to finish, then import again.')
+        if virtual_busy:
+            QMessageBox.warning(self, 'Virtual Trading Busy', 'Wait for the current Virtual quote refresh to finish, then import again.')
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            'Import Paper Trading',
+            'Import Virtual Trading',
             self._settings_default_paper_path(),
             'JSON files (*.json)',
         )
         import_path = str(path or '').strip()
         if not import_path:
-            self._set_settings_status('Paper-trading import cancelled.')
+            self._set_settings_status('Virtual Trading import cancelled.')
             return
         store = PaperTradingStore()
         try:
             payload = store.load_backup(import_path)
         except Exception as exc:
-            self._set_settings_status(f'Paper-trading import failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'Import Failed', f'Unable to read the selected paper backup.\n\n{exc}')
+            self._set_settings_status(f'Virtual Trading import failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Import Failed', f'Unable to read the selected Virtual Trading backup.\n\n{exc}')
             return
         account_count = len(payload.get('tables', {}).get('accounts', []))
         order_count = len(payload.get('tables', {}).get('orders', []))
         reply = QMessageBox.question(
             self,
-            'Import Paper Trading',
+            'Import Virtual Trading',
             (
-                f'This will replace the complete current Paper ledger with {account_count} account(s) '
+                f'This will replace the complete current Virtual Trading ledger with {account_count} account(s) '
                 f'and {order_count} order(s). A rollback database will be created. Continue?'
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            self._set_settings_status('Paper-trading import cancelled.')
+            self._set_settings_status('Virtual Trading import cancelled.')
             return
         try:
             rollback = store.import_backup(payload)
-            if self._page_initialized(page_attr='page31'):
-                self._p31_store = PaperTradingStore()
-                self._p31_engine.store = self._p31_store
-                self._p31_refresh_accounts()
             if self._page_initialized(page_attr='page32'):
                 self._p32_store = PaperTradingStore()
                 self._p32_engine.store = self._p32_store
                 self._p32_refresh_accounts()
         except Exception as exc:
-            self._set_settings_status(f'Paper-trading import failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'Import Failed', f'Unable to import paper trading.\n\n{exc}')
+            self._set_settings_status(f'Virtual Trading import failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Import Failed', f'Unable to import Virtual Trading.\n\n{exc}')
             return
-        self._set_settings_status('Paper trading imported successfully.', 'positive')
+        self._set_settings_status('Virtual Trading imported successfully.', 'positive')
         QMessageBox.information(
             self,
             'Import Complete',
-            f'Paper trading imported successfully.\n\nRollback database: {rollback}',
+            f'Virtual Trading imported successfully.\n\nRollback database: {rollback}',
         )
 
     def _on_reset_paper_trading(self) -> None:
-        """Clear all paper accounts after creating a rollback database."""
-        paper_busy = self._page_initialized(page_attr='page31') and getattr(self, '_p31_task_inflight', False)
+        """Clear all Virtual Trading accounts after creating a rollback database."""
         virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if paper_busy or virtual_busy:
-            QMessageBox.warning(self, 'Paper Trading Busy', 'Wait for the current Paper quote refresh to finish, then reset again.')
+        if virtual_busy:
+            QMessageBox.warning(self, 'Virtual Trading Busy', 'Wait for the current Virtual quote refresh to finish, then reset again.')
             return
         reply = QMessageBox.question(
             self,
-            'Reset Paper Trading',
-            'This will remove every paper account, order, fill, position, journal entry, and performance snapshot. A rollback database will be created. Continue?',
+            'Reset Virtual Trading',
+            'This will remove every Virtual Trading account, order, fill, position, journal entry, and performance snapshot. A rollback database will be created. Continue?',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            self._set_settings_status('Paper-trading reset cancelled.')
+            self._set_settings_status('Virtual Trading reset cancelled.')
             return
         try:
             rollback = PaperTradingStore().reset()
-            if self._page_initialized(page_attr='page31'):
-                self._p31_refresh_accounts()
             if self._page_initialized(page_attr='page32'):
                 self._p32_refresh_accounts()
         except Exception as exc:
-            self._set_settings_status(f'Paper-trading reset failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'Reset Failed', f'Unable to reset paper trading.\n\n{exc}')
+            self._set_settings_status(f'Virtual Trading reset failed: {exc}', 'negative')
+            QMessageBox.critical(self, 'Reset Failed', f'Unable to reset Virtual Trading.\n\n{exc}')
             return
-        self._set_settings_status('Paper trading reset complete.', 'positive')
-        QMessageBox.information(self, 'Reset Complete', f'Paper trading was reset.\n\nRollback database: {rollback}')
+        self._set_settings_status('Virtual Trading reset complete.', 'positive')
+        QMessageBox.information(self, 'Reset Complete', f'Virtual Trading was reset.\n\nRollback database: {rollback}')
 
     def _on_import_user_data(self) -> None:
         """Import user data from a single JSON backup file."""
@@ -2052,7 +1784,7 @@ class SettingsMixin:
 
     def _on_clear_user_data(self) -> None:
         """Clear persisted user data and custom cards after confirmation."""
-        reply = QMessageBox.question(self, 'Clear All User Data and Cards', 'This will remove saved portfolio, tracker, personal finance, options data, and all custom cards. Dashboard chart slots will be kept. The separate Paper ledger will not be changed. Continue?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        reply = QMessageBox.question(self, 'Clear All User Data and Cards', 'This will remove saved portfolio, tracker, personal finance, options data, and all custom cards. Dashboard chart slots will be kept. The separate Virtual Trading ledger will not be changed. Continue?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             self._set_settings_status('Clear cancelled.')
             return

@@ -4,6 +4,7 @@ from typing import Any
 
 from ..constants import SECTOR_DATA
 from ..dependencies import *
+from ..services.sec_edgar import fetch_company_bundle, merge_sec_frames
 from ..services.valuation import (
     DEFAULT_VALUATION_ASSUMPTIONS as DEFAULT_VALUATION_ASSUMPTIONS,
     calculate_fair_value_details as calculate_fair_value_details,
@@ -107,13 +108,99 @@ def _latest_statement_value(frames: tuple[Any, ...], aliases: tuple[str, ...], *
         values = _numeric_statement_values(frame, aliases)
         if values is None or not len(values):
             continue
-        if flow and frame_index == 0 and len(values) >= 4:
-            return _safe_float(values.iloc[:4].sum())
-        return _safe_float(values.iloc[0])
+        ordered = []
+        for column, value in values.items():
+            try:
+                sort_key = (1, pd.Timestamp(column).normalize())
+            except (TypeError, ValueError):
+                sort_key = (0, str(column))
+            ordered.append((sort_key, value))
+        ordered.sort(key=lambda item: item[0], reverse=True)
+        if flow and frame_index == 0 and len(ordered) >= 4:
+            return _safe_float(sum(value for _, value in ordered[:4]))
+        return _safe_float(ordered[0][1])
     return None
 
 
-def _historical_series(frame: Any, aliases: tuple[str, ...], *, invert_capex: bool = False) -> list[tuple[str, float]]:
+def _latest_complete_quarter_sum(frame: Any, aliases: tuple[str, ...]) -> float | None:
+    """Sum the latest four direct/derived quarters only when they are consecutive."""
+    values = _numeric_statement_values(frame, aliases)
+    if values is None or len(values) < 4:
+        return None
+    dated = []
+    for column, value in values.items():
+        try:
+            dated.append((pd.Timestamp(column).normalize(), float(value)))
+        except (TypeError, ValueError):
+            continue
+    dated.sort(key=lambda item: item[0], reverse=True)
+    latest = dated[:4]
+    if len(latest) != 4:
+        return None
+    gaps = [(latest[index][0] - latest[index + 1][0]).days for index in range(3)]
+    if any(gap < 50 or gap > 140 for gap in gaps):
+        return None
+    return _safe_float(sum(value for _, value in latest))
+
+
+def _reported_flow_value(quarterly: Any, annual: Any, aliases: tuple[str, ...]) -> float | None:
+    """Resolve a reported flow as complete-quarter TTM, then latest annual."""
+    ttm_value = _latest_complete_quarter_sum(quarterly, aliases)
+    return ttm_value if ttm_value is not None else _latest_statement_value((annual,), aliases)
+
+
+def _selected_sec_provenance(sec_bundle: dict[str, Any], row: str, *, flow: bool) -> dict[str, Any]:
+    """Describe the SEC facts actually eligible for one valuation input."""
+    provenance = sec_bundle.get('provenance') if isinstance(sec_bundle.get('provenance'), dict) else {}
+    periods = provenance.get(row) if isinstance(provenance.get(row), dict) else {}
+    quarterly = periods.get('quarterly') if isinstance(periods.get('quarterly'), dict) else {}
+    annual = periods.get('annual') if isinstance(periods.get('annual'), dict) else {}
+    if flow and len(quarterly) >= 4:
+        dated = []
+        for period, detail in quarterly.items():
+            try:
+                dated.append((pd.Timestamp(period).normalize(), detail))
+            except (TypeError, ValueError):
+                continue
+        dated.sort(key=lambda item: item[0], reverse=True)
+        latest = dated[:4]
+        gaps = [(latest[index][0] - latest[index + 1][0]).days for index in range(3)] if len(latest) == 4 else []
+        if len(latest) == 4 and all(50 <= gap <= 140 for gap in gaps):
+            return {
+                'source': 'SEC EDGAR',
+                'basis': 'TTM from four complete quarters',
+                'period': f'{latest[-1][0].date()} to {latest[0][0].date()}',
+                'facts': [dict(detail) for _, detail in reversed(latest) if isinstance(detail, dict)],
+            }
+    if flow and annual:
+        period = max(annual)
+        detail = annual.get(period)
+        return {
+            'source': 'SEC EDGAR',
+            'basis': 'Latest annual filing',
+            'period': period,
+            'facts': [dict(detail)] if isinstance(detail, dict) else [],
+        }
+    if not flow:
+        instants = {**annual, **quarterly}
+        if instants:
+            period = max(instants)
+            detail = instants.get(period)
+            return {
+                'source': 'SEC EDGAR',
+                'basis': 'Latest reported instant',
+                'period': period,
+                'facts': [dict(detail)] if isinstance(detail, dict) else [],
+            }
+    return {
+        'source': 'yfinance',
+        'basis': 'Yahoo metadata or statement fallback',
+        'period': '',
+        'facts': [],
+    }
+
+
+def _historical_series(frame: Any, aliases: tuple[str, ...]) -> list[tuple[str, float]]:
     values = _numeric_statement_values(frame, aliases)
     if values is None:
         return []
@@ -125,7 +212,7 @@ def _historical_series(frame: Any, aliases: tuple[str, ...], *, invert_capex: bo
         label = str(column)[:4] if str(column) else ''
         if not label:
             continue
-        points.append((label, -numeric if invert_capex else numeric))
+        points.append((label, numeric))
     points.reverse()
     return points[-5:]
 
@@ -136,6 +223,11 @@ def _info_value(info: dict[str, Any], *keys: str) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def _prefer_number(primary: float | None, fallback: float | None) -> float | None:
+    """Preserve valid zero values while applying source precedence."""
+    return primary if primary is not None else fallback
 
 
 def _first_text(info: dict[str, Any], *keys: str, fallback: str = '') -> str:
@@ -196,26 +288,66 @@ def _load_info(ticker: str, ticker_obj: Any) -> dict[str, Any]:
     return info
 
 
-def _extract_metrics(ticker: str, info: dict[str, Any], financials: Any, cashflow: Any, balance_sheet: Any, quarterly_financials: Any, quarterly_cashflow: Any, quarterly_balance_sheet: Any, price_history: Any) -> dict[str, Any]:
+def _extract_metrics(
+    ticker: str,
+    info: dict[str, Any],
+    financials: Any,
+    cashflow: Any,
+    balance_sheet: Any,
+    quarterly_financials: Any,
+    quarterly_cashflow: Any,
+    quarterly_balance_sheet: Any,
+    price_history: Any,
+    *,
+    prefer_statements: bool = False,
+) -> dict[str, Any]:
     price = _info_value(info, 'currentPrice', 'regularMarketPrice', 'previousClose')
     if price is None and isinstance(price_history, pd.DataFrame) and not price_history.empty and 'Close' in price_history.columns:
         price = _safe_float(price_history['Close'].dropna().iloc[-1])
     market_cap = _info_value(info, 'marketCap')
-    revenue = _info_value(info, 'totalRevenue') or _latest_statement_value((quarterly_financials, financials), ('total revenue', 'revenue'), flow=True)
-    net_income = _info_value(info, 'netIncomeToCommon', 'netIncome') or _latest_statement_value((quarterly_financials, financials), ('net income', 'net income common stockholders'), flow=True)
+    reported_revenue = _reported_flow_value(quarterly_financials, financials, ('total revenue', 'revenue'))
+    reported_net_income = _reported_flow_value(
+        quarterly_financials,
+        financials,
+        ('net income', 'net income common stockholders'),
+    )
+    info_revenue = _info_value(info, 'totalRevenue')
+    info_net_income = _info_value(info, 'netIncomeToCommon', 'netIncome')
+    revenue = _prefer_number(reported_revenue, info_revenue) if prefer_statements else _prefer_number(info_revenue, reported_revenue)
+    net_income = _prefer_number(reported_net_income, info_net_income) if prefer_statements else _prefer_number(info_net_income, reported_net_income)
     ebitda = _info_value(info, 'ebitda') or _latest_statement_value((quarterly_financials, financials), ('ebitda', 'normalized ebitda'), flow=True)
-    operating_cash_flow = _info_value(info, 'operatingCashflow') or _latest_statement_value((quarterly_cashflow, cashflow), ('operating cash flow', 'total cash from operating activities'), flow=True)
-    capex = _latest_statement_value((quarterly_cashflow, cashflow), ('capital expenditure', 'capital expenditures'), flow=True)
-    free_cash_flow = _info_value(info, 'freeCashflow')
+    reported_operating_cash_flow = _reported_flow_value(
+        quarterly_cashflow,
+        cashflow,
+        ('operating cash flow', 'total cash from operating activities'),
+    )
+    info_operating_cash_flow = _info_value(info, 'operatingCashflow')
+    operating_cash_flow = (
+        _prefer_number(reported_operating_cash_flow, info_operating_cash_flow)
+        if prefer_statements
+        else _prefer_number(info_operating_cash_flow, reported_operating_cash_flow)
+    )
+    capex = _reported_flow_value(quarterly_cashflow, cashflow, ('capital expenditure', 'capital expenditures'))
+    reported_fcf = _reported_flow_value(quarterly_cashflow, cashflow, ('free cash flow',))
+    info_fcf = _info_value(info, 'freeCashflow')
+    free_cash_flow = _prefer_number(reported_fcf, info_fcf) if prefer_statements else _prefer_number(info_fcf, reported_fcf)
     if free_cash_flow is None and operating_cash_flow is not None and capex is not None:
-        free_cash_flow = operating_cash_flow + capex if capex < 0 else operating_cash_flow - capex
-    shares = _info_value(info, 'sharesOutstanding', 'impliedSharesOutstanding') or _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('ordinary shares number', 'share issued', 'common stock shares outstanding'))
-    eps = _info_value(info, 'trailingEps', 'currentEps')
+        free_cash_flow = operating_cash_flow - abs(capex)
+    reported_shares = _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('ordinary shares number', 'share issued', 'common stock shares outstanding'))
+    info_shares = _info_value(info, 'sharesOutstanding', 'impliedSharesOutstanding')
+    shares = _prefer_number(reported_shares, info_shares) if prefer_statements else _prefer_number(info_shares, reported_shares)
+    reported_eps = _reported_flow_value(quarterly_financials, financials, ('diluted eps', 'diluted earnings per share'))
+    info_eps = _info_value(info, 'trailingEps', 'currentEps')
+    eps = _prefer_number(reported_eps, info_eps) if prefer_statements else _prefer_number(info_eps, reported_eps)
     if eps is None and net_income is not None and shares:
         eps = net_income / shares
     fcf_per_share = free_cash_flow / shares if free_cash_flow is not None and shares else None
-    cash = _info_value(info, 'totalCash') or _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('cash and cash equivalents', 'cash cash equivalents and short term investments', 'cash equivalents and short term investments'))
-    debt = _info_value(info, 'totalDebt') or _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('total debt', 'long term debt and capital lease obligation', 'long term debt'))
+    reported_cash = _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('cash and cash equivalents', 'cash cash equivalents and short term investments', 'cash equivalents and short term investments'))
+    reported_debt = _latest_statement_value((quarterly_balance_sheet, balance_sheet), ('total debt', 'long term debt and capital lease obligation', 'long term debt'))
+    info_cash = _info_value(info, 'totalCash')
+    info_debt = _info_value(info, 'totalDebt')
+    cash = _prefer_number(reported_cash, info_cash) if prefer_statements else _prefer_number(info_cash, reported_cash)
+    debt = _prefer_number(reported_debt, info_debt) if prefer_statements else _prefer_number(info_debt, reported_debt)
     enterprise_value = _info_value(info, 'enterpriseValue')
     if enterprise_value is None and market_cap is not None:
         enterprise_value = market_cap + (debt or 0.0) - (cash or 0.0)
@@ -268,7 +400,7 @@ def _build_trends(financials: Any, cashflow: Any, metrics: dict[str, Any]) -> di
     revenue_points = _historical_series(financials, ('total revenue', 'revenue'))
     net_income_points = _historical_series(financials, ('net income', 'net income common stockholders'))
     operating_cash_points = _historical_series(cashflow, ('operating cash flow', 'total cash from operating activities'))
-    capex_points = _historical_series(cashflow, ('capital expenditure', 'capital expenditures'), invert_capex=True)
+    capex_points = _historical_series(cashflow, ('capital expenditure', 'capital expenditures'))
     diluted_share_points = _historical_series(
         financials,
         ('diluted average shares', 'diluted average shares number', 'diluted weighted average shares'),
@@ -277,7 +409,7 @@ def _build_trends(financials: Any, cashflow: Any, metrics: dict[str, Any]) -> di
     for label, value in operating_cash_points:
         fcf_map[label] = fcf_map.get(label, 0.0) + value
     for label, value in capex_points:
-        fcf_map[label] = fcf_map.get(label, 0.0) - value
+        fcf_map[label] = fcf_map.get(label, 0.0) - abs(value)
     labels = [label for label, _ in revenue_points] or [label for label, _ in net_income_points]
     shares = metrics.get('shares') or 0.0
     diluted_shares = {label: value for label, value in diluted_share_points if value > 0}
@@ -512,7 +644,19 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
     quarterly_financials = _optional_value('quarterly financials', symbol, lambda: ticker_obj.quarterly_financials)
     quarterly_cashflow = _optional_value('quarterly cashflow', symbol, lambda: ticker_obj.quarterly_cashflow)
     quarterly_balance_sheet = _optional_value('quarterly balance sheet', symbol, lambda: ticker_obj.quarterly_balance_sheet)
-    metrics = _extract_metrics(
+    try:
+        sec_bundle = fetch_company_bundle(symbol)
+    except Exception as exc:
+        logger.info('Valuation SEC fetch failed for %s: %s', symbol, exc)
+        sec_bundle = {
+            'available': False,
+            'statements_available': False,
+            'ticker': symbol,
+            'filings': [],
+            'provenance': {},
+            'warnings': [f'SEC: {exc}'],
+        }
+    yahoo_metrics = _extract_metrics(
         symbol,
         info,
         financials,
@@ -523,6 +667,53 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
         quarterly_balance_sheet,
         price_history,
     )
+    sec_backed = bool(sec_bundle.get('statements_available'))
+    metrics = yahoo_metrics
+    if sec_backed:
+        fallback_info = dict(info)
+        for info_key, metric_key in (
+            ('totalRevenue', 'revenue'),
+            ('netIncome', 'net_income'),
+            ('ebitda', 'ebitda'),
+            ('operatingCashflow', 'operating_cash_flow'),
+            ('freeCashflow', 'free_cash_flow'),
+            ('sharesOutstanding', 'shares'),
+            ('totalCash', 'cash'),
+            ('totalDebt', 'debt'),
+            ('trailingEps', 'eps'),
+        ):
+            if fallback_info.get(info_key) is None and yahoo_metrics.get(metric_key) is not None:
+                fallback_info[info_key] = yahoo_metrics[metric_key]
+        sec_frames = sec_bundle.get('frames') if isinstance(sec_bundle.get('frames'), dict) else {}
+        metrics = _extract_metrics(
+            symbol,
+            fallback_info,
+            sec_frames.get('financials'),
+            sec_frames.get('cashflow'),
+            sec_frames.get('balance_sheet'),
+            sec_frames.get('quarterly_financials'),
+            sec_frames.get('quarterly_cashflow'),
+            sec_frames.get('quarterly_balance_sheet'),
+            price_history,
+            prefer_statements=True,
+        )
+        merged = merge_sec_frames(
+            {
+                'financials': financials,
+                'cashflow': cashflow,
+                'balance_sheet': balance_sheet,
+                'quarterly_financials': quarterly_financials,
+                'quarterly_cashflow': quarterly_cashflow,
+                'quarterly_balance_sheet': quarterly_balance_sheet,
+            },
+            sec_bundle,
+        )
+        financials = merged.get('financials')
+        cashflow = merged.get('cashflow')
+        balance_sheet = merged.get('balance_sheet')
+        quarterly_financials = merged.get('quarterly_financials')
+        quarterly_cashflow = merged.get('quarterly_cashflow')
+        quarterly_balance_sheet = merged.get('quarterly_balance_sheet')
     if metrics.get('price') is None:
         raise ValueError(f"No quote data found for '{symbol}'. Check the ticker symbol.")
     peer_rows, peer_warnings = _build_peer_rows(symbol, info, normalized_custom_peers) if include_peers else ([], [])
@@ -532,6 +723,25 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
         key: detail.get('value')
         for key, detail in suggestions.get('fields', {}).items()
         if isinstance(detail, dict) and detail.get('value') is not None
+    }
+    sec_payload = {key: value for key, value in sec_bundle.items() if key != 'frames'}
+    valuation_provenance = {
+        metric: _selected_sec_provenance(sec_bundle, row, flow=flow) if sec_backed else {
+            'source': 'yfinance',
+            'basis': 'Yahoo metadata or statement fallback',
+            'period': '',
+            'facts': [],
+        }
+        for metric, row, flow in (
+            ('Revenue', 'Total Revenue', True),
+            ('Net income', 'Net Income', True),
+            ('Operating cash flow', 'Operating Cash Flow', True),
+            ('Free cash flow', 'Free Cash Flow', True),
+            ('Cash', 'Cash Cash Equivalents And Short Term Investments', False),
+            ('Debt', 'Total Debt', False),
+            ('Shares', 'Common Stock Shares Outstanding', False),
+            ('Diluted EPS', 'Diluted EPS', True),
+        )
     }
     return {
         'ticker': symbol,
@@ -550,12 +760,24 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
         'suggested_assumptions': suggested_assumptions,
         'peer_rows': peer_rows,
         'peer_warnings': peer_warnings,
+        'sec': sec_payload,
+        'statement_sources': {
+            'primary': 'SEC EDGAR' if sec_backed else 'yfinance',
+            'fallback': 'yfinance',
+        },
+        'valuation_provenance': valuation_provenance,
+        'av_used': False,
         'fetched_at': datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
         'sources': {
             'quote': 'yfinance quote/history',
-            'statements': 'yfinance financial statements',
+            'statements': 'SEC EDGAR XBRL with yfinance fallback' if sec_backed else 'yfinance financial statements',
             'computed': 'Computed from quote, statements, and assumptions',
-            'suggestions': 'Consecutive annual statements and quote metadata; required return is a transparent heuristic',
+            'suggestions': (
+                'SEC-backed consecutive annual statements and Yahoo quote metadata; '
+                'required return is a transparent heuristic'
+                if sec_backed
+                else 'Consecutive annual statements and quote metadata; required return is a transparent heuristic'
+            ),
         },
     }
 

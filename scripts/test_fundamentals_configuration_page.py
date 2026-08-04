@@ -40,7 +40,9 @@ def _build_window():
         window._startup_session_restored_tabs.add("fundamentals")
         window._ensure_page_initialized(8)
         window._p2_save_session_snapshot = lambda **_: None
-        window.resize(1440, 820)
+        size_text = str(os.environ.get("BT_FUNDAMENTALS_SIZE", "1440x820") or "1440x820").lower()
+        width_text, _, height_text = size_text.partition("x")
+        window.resize(int(width_text or 1440), int(height_text or 820))
         app.processEvents()
     except Exception:
         fundamentals_mixin.save_fundamentals_page_settings = original_save
@@ -60,8 +62,12 @@ def _statement_frame(rows: list[str], columns: list[str], start: float) -> objec
 
 
 def _payload(ticker: str = "NVDA") -> dict[str, object]:
-    annual_columns = ["2023-12-31", "2024-12-31"]
-    quarterly_columns = ["2024-09-30", "2024-12-31"]
+    annual_columns = [f"{year}-12-31" for year in range(2015, 2025)]
+    quarterly_columns = [
+        "2022-03-31", "2022-06-30", "2022-09-30", "2022-12-31",
+        "2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31",
+        "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+    ]
     return {
         "ticker": ticker,
         "info": {
@@ -70,6 +76,10 @@ def _payload(ticker: str = "NVDA") -> dict[str, object]:
             "industry": "Semiconductors",
             "exchange": "NMS",
             "currency": "USD",
+            "totalRevenue": 1_000.0,
+            "freeCashflow": 100.0,
+            "totalCash": 500.0,
+            "totalDebt": 100.0,
         },
         "financials": _statement_frame(["Total Revenue", "Net Income"], annual_columns, 100.0),
         "quarterly_financials": _statement_frame(
@@ -85,6 +95,46 @@ def _payload(ticker: str = "NVDA") -> dict[str, object]:
         "quarterly_balance_sheet": _statement_frame(["Total Assets"], quarterly_columns, 200.0),
         "earnings_dates": pd.DataFrame(),
         "av_used": False,
+        "statement_sources": {"primary": "SEC EDGAR", "fallback": "yfinance"},
+        "sec": {
+            "available": True,
+            "statements_available": True,
+            "ticker": ticker,
+            "cik": "0001045810",
+            "freshness": "fresh",
+            "statement_freshness": "cached",
+            "warnings": [],
+            "provenance": {},
+            "filings": [
+                {
+                    "form": "10-K",
+                    "filed_date": "2025-02-20",
+                    "report_period": "2024-12-31",
+                    "description": "Annual report",
+                    "items": "",
+                    "accession_number": "0001045810-25-000023",
+                    "document_url": "https://www.sec.gov/Archives/edgar/data/1045810/example10k.htm",
+                },
+                {
+                    "form": "10-Q",
+                    "filed_date": "2024-11-20",
+                    "report_period": "2024-09-30",
+                    "description": "Quarterly report",
+                    "items": "",
+                    "accession_number": "0001045810-24-000222",
+                    "document_url": "https://www.sec.gov/Archives/edgar/data/1045810/example10q.htm",
+                },
+                {
+                    "form": "8-K",
+                    "filed_date": "2024-10-01",
+                    "report_period": "2024-10-01",
+                    "description": "Current report",
+                    "items": "2.02,9.01",
+                    "accession_number": "0001045810-24-000200",
+                    "document_url": "https://www.sec.gov/Archives/edgar/data/1045810/example8k.htm",
+                },
+            ],
+        },
     }
 
 
@@ -97,6 +147,11 @@ def test_fundamentals_configuration_page() -> None:
         assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["default"]
         assert window.p2_workspace_stack.currentWidget() is window.p2_default_workspace
         assert window.p2_custom_editor_frame.isHidden()
+        assert window.page2.minimumSizeHint().width() <= 1280
+        assert [
+            window.p2_source_tabs.tabText(index)
+            for index in range(window.p2_source_tabs.count())
+        ] == ["Statements", "SEC Filings"]
 
         default_frames = tuple(window.p2_chart_frames)
         default_titles = tuple(label.text() for label in window.p2_simple_titles)
@@ -110,7 +165,29 @@ def test_fundamentals_configuration_page() -> None:
         )
 
         window.update_page2(_payload(), update_collection_info=False)
+        window.stacked_widget.setCurrentIndex(8)
+        window.show()
         app.processEvents()
+        window._p2_relayout_charts()
+        app.processEvents()
+        workspace_bottom = window.p2_workspace_stack.contentsRect().bottom()
+        for title, frame in zip(default_titles[3:], window.p2_chart_frames[3:]):
+            frame_bottom = frame.mapTo(window.p2_workspace_stack, frame.rect().bottomRight()).y()
+            assert frame_bottom <= workspace_bottom, f"{title} is clipped below the Fundamentals workspace"
+        assert len(window.p2_chart_frames) == 6
+        assert window.p2_current_data["financials"].shape[1] == 10
+        assert window.p2_current_data["quarterly_financials"].shape[1] == 12
+        assert "SEC cached + yfinance" in window.p2_status_lbl.text()
+        assert window.p2_metric_vals["fcf_margin"].text() == "42.8%"
+        assert window.p2_filings_table.rowCount() == 3
+        window.p2_filings_form_filter.setCurrentText("10-Q")
+        app.processEvents()
+        assert sum(not window.p2_filings_table.isRowHidden(row) for row in range(3)) == 1
+        window.p2_filings_form_filter.setCurrentText("All")
+        window.p2_filings_search.setText("2.02")
+        app.processEvents()
+        assert sum(not window.p2_filings_table.isRowHidden(row) for row in range(3)) == 1
+        window.p2_filings_search.clear()
         assert sum(len(rows) for rows in window.p2_custom_available_rows.values()) == 9
 
         window.p2_configuration_buttons["custom"].click()
@@ -141,9 +218,16 @@ def test_fundamentals_configuration_page() -> None:
                 screenshot_path = sys.argv[screenshot_index + 1]
         if screenshot_path:
             window.stacked_widget.setCurrentIndex(8)
-            window.show()
+            screenshot_tab = str(os.environ.get("BT_FUNDAMENTALS_SCREENSHOT_TAB", "statements") or "statements").lower()
+            if screenshot_tab == "filings":
+                window.p2_source_tabs.setCurrentIndex(1)
+            else:
+                window.p2_configuration_buttons["default"].click()
+                window.p2_source_tabs.setCurrentIndex(0)
             app.processEvents()
             assert window.grab().save(screenshot_path)
+            window.p2_source_tabs.setCurrentIndex(0)
+            window.p2_configuration_buttons["custom"].click()
 
         window.p2_custom_filter_input.clear()
         window.p2_custom_selected_only_cb.setChecked(True)
@@ -234,6 +318,19 @@ def test_fundamentals_configuration_page() -> None:
         app.processEvents()
         assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["default"]
         assert window.p2_workspace_stack.currentWidget() is window.p2_default_workspace
+
+        yahoo_only = _payload("SPY")
+        yahoo_only["sec"] = {
+            "available": False,
+            "statements_available": False,
+            "filings": [],
+            "warnings": ["No domestic SEC filer mapping was found; using Yahoo data only."],
+        }
+        window.update_page2(yahoo_only, update_collection_info=False)
+        app.processEvents()
+        assert "yfinance only" in window.p2_status_lbl.text()
+        assert window.p2_filings_table.rowCount() == 0
+        assert "Yahoo data only" in window.p2_filings_status.text()
     finally:
         fundamentals_mixin.save_fundamentals_page_settings = original_save
         window.close()

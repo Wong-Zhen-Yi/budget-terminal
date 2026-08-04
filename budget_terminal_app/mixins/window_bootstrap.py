@@ -1130,8 +1130,6 @@ class WindowBootstrapMixin:
         self._recurring_scheduler_inflight_catch_up = False
         if not int(result.get('claimed', 0) or 0):
             return
-        if self._page_initialized(page_attr='page31') and hasattr(self, '_p31_refresh_all'):
-            self._p31_refresh_all()
         if self._page_initialized(page_attr='page32') and hasattr(self, '_p32_refresh_accounts'):
             active_id = getattr(self, '_p32_active_account_id', '')
             self._p32_refresh_accounts(select_account_id=active_id)

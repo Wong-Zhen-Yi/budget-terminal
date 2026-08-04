@@ -76,6 +76,24 @@ def _payload(ticker="NVDA", basis=5.0):
         "peer_rows": [],
         "peer_warnings": [],
         "sources": {"quote": "Test quote", "statements": "Test statements", "computed": "Test calculation"},
+        "sec": {
+            "available": True,
+            "statements_available": True,
+            "provenance": {
+                "Total Revenue": {
+                    "quarterly": {
+                        "2025-03-31": {
+                            "tag": "Revenues",
+                            "form": "10-Q",
+                            "filed": "2025-05-01",
+                            "accession": "0001-25-000001",
+                            "derived": False,
+                        }
+                    },
+                    "annual": {},
+                }
+            },
+        },
         "suggested_assumptions": {"growth_1_5": 9.0, "growth_6_10": 5.75, "discount_rate": 10.2, "terminal_growth": 2.5},
         "valuation_suggestions": {
             "fields": {
@@ -105,6 +123,13 @@ def test_valuation_page_smoke() -> None:
         assert window.valuation_confidence_label.text() in {"High", "Medium", "Low"}
         assert window.valuation_fair_value_plot.getPlotItem().legend is not None
         assert window.valuation_validation_label.isHidden()
+        source_labels = [
+            window.valuation_source_table.item(row, 0).text()
+            for row in range(window.valuation_source_table.rowCount())
+        ]
+        assert "Total Revenue" in source_labels
+        revenue_source_row = source_labels.index("Total Revenue")
+        assert "0001-25-000001" in window.valuation_source_table.item(revenue_source_row, 1).text()
 
         window._valuation_apply_suggested_assumptions()
         assert window.valuation_growth_1_5_spin.value() == 9.0

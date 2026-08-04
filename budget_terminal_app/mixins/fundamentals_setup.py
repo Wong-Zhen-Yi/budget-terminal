@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any
+from PyQt6.QtWidgets import QAbstractItemView
 from ..compat import *
 from budget_terminal_app.paths import user_data_path
 from budget_terminal_app.workers.fundamentals import FundamentalsWorker
@@ -100,16 +101,30 @@ class FundamentalsSetupMixin:
         self.p2_content_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.p2_content_widget, 1)
 
+        self.p2_source_tabs = QTabWidget()
+        self.p2_source_tabs.setDocumentMode(True)
+        self.p2_statements_tab = QWidget()
+        self.p2_statements_layout = QVBoxLayout(self.p2_statements_tab)
+        self.p2_statements_layout.setContentsMargins(0, 0, 0, 0)
+        self.p2_statements_layout.setSpacing(4)
+        self.p2_filings_tab = self._p2_build_filings_tab()
+        self.p2_source_tabs.addTab(self.p2_statements_tab, 'Statements')
+        self.p2_source_tabs.addTab(self.p2_filings_tab, 'SEC Filings')
+        self.p2_content_layout.addWidget(self.p2_source_tabs, 1)
+
         self.p2_top_frame = QFrame()
-        self.p2_top_frame.setFixedHeight(36)
+        self.p2_top_frame.setFixedHeight(66)
         self.set_theme_role(self.p2_top_frame, 'panel')
-        top_row = QHBoxLayout(self.p2_top_frame)
-        top_row.setContentsMargins(10, 0, 0, 10)
-        top_row.setSpacing(12)
+        top_layout = QVBoxLayout(self.p2_top_frame)
+        top_layout.setContentsMargins(10, 4, 10, 4)
+        top_layout.setSpacing(2)
+        identity_row = QHBoxLayout()
+        identity_row.setSpacing(10)
         self.p2_name_lbl = QLabel('—')
         self.p2_info_lbl = QLabel('—')
-        top_row.addWidget(self.p2_name_lbl)
-        top_row.addWidget(self.p2_info_lbl)
+        identity_row.addWidget(self.p2_name_lbl)
+        identity_row.addWidget(self.p2_info_lbl)
+        identity_row.addStretch()
         self.p2_website_btn = QPushButton('Website')
         self.p2_website_btn.setFixedHeight(22)
         self.set_theme_variant(self.p2_website_btn, 'accent')
@@ -120,12 +135,11 @@ class FundamentalsSetupMixin:
         self.set_theme_variant(self.p2_ir_btn, 'accent')
         self.p2_ir_btn.setVisible(False)
         self.p2_ir_btn.clicked.connect(self._open_p2_ir)
-        top_row.addWidget(self.p2_website_btn)
-        top_row.addWidget(self.p2_ir_btn)
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setStyleSheet(f'color: {self.theme_color("panel_border")};')
-        top_row.addWidget(divider)
+        identity_row.addWidget(self.p2_website_btn)
+        identity_row.addWidget(self.p2_ir_btn)
+        top_layout.addLayout(identity_row)
+        metrics_row = QHBoxLayout()
+        metrics_row.setSpacing(10)
         metric_defs = [
             ('P/E', 'pe'),
             ('Fwd P/E', 'fpe'),
@@ -147,10 +161,11 @@ class FundamentalsSetupMixin:
             value_label = QLabel('—')
             pair.addWidget(title_label)
             pair.addWidget(value_label)
-            top_row.addLayout(pair)
+            metrics_row.addLayout(pair)
             self.p2_metric_vals[key] = value_label
-        top_row.addStretch()
-        self.p2_content_layout.addWidget(self.p2_top_frame)
+        metrics_row.addStretch()
+        top_layout.addLayout(metrics_row)
+        self.p2_statements_layout.addWidget(self.p2_top_frame)
 
         self.p2_period_widget = QWidget()
         self.p2_period_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -193,7 +208,7 @@ class FundamentalsSetupMixin:
             if configuration == 'default':
                 period_row.addSpacing(8)
         period_row.addStretch()
-        self.p2_content_layout.addWidget(self.p2_period_widget)
+        self.p2_statements_layout.addWidget(self.p2_period_widget)
 
         self.p2_workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.p2_workspace_splitter.setChildrenCollapsible(False)
@@ -298,7 +313,7 @@ class FundamentalsSetupMixin:
         self.p2_workspace_splitter.addWidget(self.p2_custom_editor_frame)
         self.p2_workspace_splitter.setStretchFactor(0, 5)
         self.p2_workspace_splitter.setStretchFactor(1, 2)
-        self.p2_content_layout.addWidget(self.p2_workspace_splitter, 1)
+        self.p2_statements_layout.addWidget(self.p2_workspace_splitter, 1)
 
         self._p2_sync_configuration_buttons()
         self._p2_rebuild_custom_checklist()
@@ -633,10 +648,13 @@ class FundamentalsSetupMixin:
             if frames:
                 page_width = self.page2.contentsRect().width() if hasattr(self, 'page2') else 0
                 available_width = max(self.p2_charts_box.width(), page_width - 20)
-                content_height = self.p2_content_widget.contentsRect().height() if hasattr(self, 'p2_content_widget') else 0
-                spacing = self.p2_content_layout.spacing() if hasattr(self, 'p2_content_layout') else 0
-                controls_height = self.p2_top_frame.height() + self.p2_period_widget.height() + spacing * 2
-                available_height = max(180, content_height - controls_height)
+                workspace_height = self.p2_workspace_stack.contentsRect().height() if hasattr(self, 'p2_workspace_stack') else 0
+                if workspace_height <= 0:
+                    content_height = self.p2_content_widget.contentsRect().height() if hasattr(self, 'p2_content_widget') else 0
+                    spacing = self.p2_content_layout.spacing() if hasattr(self, 'p2_content_layout') else 0
+                    controls_height = self.p2_top_frame.height() + self.p2_period_widget.height() + spacing * 2
+                    workspace_height = content_height - controls_height
+                available_height = max(180, workspace_height)
                 columns = 3 if available_width >= 1200 else 2
                 rows = max(1, math.ceil(len(frames) / columns))
                 spacing = 10 if available_width >= 1200 and available_height >= 700 else 6
@@ -670,12 +688,23 @@ class FundamentalsSetupMixin:
         """Build the user-facing status text for a Fundamentals payload."""
         payload = data if isinstance(data, dict) else {}
         ticker = str(payload.get('ticker', '') or self.p2_ticker_input.text() or '').upper().strip()
-        source = 'Alpha Vantage' if payload.get('av_used') else 'yfinance'
+        source = self._p2_source_label(payload)
         if restored and ticker:
             return f'Restored last session for {ticker} | source: {source}'
         if ticker:
             return f'{ticker}  |  source: {source}'
         return f'Source: {source}'
+
+    def _p2_source_label(self, data: Any) -> str:
+        """Return the compact source label for a Fundamentals payload."""
+        payload = data if isinstance(data, dict) else {}
+        sec = payload.get('sec') if isinstance(payload.get('sec'), dict) else {}
+        if not sec.get('statements_available'):
+            return 'yfinance only'
+        freshness = str(sec.get('statement_freshness') or sec.get('freshness') or '').strip().lower()
+        if freshness in {'cached', 'stale'}:
+            return 'SEC cached + yfinance'
+        return 'SEC EDGAR + yfinance'
 
     def _p2_session_snapshot(self) -> dict[str, Any] | None:
         """Return the current Fundamentals workspace snapshot when data is loaded."""
@@ -848,6 +877,94 @@ class FundamentalsSetupMixin:
                 update_collection_info=bool(context.get('update_collection_info', True)),
             )
         self._p2_relayout_charts()
+
+    def _p2_build_filings_tab(self) -> Any:
+        """Build the searchable SEC filing browser without changing the statement workspace."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.p2_filings_search = QLineEdit()
+        self.p2_filings_search.setPlaceholderText('Search form, date, description, item, or accession')
+        self.p2_filings_search.setClearButtonEnabled(True)
+        self.p2_filings_search.textChanged.connect(self._p2_filter_filings)
+        self.p2_filings_form_filter = QComboBox()
+        self.p2_filings_form_filter.addItems(['All', '10-K', '10-Q', '8-K'])
+        self.p2_filings_form_filter.currentTextChanged.connect(self._p2_filter_filings)
+        self.p2_open_filing_btn = QPushButton('Open Filing')
+        self.p2_open_filing_btn.setEnabled(False)
+        self.p2_open_filing_btn.clicked.connect(self._p2_open_selected_filing)
+        controls.addWidget(self.p2_filings_search, 1)
+        controls.addWidget(self.p2_filings_form_filter)
+        controls.addWidget(self.p2_open_filing_btn)
+        layout.addLayout(controls)
+
+        self.p2_filings_status = QLabel('Load a domestic US ticker to retrieve recent SEC filings.')
+        self.p2_filings_status.setWordWrap(True)
+        self.set_theme_role(self.p2_filings_status, 'muted')
+        layout.addWidget(self.p2_filings_status)
+        self.p2_filings_table = QTableWidget(0, 5)
+        self.p2_filings_table.setHorizontalHeaderLabels(['Form', 'Filed', 'Report Period', 'Description / Items', 'Accession'])
+        self.p2_filings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.p2_filings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.p2_filings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.p2_filings_table.setAlternatingRowColors(True)
+        self.p2_filings_table.setSortingEnabled(True)
+        self.p2_filings_table.verticalHeader().setVisible(False)
+        header = self.p2_filings_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.p2_filings_table.itemSelectionChanged.connect(self._p2_sync_open_filing_button)
+        self.p2_filings_table.itemDoubleClicked.connect(lambda *_: self._p2_open_selected_filing())
+        layout.addWidget(self.p2_filings_table, 1)
+        self.p2_filings = []
+        return page
+
+    def _p2_filter_filings(self, *_: Any) -> None:
+        """Apply the text and form filters to the current SEC filing rows."""
+        if not hasattr(self, 'p2_filings_table'):
+            return
+        query = str(self.p2_filings_search.text() or '').casefold().strip()
+        form_filter = str(self.p2_filings_form_filter.currentText() or 'All').upper()
+        for row in range(self.p2_filings_table.rowCount()):
+            form_item = self.p2_filings_table.item(row, 0)
+            form = str(form_item.text() if form_item is not None else '').upper()
+            values = [
+                str(self.p2_filings_table.item(row, column).text() if self.p2_filings_table.item(row, column) else '')
+                for column in range(self.p2_filings_table.columnCount())
+            ]
+            form_matches = form_filter == 'ALL' or form.startswith(form_filter)
+            text_matches = not query or query in ' '.join(values).casefold()
+            self.p2_filings_table.setRowHidden(row, not (form_matches and text_matches))
+        self._p2_sync_open_filing_button()
+
+    def _p2_selected_filing_url(self) -> str:
+        """Return the official SEC URL stored on the selected filing row."""
+        if not hasattr(self, 'p2_filings_table'):
+            return ''
+        row = self.p2_filings_table.currentRow()
+        if row < 0 or self.p2_filings_table.isRowHidden(row):
+            return ''
+        item = self.p2_filings_table.item(row, 0)
+        if item is None:
+            return ''
+        return str(item.data(Qt.ItemDataRole.UserRole) or '').strip()
+
+    def _p2_sync_open_filing_button(self) -> None:
+        """Enable the filing action only when a visible row has an official URL."""
+        if hasattr(self, 'p2_open_filing_btn'):
+            self.p2_open_filing_btn.setEnabled(bool(self._p2_selected_filing_url()))
+
+    def _p2_open_selected_filing(self, *_: Any) -> None:
+        """Open the selected filing on SEC.gov."""
+        url = self._p2_selected_filing_url()
+        if url:
+            webbrowser.open(url)
 
     def _page2_error(self, request_id: Any, msg: Any=None) -> None:
         """Handle Fundamentals fetch errors."""

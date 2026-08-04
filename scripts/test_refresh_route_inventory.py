@@ -61,7 +61,6 @@ def test_every_registered_page_has_a_refresh_architecture() -> None:
     assert REFRESH_ROUTE_ARCHITECTURE[3] == "background-coordinated"
     assert REFRESH_ROUTE_ARCHITECTURE[9] == "background-active-subtab"
     assert REFRESH_ROUTE_ARCHITECTURE[11] == "background-active-subtab"
-    assert REFRESH_ROUTE_ARCHITECTURE[30] == "background-active-subtab"
     assert REFRESH_ROUTE_ARCHITECTURE[31] == "background-active-subtab"
     newly_migrated = {13, 14, 15, 16, 18, 20, 24, 25, 28, 33}
     assert {index for index in newly_migrated if REFRESH_ROUTE_CLASSIFICATION[index] != "migrated"} == set()

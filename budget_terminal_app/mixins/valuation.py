@@ -1002,7 +1002,9 @@ class ValuationMixin:
         self._valuation_render_historical_pe_chart(payload)
         self.valuation_load_btn.setEnabled(True)
         if update_collection_info:
-            self._set_data_collection_info(['yfinance'])
+            sec = payload.get('sec') if isinstance(payload.get('sec'), dict) else {}
+            sources = ['SEC EDGAR', 'yfinance'] if sec.get('statements_available') else ['yfinance']
+            self._set_data_collection_info(sources)
         peer_warnings = [str(message) for message in list(payload.get('peer_warnings', []) or []) if str(message or '').strip()]
         if peer_warnings and not status_text:
             warning_text = f'Loaded valuation data for {ticker}. ' + ' '.join(peer_warnings[:2])
@@ -1230,6 +1232,63 @@ class ValuationMixin:
             ('Computed ratios', sources.get('computed', 'Computed from quote, statements, and assumptions')),
             ('Last updated', self._valuation_format_timestamp(payload.get('fetched_at'))),
         ]
+        selected_provenance = (
+            payload.get('valuation_provenance')
+            if isinstance(payload.get('valuation_provenance'), dict)
+            else {}
+        )
+        for metric_name, selection in selected_provenance.items():
+            detail = selection if isinstance(selection, dict) else {}
+            source = str(detail.get('source') or 'Unknown')
+            basis = str(detail.get('basis') or '')
+            period = str(detail.get('period') or '')
+            facts = detail.get('facts') if isinstance(detail.get('facts'), list) else []
+            tags = sorted({str(fact.get('tag') or '') for fact in facts if isinstance(fact, dict) and fact.get('tag')})
+            accessions = sorted({
+                str(fact.get('accession') or '')
+                for fact in facts
+                if isinstance(fact, dict) and fact.get('accession')
+            })
+            citation = ' | '.join(
+                value
+                for value in (
+                    source,
+                    basis,
+                    period,
+                    ', '.join(tags),
+                    ', '.join(accessions),
+                )
+                if value
+            )
+            rows.append((str(metric_name), citation))
+        sec = payload.get('sec') if isinstance(payload.get('sec'), dict) else {}
+        provenance = sec.get('provenance') if isinstance(sec.get('provenance'), dict) else {}
+        provenance_rows = (
+            'Total Revenue',
+            'Net Income',
+            'Free Cash Flow',
+            'Cash Cash Equivalents And Short Term Investments',
+            'Total Debt',
+            'Common Stock Shares Outstanding',
+        )
+        for metric_name in (() if selected_provenance else provenance_rows):
+            periods = provenance.get(metric_name) if isinstance(provenance.get(metric_name), dict) else {}
+            entries = {}
+            for period_name in ('quarterly', 'annual'):
+                values = periods.get(period_name)
+                if isinstance(values, dict):
+                    entries.update(values)
+            if not entries:
+                continue
+            latest_period = max(entries)
+            detail = entries.get(latest_period) if isinstance(entries.get(latest_period), dict) else {}
+            tag = str(detail.get('tag') or 'XBRL fact')
+            form = str(detail.get('form') or '')
+            filed = str(detail.get('filed') or '')
+            accession = str(detail.get('accession') or '')
+            derivation = ' | derived' if detail.get('derived') else ''
+            citation = ' | '.join(value for value in (tag, form, filed, accession) if value)
+            rows.append((metric_name, f'{citation}{derivation}'))
         self.valuation_source_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column, value in enumerate(row):

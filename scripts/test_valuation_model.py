@@ -4,6 +4,8 @@ import math
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -19,6 +21,7 @@ from budget_terminal_app.services.valuation import (
     derive_valuation_suggestions,
     normalize_valuation_assumptions,
 )
+from budget_terminal_app.workers.valuation import _build_trends, _extract_metrics
 
 
 def _assert_close(actual: float | None, expected: float, message: str, *, tolerance: float = 1e-9) -> None:
@@ -198,6 +201,237 @@ def test_ticker_specific_legacy_migration() -> None:
     assert isolated["assumptions_by_ticker"]["MSFT"]["basis_value"] == 7.0
 
 
+def test_sec_first_reported_metric_resolution() -> None:
+    quarters = [
+        pd.Timestamp("2024-12-31"),
+        pd.Timestamp("2024-09-30"),
+        pd.Timestamp("2024-06-30"),
+        pd.Timestamp("2024-03-31"),
+    ]
+    quarterly_financials = pd.DataFrame(
+        {
+            quarter: values
+            for quarter, values in zip(
+                quarters,
+                ([40.0, 4.0, 1.0], [30.0, 3.0, 1.0], [20.0, 2.0, 1.0], [10.0, 1.0, 1.0]),
+            )
+        },
+        index=["Total Revenue", "Net Income", "Diluted EPS"],
+    )
+    quarterly_cashflow = pd.DataFrame(
+        {
+            quarter: values
+            for quarter, values in zip(
+                quarters,
+                ([12.0, 2.0, 10.0], [11.0, 2.0, 9.0], [10.0, 2.0, 8.0], [9.0, 2.0, 7.0]),
+            )
+        },
+        index=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow"],
+    )
+    quarterly_balance_sheet = pd.DataFrame(
+        {quarters[0]: [50.0, 20.0, 5.0]},
+        index=[
+            "Cash Cash Equivalents And Short Term Investments",
+            "Total Debt",
+            "Common Stock Shares Outstanding",
+        ],
+    )
+    annual_financials = pd.DataFrame(
+        {pd.Timestamp("2024-12-31"): [999.0, 99.0]},
+        index=["Total Revenue", "Net Income"],
+    )
+    annual_cashflow = pd.DataFrame(
+        {pd.Timestamp("2024-12-31"): [100.0, 25.0]},
+        index=["Operating Cash Flow", "Capital Expenditure"],
+    )
+    info = {
+        "currentPrice": 123.0,
+        "marketCap": 1_000.0,
+        "totalRevenue": 777.0,
+        "netIncome": 77.0,
+        "operatingCashflow": 70.0,
+        "freeCashflow": 60.0,
+        "sharesOutstanding": 9.0,
+        "totalCash": 80.0,
+        "totalDebt": 70.0,
+        "trailingEps": 8.0,
+        "forwardPE": 18.0,
+    }
+    sec_metrics = _extract_metrics(
+        "TEST",
+        info,
+        annual_financials,
+        annual_cashflow,
+        pd.DataFrame(),
+        quarterly_financials,
+        quarterly_cashflow,
+        quarterly_balance_sheet,
+        pd.DataFrame(),
+        prefer_statements=True,
+    )
+    assert sec_metrics["price"] == 123.0
+    assert sec_metrics["forward_pe"] == 18.0
+    assert sec_metrics["revenue"] == 100.0
+    assert sec_metrics["net_income"] == 10.0
+    assert sec_metrics["operating_cash_flow"] == 42.0
+    assert sec_metrics["free_cash_flow"] == 34.0
+    assert sec_metrics["shares"] == 5.0
+    assert sec_metrics["cash"] == 50.0
+    assert sec_metrics["debt"] == 20.0
+    assert sec_metrics["eps"] == 4.0
+
+    annual_fallback = _extract_metrics(
+        "TEST",
+        info,
+        annual_financials,
+        annual_cashflow,
+        pd.DataFrame(),
+        quarterly_financials.iloc[:, :3],
+        quarterly_cashflow.iloc[:, :3],
+        quarterly_balance_sheet,
+        pd.DataFrame(),
+        prefer_statements=True,
+    )
+    assert annual_fallback["revenue"] == 999.0
+    assert annual_fallback["operating_cash_flow"] == 100.0
+
+    ascending_dates = [pd.Timestamp("2023-12-31"), pd.Timestamp("2024-12-31")]
+    ascending_financials = pd.DataFrame(
+        {ascending_dates[0]: [300.0], ascending_dates[1]: [400.0]},
+        index=["Total Revenue"],
+    )
+    ascending_balance = pd.DataFrame(
+        {ascending_dates[0]: [30.0, 10.0], ascending_dates[1]: [50.0, 20.0]},
+        index=["Cash Cash Equivalents And Short Term Investments", "Total Debt"],
+    )
+    latest_metrics = _extract_metrics(
+        "TEST",
+        info,
+        ascending_financials,
+        pd.DataFrame(),
+        ascending_balance,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        ascending_balance,
+        pd.DataFrame(),
+        prefer_statements=True,
+    )
+    assert latest_metrics["revenue"] == 400.0
+    assert latest_metrics["cash"] == 50.0
+    assert latest_metrics["debt"] == 20.0
+
+    trend_cashflow = pd.DataFrame(
+        {ascending_dates[1]: [100.0, 20.0], ascending_dates[0]: [90.0, 15.0]},
+        index=["Operating Cash Flow", "Capital Expenditure"],
+    )
+    trend_financials = pd.DataFrame(
+        {ascending_dates[1]: [200.0], ascending_dates[0]: [180.0]},
+        index=["Total Revenue"],
+    )
+    trends = _build_trends(trend_financials, trend_cashflow, {"shares": 10.0, "basis_type": "FCF"})
+    assert trends["fcf"] == [75.0, 80.0]
+
+    yahoo_metrics = _extract_metrics(
+        "TEST",
+        info,
+        annual_financials,
+        annual_cashflow,
+        pd.DataFrame(),
+        quarterly_financials.iloc[:, :3],
+        quarterly_cashflow.iloc[:, :3],
+        pd.DataFrame(),
+        pd.DataFrame(),
+        prefer_statements=False,
+    )
+    assert yahoo_metrics["revenue"] == 777.0
+    assert yahoo_metrics["free_cash_flow"] == 60.0
+    assert yahoo_metrics["cash"] == 80.0
+
+
+def test_valuation_payload_reuses_sec_bundle() -> None:
+    from budget_terminal_app.workers import valuation as valuation_worker
+
+    columns = [
+        pd.Timestamp("2024-12-31"),
+        pd.Timestamp("2024-09-30"),
+        pd.Timestamp("2024-06-30"),
+        pd.Timestamp("2024-03-31"),
+    ]
+    sec_financials = pd.DataFrame(
+        {column: [value] for column, value in zip(columns, (40.0, 30.0, 20.0, 10.0))},
+        index=["Total Revenue"],
+    )
+    sec_cashflow = pd.DataFrame(
+        {column: values for column, values in zip(columns, ([12.0, 2.0], [11.0, 2.0], [10.0, 2.0], [9.0, 2.0]))},
+        index=["Operating Cash Flow", "Capital Expenditure"],
+    )
+    annual = pd.DataFrame({columns[0]: [90.0]}, index=["Total Revenue"])
+    yahoo_financials = pd.DataFrame(
+        {columns[0]: [777.0, 42.0]},
+        index=["Total Revenue", "Yahoo Custom Row"],
+    )
+
+    class FakeTicker:
+        info = {
+            "currentPrice": 123.0,
+            "previousClose": 120.0,
+            "marketCap": 1_000.0,
+            "totalRevenue": 777.0,
+            "sharesOutstanding": 5.0,
+            "forwardPE": 18.0,
+        }
+        financials = yahoo_financials
+        cashflow = pd.DataFrame()
+        balance_sheet = pd.DataFrame()
+        quarterly_financials = pd.DataFrame()
+        quarterly_cashflow = pd.DataFrame()
+        quarterly_balance_sheet = pd.DataFrame()
+
+        def history(self, **_kwargs):
+            return pd.DataFrame({"Close": [120.0, 123.0]})
+
+    sec_bundle = {
+        "available": True,
+        "statements_available": True,
+        "freshness": "cached",
+        "frames": {
+            "financials": annual,
+            "quarterly_financials": sec_financials,
+            "cashflow": pd.DataFrame(),
+            "quarterly_cashflow": sec_cashflow,
+            "balance_sheet": pd.DataFrame(),
+            "quarterly_balance_sheet": pd.DataFrame(),
+        },
+        "filings": [],
+        "warnings": [],
+        "provenance": {
+            "Total Revenue": {
+                "annual": {"2024-12-31": {"tag": "Revenues", "accession": "annual"}},
+                "quarterly": {
+                    str(column.date()): {"tag": "Revenues", "accession": f"q{index}"}
+                    for index, column in enumerate(reversed(columns), 1)
+                },
+            }
+        },
+    }
+    original_ticker = valuation_worker.yf.Ticker
+    original_sec_fetch = valuation_worker.fetch_company_bundle
+    valuation_worker.yf.Ticker = lambda _symbol: FakeTicker()
+    valuation_worker.fetch_company_bundle = lambda _symbol: sec_bundle
+    try:
+        payload = valuation_worker.fetch_company_analysis_payload("TEST", include_peers=False)
+    finally:
+        valuation_worker.yf.Ticker = original_ticker
+        valuation_worker.fetch_company_bundle = original_sec_fetch
+    assert payload["metrics"]["price"] == 123.0
+    assert payload["metrics"]["forward_pe"] == 18.0
+    assert payload["metrics"]["revenue"] == 100.0
+    assert payload["financials"].loc["Total Revenue", columns[0]] == 90.0
+    assert payload["financials"].loc["Yahoo Custom Row", columns[0]] == 42.0
+    assert payload["statement_sources"]["primary"] == "SEC EDGAR"
+    assert payload["valuation_provenance"]["Revenue"]["basis"] == "TTM from four complete quarters"
+
+
 def main() -> None:
     test_normalization_and_persistence_parity()
     test_gordon_oracle_and_components()
@@ -206,6 +440,8 @@ def main() -> None:
     test_monotonic_sensitivities()
     test_suggestion_quality_rules()
     test_ticker_specific_legacy_migration()
+    test_sec_first_reported_metric_resolution()
+    test_valuation_payload_reuses_sec_bundle()
     assert math.isfinite(calculate_fair_value_per_share(_base()))
     print("valuation model tests passed")
 

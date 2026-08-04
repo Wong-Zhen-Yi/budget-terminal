@@ -18,7 +18,6 @@ if str(ROOT) not in sys.path:
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication, QComboBox, QPushButton, QWidget
 
-from budget_terminal_app.mixins.paper_trading import PaperTradingMixin
 from budget_terminal_app.mixins.virtual_trading import VirtualTradingMixin
 
 
@@ -122,38 +121,6 @@ class _AccountListStore:
         ]
 
 
-class _PaperAccountHarness(PaperTradingMixin, QObject):
-    def __init__(self, store: _AccountListStore) -> None:
-        QObject.__init__(self)
-        self._invoke_main = _QueuedInvoker()
-        self._p31_store = store
-        self._p31_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PaperAccountsTest")
-        self._p31_active_account_id = "old"
-        self._p31_active_account_snapshot = None
-        self._p31_accounts = []
-        self._p31_accounts_request_seq = 0
-        self._p31_accounts_refresh_running = False
-        self._p31_accounts_refresh_context = ""
-        self._p31_accounts_refresh_pending = None
-        self._p31_task_inflight = False
-        self.p31_account_combo = QComboBox()
-        self.p31_empty_state = QWidget()
-        self.p31_workspace = QWidget()
-        self.p31_edit_account_btn = QPushButton()
-        self.p31_archive_account_btn = QPushButton()
-        self.p31_submit_btn = QPushButton()
-        self.statuses: list[str] = []
-
-    def _p31_refresh_all(self) -> None:
-        return
-
-    def _p31_set_status(self, message: str, status: str = "muted") -> None:
-        self.statuses.append(f"{status}:{message}")
-
-    def close_harness(self) -> None:
-        self._p31_executor.shutdown(wait=True, cancel_futures=True)
-
-
 class _VirtualAccountHarness(VirtualTradingMixin, QObject):
     def __init__(self, store: _AccountListStore) -> None:
         QObject.__init__(self)
@@ -184,37 +151,6 @@ class _VirtualAccountHarness(VirtualTradingMixin, QObject):
 
     def close_harness(self) -> None:
         self._p32_executor.shutdown(wait=True, cancel_futures=True)
-
-
-class _PaperRefreshHarness(PaperTradingMixin, QObject):
-    def __init__(self, store: _ThreadRecordingStore) -> None:
-        QObject.__init__(self)
-        self.page31 = object()
-        self.visible = False
-        self._invoke_main = _QueuedInvoker()
-        self._p31_store = store
-        self._p31_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PaperRefreshTest")
-        self._p31_active_account_id = "old"
-        self._p31_view_request_seq = 0
-        self._p31_view_refresh_running = False
-        self._p31_view_refresh_context = None
-        self._p31_view_refresh_pending = None
-        self._p31_view_cache: dict[tuple[str, int, str], dict[str, Any]] = {}
-        self.p31_tabs = _Tabs()
-        self.p31_order_filter = _OrderFilter()
-        self.rendered: list[tuple[str, str, int]] = []
-
-    def _is_current_page(self, page: object) -> bool:
-        return self.visible and page is self.page31
-
-    def _p31_refresh_summary(self, summary: Any = None) -> None:
-        self.rendered.append(("summary", str(summary["marker"]), threading.get_ident()))
-
-    def _p31_refresh_positions(self, rows: Any = None) -> None:
-        self.rendered.append(("positions", str(rows[0]["marker"]), threading.get_ident()))
-
-    def close_harness(self) -> None:
-        self._p31_executor.shutdown(wait=True, cancel_futures=True)
 
 
 class _VirtualRefreshHarness(VirtualTradingMixin, QObject):
@@ -277,52 +213,6 @@ def _assert_store_reads_are_background(store: _ThreadRecordingStore, main_thread
     assert all(thread_id != main_thread_id for _method, _account, thread_id in store.calls)
 
 
-def test_paper_refresh_caches_hidden_newest_view_off_thread() -> None:
-    app = QApplication.instance() or QApplication([])
-    main_thread_id = threading.get_ident()
-    store = _ThreadRecordingStore()
-    harness = _PaperRefreshHarness(store)
-    old_context = ("old", 0, "all")
-    new_context = ("new", 0, "all")
-    try:
-        assert harness._p31_has_window_refresh_runtime()
-        harness._p31_refresh_all()
-        assert store.first_read_started.wait(0.5), "Paper database worker did not start"
-        harness._p31_active_account_id = "new"
-        harness._p31_refresh_all()
-        assert harness._p31_view_refresh_pending == new_context
-        store.release_first_read.set()
-
-        _wait_until(
-            app,
-            lambda: not harness._p31_view_refresh_running and new_context in harness._p31_view_cache,
-            "Paper hidden refresh did not cache the pending newest context",
-        )
-        assert old_context in harness._p31_view_cache
-        assert harness.rendered == []
-        _assert_store_reads_are_background(store, main_thread_id)
-
-        harness.visible = True
-        harness._p31_refresh_all()
-        assert [(part, marker) for part, marker, _thread in harness.rendered] == [
-            ("summary", "new"),
-            ("positions", "new"),
-        ]
-        assert all(thread_id == main_thread_id for _part, _marker, thread_id in harness.rendered)
-
-        harness.visible = False
-        _wait_until(
-            app,
-            lambda: not harness._p31_view_refresh_running,
-            "Paper return refresh did not finish",
-        )
-        assert len(harness.rendered) == 2
-        _assert_store_reads_are_background(store, main_thread_id)
-    finally:
-        store.release_first_read.set()
-        harness.close_harness()
-
-
 def test_virtual_refresh_caches_hidden_newest_view_off_thread() -> None:
     app = QApplication.instance() or QApplication([])
     main_thread_id = threading.get_ident()
@@ -370,49 +260,35 @@ def test_virtual_refresh_caches_hidden_newest_view_off_thread() -> None:
         harness.close_harness()
 
 
-def _assert_account_selector_refresh_is_background(harness: Any, store: _AccountListStore, prefix: str) -> None:
+def _assert_account_selector_refresh_is_background(harness: Any, store: _AccountListStore) -> None:
     app = QApplication.instance() or QApplication([])
     main_thread_id = threading.get_ident()
     started_at = time.perf_counter()
-    harness._p31_refresh_accounts("old") if prefix == "Paper" else harness._p32_refresh_accounts("old")
-    assert time.perf_counter() - started_at < 0.05, f"{prefix} account refresh blocked the UI thread"
-    assert store.first_read_started.wait(0.5), f"{prefix} account worker did not start"
-    harness._p31_refresh_accounts("new") if prefix == "Paper" else harness._p32_refresh_accounts("new")
+    harness._p32_refresh_accounts("old")
+    assert time.perf_counter() - started_at < 0.05, "Virtual account refresh blocked the UI thread"
+    assert store.first_read_started.wait(0.5), "Virtual account worker did not start"
+    harness._p32_refresh_accounts("new")
     store.release_first_read.set()
-    running_attr = "_p31_accounts_refresh_running" if prefix == "Paper" else "_p32_accounts_refresh_running"
-    active_attr = "_p31_active_account_id" if prefix == "Paper" else "_p32_active_account_id"
     _wait_until(
         app,
-        lambda: not getattr(harness, running_attr) and getattr(harness, active_attr) == "new",
-        f"{prefix} account selector did not apply the newest request",
+        lambda: not harness._p32_accounts_refresh_running and harness._p32_active_account_id == "new",
+        "Virtual account selector did not apply the newest request",
     )
-    assert len(store.calls) == 2, f"{prefix} account refresh should run one active and one newest rerun"
-    assert all(thread_id != main_thread_id for thread_id in store.calls), f"{prefix} read accounts on the UI thread"
-
-
-def test_paper_account_selector_loads_off_thread() -> None:
-    store = _AccountListStore()
-    harness = _PaperAccountHarness(store)
-    try:
-        _assert_account_selector_refresh_is_background(harness, store, "Paper")
-    finally:
-        store.release_first_read.set()
-        harness.close_harness()
+    assert len(store.calls) == 2, "Virtual account refresh should run one active and one newest rerun"
+    assert all(thread_id != main_thread_id for thread_id in store.calls), "Virtual read accounts on the UI thread"
 
 
 def test_virtual_account_selector_loads_off_thread() -> None:
     store = _AccountListStore()
     harness = _VirtualAccountHarness(store)
     try:
-        _assert_account_selector_refresh_is_background(harness, store, "Virtual")
+        _assert_account_selector_refresh_is_background(harness, store)
     finally:
         store.release_first_read.set()
         harness.close_harness()
 
 
 if __name__ == "__main__":
-    test_paper_refresh_caches_hidden_newest_view_off_thread()
     test_virtual_refresh_caches_hidden_newest_view_off_thread()
-    test_paper_account_selector_loads_off_thread()
     test_virtual_account_selector_loads_off_thread()
-    print("Paper and Virtual asynchronous refresh smoke tests passed.")
+    print("Virtual asynchronous refresh smoke tests passed.")
