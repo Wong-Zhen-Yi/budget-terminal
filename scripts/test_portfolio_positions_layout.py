@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractItemView, QPushButton
+from PyQt6.QtWidgets import QAbstractItemView, QLabel, QPushButton
 
 from budget_terminal_app.constants import P4_PORTFOLIO_COLUMNS
 from budget_terminal_app.mixins.portfolio_setup import P4_OPTIONS_COLUMNS
@@ -70,6 +70,15 @@ def test_positions_layout_and_table_fit() -> None:
         )
         _assert(window.p4_table.verticalHeader().defaultSectionSize() == 52, "stock row height should remain unchanged")
         _assert(window.p4_opt_table.verticalHeader().defaultSectionSize() == 38, "options row height should remain unchanged")
+        _assert(window.p4_cash_include_checkbox.isChecked(), "Cash should default to included in Portfolio Weight")
+        _assert(window.p4_cash_include_checkbox.text() == "BROKERAGE CASH", "Cash checkbox should label the cash position")
+        _assert(window.p4_stock_positions_label.text().startswith("Positions:"), "position count should use the renamed label")
+        visible_labels = {
+            label.text()
+            for label in window.p4_positions_page.findChildren(QLabel)
+        }
+        _assert("Positions" in visible_labels, "stock section should be renamed to Positions")
+        _assert("Stock Positions" not in visible_labels, "old Stock Positions heading should be removed")
 
         action_buttons = {
             button.text(): button

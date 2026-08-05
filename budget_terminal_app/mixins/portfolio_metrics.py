@@ -874,13 +874,24 @@ class PortfolioMetricsMixin:
         """Return active tickers enabled for Weight, Dip Finder, and Heatmap views."""
         return [ticker for ticker in self._p4_active_tickers() if self._p4_position_included_in_weight(ticker)]
 
+    def _p4_cash_included_in_weight(self, portfolio_id: Any = None) -> bool:
+        """Return whether brokerage cash participates in filtered allocation views."""
+        entry = self._get_portfolio_entry(portfolio_id or getattr(self, 'active_portfolio_id', None))
+        return entry.get('include_cash_in_weight') is not False
+
+    def _p4_weight_included_cash_balance(self, portfolio_id: Any = None) -> float:
+        """Return cash for filtered views, or zero when the cash position is unchecked."""
+        if not self._p4_cash_included_in_weight(portfolio_id):
+            return 0.0
+        return self._p4_active_cash_balance(portfolio_id)
+
     def _p4_filtered_weight_map(self, metrics_map: Any) -> tuple[dict[Any, float], float]:
-        """Return weights rebased across enabled stocks plus brokerage cash."""
-        return filtered_weights(metrics_map, self._p4_weight_included_tickers(), self._p4_active_cash_balance())
+        """Return weights rebased across enabled stock and cash positions."""
+        return filtered_weights(metrics_map, self._p4_weight_included_tickers(), self._p4_weight_included_cash_balance())
 
     def _p4_filtered_summary_values(self, metrics_map: Any) -> dict[str, float]:
-        """Return top-summary values for checked stocks plus brokerage cash."""
-        return filtered_summary(metrics_map, self._p4_weight_included_tickers(), self._p4_active_cash_balance())
+        """Return top-summary values for checked stock and cash positions."""
+        return filtered_summary(metrics_map, self._p4_weight_included_tickers(), self._p4_weight_included_cash_balance())
 
     def _p4_signed_currency_text(self, value: Any) -> str:
         """Format a signed currency value with the sign before the dollar symbol."""
@@ -1021,17 +1032,30 @@ class PortfolioMetricsMixin:
             self._p6_populate_tables(force_progress_rebuild=True)
 
     def _p4_sync_cash_input(self) -> None:
-        """Reflect the active portfolio cash value into the summary editor."""
+        """Reflect the active portfolio cash value and inclusion state into the summary editor."""
         control = getattr(self, 'p4_cash_input', None)
-        if control is None:
-            return
-        control.blockSignals(True)
-        control.setValue(self._p4_active_cash_balance())
-        control.blockSignals(False)
+        if control is not None:
+            control.blockSignals(True)
+            control.setValue(self._p4_active_cash_balance())
+            control.blockSignals(False)
+        checkbox = getattr(self, 'p4_cash_include_checkbox', None)
+        if checkbox is not None:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(self._p4_cash_included_in_weight())
+            checkbox.blockSignals(False)
 
     def _p4_on_cash_balance_changed(self, value: float) -> None:
         """Handle user edits to brokerage cash."""
         self._p4_set_active_cash_balance(value)
+
+    def _p4_on_cash_weight_inclusion_changed(self, included: bool) -> None:
+        """Persist the Cash checkbox and refresh only its filtered views."""
+        if getattr(self, '_p4_active_portfolio_is_combined', lambda: False)():
+            return
+        entry = self._get_portfolio_entry(self.active_portfolio_id)
+        entry['include_cash_in_weight'] = bool(included)
+        self._persist_all_portfolios(immediate=True)
+        self._p4_refresh_weight_filter_views()
 
     def _p4_update_cash_dependent_views(self) -> None:
         """Refresh total and allocation displays when only cash changed."""
@@ -1399,7 +1423,7 @@ class PortfolioMetricsMixin:
             numeric_count = max(int(count), 0)
         except (TypeError, ValueError):
             numeric_count = 0
-        self.p4_stock_positions_label.setText(f'Stock Positions:  {numeric_count}')
+        self.p4_stock_positions_label.setText(f'Positions:  {numeric_count}')
 
     def _p4_metric_display_text(self, metric_key: str, value: Any) -> tuple[str, str]:
         """Format one analytics metric for display."""

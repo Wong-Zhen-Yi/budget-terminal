@@ -122,6 +122,16 @@ def _fixture_companyfacts() -> dict[str, object]:
         fy=2024,
         accession="0001-24-000030",
     )
+    annual_instant = _entry(
+        60.0,
+        start=None,
+        end="2024-12-31",
+        filed="2025-02-01",
+        form="10-K",
+        fp="FY",
+        fy=2024,
+        accession="0001-24-000031",
+    )
     return {
         "entityName": "Fixture Holdings",
         "facts": {
@@ -130,6 +140,22 @@ def _fixture_companyfacts() -> dict[str, object]:
                 "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"shares": quarters}},
                 "Revenues": {"units": {"USD": [annual_old, annual_amended, *quarters]}},
                 "NetIncomeLoss": {"units": {"USD": [{**annual_amended, "val": 40.0}, *[{**item, "val": value} for item, value in zip(quarters[:3], (8.0, 9.0, 10.0))]]}},
+                "SellingGeneralAndAdministrativeExpense": {
+                    "units": {
+                        "USD": [
+                            {**annual_amended, "val": 40.0},
+                            *[{**item, "val": value} for item, value in zip(quarters[:3], (8.0, 9.0, 10.0))],
+                        ]
+                    }
+                },
+                "ResearchAndDevelopmentExpense": {
+                    "units": {
+                        "USD": [
+                            {**annual_amended, "val": 20.0},
+                            *[{**item, "val": value} for item, value in zip(quarters[:3], (4.0, 5.0, 6.0))],
+                        ]
+                    }
+                },
                 "WeightedAverageNumberOfDilutedSharesOutstanding": {
                     "units": {
                         "shares": [
@@ -148,10 +174,27 @@ def _fixture_companyfacts() -> dict[str, object]:
                 },
                 "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [cashflow_annual, *cashflow_quarters]}},
                 "PaymentsToAcquirePropertyPlantAndEquipment": {"units": {"USD": [capex_annual, *capex_quarters]}},
-                "CashCashEquivalentsAndShortTermInvestments": {"units": {"USD": [instant]}},
+                "CashCashEquivalentsAndShortTermInvestments": {"units": {"USD": [instant, annual_instant]}},
+                "MarketableSecuritiesCurrent": {"units": {"USD": [{**instant, "val": 12.0}]}},
                 "LongTermDebt": {"units": {"USD": [{**instant, "val": 30.0}]}},
-                "CommonStockSharesOutstanding": {"units": {"shares": [{**instant, "val": 10.0}]}},
-            }
+                "CommonStockSharesOutstanding": {
+                    "units": {"shares": [{**instant, "val": 10.0}, {**annual_instant, "val": 11.0}]}
+                },
+            },
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {
+                        "shares": [
+                            {
+                                **instant,
+                                "end": "2024-10-15",
+                                "filed": "2024-11-02",
+                                "val": 10.5,
+                            }
+                        ]
+                    }
+                }
+            },
         },
     }
 
@@ -210,10 +253,16 @@ def test_normalization_and_bundle_contract() -> None:
     assert quarterly.loc["Total Revenue", "2024-06-30"] == 95.0
     assert quarterly.loc["Total Revenue", "2024-12-31"] == 115.0
     assert normalized["provenance"]["Total Revenue"]["quarterly"]["2024-12-31"]["derived"] is True
+    assert quarterly.loc["Selling General And Administrative Expense", "2024-12-31"] == 13.0
+    assert quarterly.loc["Research And Development Expense", "2024-12-31"] == 5.0
     assert pd.isna(quarterly.loc["Diluted Average Shares", "2024-12-31"])
     assert pd.isna(quarterly.loc["Diluted EPS", "2024-12-31"])
     assert "2024-12-31" not in normalized["provenance"]["Diluted Average Shares"]["quarterly"]
     assert frames["cashflow"].loc["Free Cash Flow"].iloc[-1] == 60.0
+    balance_quarterly = frames["quarterly_balance_sheet"]
+    assert balance_quarterly.loc["Marketable Securities Current", "2024-09-30"] == 12.0
+    assert balance_quarterly.loc["Common Stock Shares Outstanding", "2024-12-31"] == 11.0
+    assert pd.Timestamp("2024-10-15") not in balance_quarterly.columns
     assert "Gross Profit" not in annual.index
     yahoo = pd.DataFrame(
         {pd.Timestamp("2024-12-31"): [390.0, 7.0], pd.Timestamp("2023-12-31"): [300.0, 6.0]},
@@ -227,6 +276,28 @@ def test_normalization_and_bundle_contract() -> None:
     assert merged.loc["Total Revenue", pd.Timestamp("2024-12-31")] == 400.0
     assert merged.loc["Total Revenue", pd.Timestamp("2023-12-31")] == 300.0
     assert merged.loc["Yahoo Custom Row", pd.Timestamp("2024-12-31")] == 7.0
+
+    apple_style_yahoo = pd.DataFrame(
+        {
+            pd.Timestamp("2025-09-30"): [416.0, 90.0, 12.0],
+            pd.Timestamp("2024-09-30"): [391.0, 97.0, 11.0],
+        },
+        index=["Total Revenue", "Total Debt", "Yahoo Custom Row"],
+    )
+    apple_style_sec = pd.DataFrame(
+        {
+            pd.Timestamp("2025-09-27"): [416.0, 99.0],
+            pd.Timestamp("2024-09-28"): [391.0, 107.0],
+        },
+        index=["Total Revenue", "Total Debt"],
+    )
+    apple_style_merged = merge_statement_frames(apple_style_yahoo, apple_style_sec)
+    assert list(apple_style_merged.columns) == [
+        pd.Timestamp("2025-09-27"),
+        pd.Timestamp("2024-09-28"),
+    ]
+    assert apple_style_merged.loc["Total Debt", pd.Timestamp("2025-09-27")] == 99.0
+    assert apple_style_merged.loc["Yahoo Custom Row", pd.Timestamp("2025-09-27")] == 12.0
 
     instant = {
         "end": "2024-09-30",

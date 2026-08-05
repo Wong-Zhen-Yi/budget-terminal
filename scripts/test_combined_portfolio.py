@@ -43,6 +43,7 @@ def _source_state() -> dict:
                 },
                 "options_tracker": [{"row_id": "same", "ticker": "AAPL", "strategy": "Calls"}],
                 "cash_balance": 100,
+                "include_cash_in_weight": False,
             },
             "portfolio_2": {
                 "id": "portfolio_2",
@@ -72,6 +73,7 @@ def test_combined_portfolio_aggregation_and_normalization() -> None:
     assert combined["portfolio_tracker"]["AAPL"]["include_in_weight"] is True
     assert combined["portfolio_tracker"]["NVDA"]["avg_price"] == 0.0
     assert combined["cash_balance"] == 350.0
+    assert combined["include_cash_in_weight"] is True
     assert [row["ticker"] for row in combined["options_tracker"]] == ["AAPL", "NVDA"]
     assert len({row["row_id"] for row in combined["options_tracker"]}) == 2
 
@@ -84,6 +86,8 @@ def test_combined_portfolio_aggregation_and_normalization() -> None:
     assert normalized["active_portfolio_id"] == COMBINED_PORTFOLIO_ID
     assert normalized["portfolio_order"] == ["portfolio_1", "portfolio_2"]
     assert COMBINED_PORTFOLIO_ID not in normalized["portfolios"]
+    assert normalized["portfolios"]["portfolio_1"]["include_cash_in_weight"] is False
+    assert normalized["portfolios"]["portfolio_2"]["include_cash_in_weight"] is True
     for serialized in (
         _serialize_portfolio_storage(state),
         _serialize_tracker_storage(state),
@@ -130,6 +134,8 @@ def test_combined_portfolio_ui_is_read_only() -> None:
         assert not window.p4_add_options_btn.isEnabled()
         assert not window.p4_remove_options_btn.isEnabled()
         assert not window.p4_cash_input.isEnabled()
+        assert not window.p4_cash_include_checkbox.isEnabled()
+        assert window.p4_cash_include_checkbox.isChecked()
         assert window.p4_table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
         assert window.p4_opt_table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
         assert all(

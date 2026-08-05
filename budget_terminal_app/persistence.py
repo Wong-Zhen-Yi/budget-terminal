@@ -74,11 +74,7 @@ DEFAULT_BACKTEST_PAGE_SETTINGS = {
 }
 DEFAULT_GLOBAL_PAGE_SETTINGS = {'interval_label': '1D'}
 DEFAULT_UP_DOWN_PAGE_SETTINGS = {'active_source': 'portfolio', 'interval_key': '1d', 'custom_symbols': []}
-DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
-    'last_ticker': '',
-    'selected_configuration': 'default',
-    'custom_selections_by_ticker': {},
-}
+DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {'last_ticker': ''}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {
     'symbol': 'SPY',
     'timeframe_label': '1 Day',
@@ -413,6 +409,7 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
             'tracker_data': tracker_data,
             'options_data': options_data,
             'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
+            'include_cash_in_weight': raw_entry.get('include_cash_in_weight') is not False,
         }
     return {
         'chart_slots': base['chart_slots'],
@@ -437,6 +434,7 @@ def _default_portfolio_entry(portfolio_id: Any, chart_slots: Any=None) -> Any:
         'portfolio_tracker': {},
         'options_tracker': [],
         'cash_balance': 0.0,
+        'include_cash_in_weight': True,
     }
 
 
@@ -543,6 +541,7 @@ def build_combined_portfolio_entry(state: Any) -> dict[str, Any]:
         'portfolio_tracker': tracker,
         'options_tracker': options,
         'cash_balance': cash_balance,
+        'include_cash_in_weight': True,
     }
 
 
@@ -626,6 +625,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'portfolio_tracker': tracker_payload if isinstance(tracker_payload, dict) else {},
             'options_tracker': list(options_payload) if isinstance(options_payload, list) else [],
             'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
+            'include_cash_in_weight': raw_entry.get('include_cash_in_weight') is not False,
         }
     if 'portfolio' in payload or 'portfolio_tracker' in payload or 'options_tracker' in payload:
         legacy_portfolio = _portfolio_payload_with_chart_slots(payload.get('portfolio', []), chart_slots)
@@ -641,6 +641,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'portfolio_tracker': legacy_tracker if isinstance(legacy_tracker, dict) else {},
             'options_tracker': list(legacy_options) if isinstance(legacy_options, list) else [],
             'cash_balance': _normalize_cash_balance(payload.get('cash_balance')),
+            'include_cash_in_weight': payload.get('include_cash_in_weight') is not False,
         }
         normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), normalized['portfolio_order'], DEFAULT_MAIN_PORTFOLIO_ID)
         normalized['active_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']), normalized['portfolio_order'], normalized['main_portfolio_id'])
@@ -1056,6 +1057,7 @@ def load_active_portfolio_state(portfolio_id: Any=None) -> Any:
         'portfolio_tracker': dict(active.get('portfolio_tracker', {})),
         'options_tracker': list(active.get('options_tracker', [])),
         'cash_balance': _normalize_cash_balance(active.get('cash_balance')),
+        'include_cash_in_weight': active.get('include_cash_in_weight') is not False,
     }
 
 def load_tickers() -> Any:
@@ -1896,75 +1898,11 @@ def _normalize_global_page_settings(settings: Any) -> dict[str, Any]:
     return {'interval_label': interval_label}
 
 
-def _normalize_fundamentals_selection_rows(values: Any) -> list[str]:
-    """Normalize one ordered Fundamentals row-selection list."""
-    rows = []
-    if not isinstance(values, list):
-        return rows
-    for value in values:
-        row = str(value or '').strip()
-        if row and row not in rows:
-            rows.append(row)
-    return rows
-
-
-def _normalize_fundamentals_custom_selections(values: Any, *, last_ticker: str='', legacy_custom_panels: Any=None) -> dict[str, dict[str, list[str]]]:
-    """Normalize per-ticker Fundamentals checklist selections, with migration support."""
-    normalized = {}
-    raw = values if isinstance(values, dict) else {}
-    for ticker_key, selection in raw.items():
-        ticker = str(ticker_key or '').upper().strip()
-        if not ticker or not isinstance(selection, dict):
-            continue
-        family_map = {
-            'financials': _normalize_fundamentals_selection_rows(selection.get('financials', [])),
-            'cashflow': _normalize_fundamentals_selection_rows(selection.get('cashflow', [])),
-            'balance_sheet': _normalize_fundamentals_selection_rows(selection.get('balance_sheet', [])),
-        }
-        if any(family_map.values()):
-            normalized[ticker] = family_map
-    if normalized:
-        return normalized
-    ticker = str(last_ticker or '').upper().strip()
-    if not ticker or not isinstance(legacy_custom_panels, list):
-        return {}
-    migrated = {
-        'financials': [],
-        'cashflow': [],
-        'balance_sheet': [],
-    }
-    for entry in legacy_custom_panels:
-        panel = entry if isinstance(entry, dict) else {}
-        if str(panel.get('source', '') or '').strip().lower() != 'statement_row':
-            continue
-        family = str(panel.get('statement_family', 'financials') or 'financials').strip().lower()
-        if family not in migrated:
-            continue
-        row = str(panel.get('statement_row', '') or '').strip()
-        if row and row not in migrated[family]:
-            migrated[family].append(row)
-    return {ticker: migrated} if any(migrated.values()) else {}
-
-
 def _normalize_fundamentals_page_settings(settings: Any) -> dict[str, Any]:
     """Normalize persisted state for the Fundamentals page."""
     saved = settings if isinstance(settings, dict) else {}
     last_ticker = str(saved.get('last_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['last_ticker']) or '').upper().strip()
-    selected_configuration = str(
-        saved.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-        or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-    ).strip().lower()
-    if selected_configuration not in {'default', 'custom'}:
-        selected_configuration = DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-    return {
-        'last_ticker': last_ticker,
-        'selected_configuration': selected_configuration,
-        'custom_selections_by_ticker': _normalize_fundamentals_custom_selections(
-            saved.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker']),
-            last_ticker=last_ticker,
-            legacy_custom_panels=saved.get('custom_panels'),
-        ),
-    }
+    return {'last_ticker': last_ticker}
 
 
 def _normalize_stocks_page_settings(settings: Any) -> Any:

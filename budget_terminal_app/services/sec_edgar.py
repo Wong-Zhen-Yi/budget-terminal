@@ -22,6 +22,9 @@ SEC_STALE_FALLBACK_SECONDS = 7 * 24 * 60 * 60
 SEC_REQUEST_INTERVAL_SECONDS = 0.2
 SEC_REQUEST_TIMEOUT_SECONDS = 15
 SEC_MAX_ATTEMPTS = 3
+SEC_ANNUAL_HISTORY_PERIODS = 10
+SEC_QUARTERLY_HISTORY_PERIODS = 16
+SEC_PERIOD_END_MATCH_DAYS = 7
 
 _DEFAULT_USER_AGENT = (
     "BudgetTerminal/0.911 "
@@ -66,6 +69,20 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
         "kind": "flow",
         "units": ("USD",),
         "tags": ("OperatingExpenses", "OperatingCostsAndExpenses"),
+    },
+    "selling_general_and_administrative": {
+        "row": "Selling General And Administrative Expense",
+        "family": "financials",
+        "kind": "flow",
+        "units": ("USD",),
+        "tags": ("SellingGeneralAndAdministrativeExpense",),
+    },
+    "research_and_development": {
+        "row": "Research And Development Expense",
+        "family": "financials",
+        "kind": "flow",
+        "units": ("USD",),
+        "tags": ("ResearchAndDevelopmentExpense",),
     },
     "net_income": {
         "row": "Net Income",
@@ -118,6 +135,13 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
             "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         ),
     },
+    "marketable_securities_current": {
+        "row": "Marketable Securities Current",
+        "family": "balance_sheet",
+        "kind": "instant",
+        "units": ("USD",),
+        "tags": ("MarketableSecuritiesCurrent", "ShortTermInvestments"),
+    },
     "total_debt": {
         "row": "Total Debt",
         "family": "balance_sheet",
@@ -169,7 +193,8 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
         "family": "balance_sheet",
         "kind": "instant",
         "units": ("shares",),
-        "tags": ("CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"),
+        "tags": ("CommonStockSharesOutstanding",),
+        "fallback_tags": ("EntityCommonStockSharesOutstanding",),
     },
 }
 
@@ -186,6 +211,8 @@ _Q4_DERIVABLE_METRICS = {
     "gross_profit",
     "operating_income",
     "operating_expense",
+    "selling_general_and_administrative",
+    "research_and_development",
     "net_income",
     "operating_cash_flow",
     "capital_expenditure",
@@ -272,6 +299,12 @@ def _select_period_facts(
         tuple(spec.get("tags", ())),
         tuple(spec.get("units", ())),
     )
+    if not definitions and spec.get("fallback_tags"):
+        definitions = _fact_definitions(
+            company_facts,
+            tuple(spec.get("fallback_tags", ())),
+            tuple(spec.get("units", ())),
+        )
     if not definitions:
         return [], []
     annual: dict[str, dict[str, Any]] = {}
@@ -320,17 +353,22 @@ def _select_period_facts(
 
 def _derive_q4(annual: list[dict[str, Any]], quarterly: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output = list(quarterly)
-    direct_by_fy: dict[Any, list[dict[str, Any]]] = {}
-    for item in quarterly:
-        direct_by_fy.setdefault(item.get("fy"), []).append(item)
     existing_ends = {str(item.get("end") or "") for item in output}
     for annual_item in annual:
-        fiscal_year = annual_item.get("fy")
-        direct = direct_by_fy.get(fiscal_year, [])
-        if len(direct) != 3 or annual_item.get("end") in existing_ends:
+        annual_start = _parse_date(annual_item.get("start"))
+        annual_end = _parse_date(annual_item.get("end"))
+        if annual_start is None or annual_end is None or annual_item.get("end") in existing_ends:
             continue
+        direct = []
+        for item in quarterly:
+            item_start = _parse_date(item.get("start"))
+            item_end = _parse_date(item.get("end"))
+            if item_start is None or item_end is None:
+                continue
+            if annual_start <= item_start <= item_end < annual_end:
+                direct.append(item)
         direct_fps = {str(item.get("fp") or "").upper() for item in direct}
-        if direct_fps != {"Q1", "Q2", "Q3"}:
+        if len(direct) != 3 or direct_fps != {"Q1", "Q2", "Q3"}:
             continue
         value = float(annual_item["value"]) - sum(float(item["value"]) for item in direct)
         output.append({
@@ -371,7 +409,22 @@ def _component_debt_series(company_facts: dict[str, Any], period: str) -> list[d
     def selected(tags: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         spec = {"kind": "instant", "units": ("USD",), "tags": tags}
         annual, quarterly = _select_period_facts(company_facts, spec)
-        return _series_by_end(annual if period == "annual" else quarterly)
+        values = annual if period == "annual" else [*quarterly, *annual]
+        return _series_by_end(values)
+
+    def combined(
+        current: dict[str, dict[str, Any]],
+        noncurrent: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        output = []
+        for end in sorted(set(current) & set(noncurrent)):
+            output.append({
+                **current[end],
+                "value": float(current[end]["value"]) + float(noncurrent[end]["value"]),
+                "tag": f'{current[end].get("tag", "")}+{noncurrent[end].get("tag", "")}',
+                "derived": True,
+            })
+        return output
 
     current_total = selected(("DebtCurrent",))
     current_long_term = selected(_DEBT_CURRENT_LONG_TERM_TAGS)
@@ -393,15 +446,17 @@ def _component_debt_series(company_facts: dict[str, Any], period: str) -> list[d
             ),
             "derived": bool(long_term_item and short_term_item),
         }
-    output = []
-    for end in sorted(set(current) & set(noncurrent)):
-        output.append({
-            **current[end],
-            "value": float(current[end]["value"]) + float(noncurrent[end]["value"]),
-            "tag": f'{current[end].get("tag", "")}+{noncurrent[end].get("tag", "")}',
-            "derived": True,
-        })
-    return output
+    output = combined(current, noncurrent)
+    if output:
+        return output
+
+    operating_total = selected(("OperatingLeaseLiability",))
+    if operating_total:
+        return sorted(operating_total.values(), key=lambda item: item["end"])
+    return combined(
+        selected(("OperatingLeaseLiabilityCurrent",)),
+        selected(("OperatingLeaseLiabilityNoncurrent",)),
+    )
 
 
 def _build_frame(series: dict[str, list[dict[str, Any]]], metric_keys: list[str], limit: int) -> Any:
@@ -427,21 +482,32 @@ def _normalize_company_facts(company_facts: dict[str, Any]) -> dict[str, Any]:
         if key == "total_debt":
             component_annual = _component_debt_series(company_facts, "annual")
             component_quarterly = _component_debt_series(company_facts, "quarterly")
-            if component_annual:
+            component_annual_is_lease_only = component_annual and all(
+                "OperatingLease" in str(item.get("tag") or "") for item in component_annual
+            )
+            component_quarterly_is_lease_only = component_quarterly and all(
+                "OperatingLease" in str(item.get("tag") or "") for item in component_quarterly
+            )
+            if component_annual and (not annual or not component_annual_is_lease_only):
                 annual = component_annual
-            if component_quarterly:
+            if component_quarterly and (not quarterly or not component_quarterly_is_lease_only):
                 quarterly = component_quarterly
+        if spec.get("kind") == "instant":
+            quarterly = sorted(
+                _series_by_end([*quarterly, *annual]).values(),
+                key=lambda item: item["end"],
+            )
         if key in _Q4_DERIVABLE_METRICS:
             quarterly = _derive_q4(annual, quarterly)
-        annual_series[key] = annual[-10:]
-        quarterly_series[key] = quarterly[-12:]
+        annual_series[key] = annual[-SEC_ANNUAL_HISTORY_PERIODS:]
+        quarterly_series[key] = quarterly[-SEC_QUARTERLY_HISTORY_PERIODS:]
 
     annual_series["free_cash_flow"] = _derive_free_cash_flow(
         annual_series.get("operating_cash_flow", []), annual_series.get("capital_expenditure", [])
-    )[-10:]
+    )[-SEC_ANNUAL_HISTORY_PERIODS:]
     quarterly_series["free_cash_flow"] = _derive_free_cash_flow(
         quarterly_series.get("operating_cash_flow", []), quarterly_series.get("capital_expenditure", [])
-    )[-12:]
+    )[-SEC_QUARTERLY_HISTORY_PERIODS:]
 
     for key in (*_METRIC_SPECS.keys(), "free_cash_flow"):
         row = "Free Cash Flow" if key == "free_cash_flow" else _METRIC_SPECS[key]["row"]
@@ -456,12 +522,12 @@ def _normalize_company_facts(company_facts: dict[str, Any]) -> dict[str, Any]:
     balance_keys = [key for key, spec in _METRIC_SPECS.items() if spec["family"] == "balance_sheet"]
 
     frames = {
-        "financials": _build_frame(annual_series, financial_keys, 10),
-        "quarterly_financials": _build_frame(quarterly_series, financial_keys, 12),
-        "cashflow": _build_frame(annual_series, cashflow_keys, 10),
-        "quarterly_cashflow": _build_frame(quarterly_series, cashflow_keys, 12),
-        "balance_sheet": _build_frame(annual_series, balance_keys, 10),
-        "quarterly_balance_sheet": _build_frame(quarterly_series, balance_keys, 12),
+        "financials": _build_frame(annual_series, financial_keys, SEC_ANNUAL_HISTORY_PERIODS),
+        "quarterly_financials": _build_frame(quarterly_series, financial_keys, SEC_QUARTERLY_HISTORY_PERIODS),
+        "cashflow": _build_frame(annual_series, cashflow_keys, SEC_ANNUAL_HISTORY_PERIODS),
+        "quarterly_cashflow": _build_frame(quarterly_series, cashflow_keys, SEC_QUARTERLY_HISTORY_PERIODS),
+        "balance_sheet": _build_frame(annual_series, balance_keys, SEC_ANNUAL_HISTORY_PERIODS),
+        "quarterly_balance_sheet": _build_frame(quarterly_series, balance_keys, SEC_QUARTERLY_HISTORY_PERIODS),
     }
     return {"frames": frames, "provenance": provenance}
 
@@ -529,8 +595,40 @@ def merge_statement_frames(yahoo_frame: Any, sec_frame: Any) -> Any:
     if sec.empty:
         return yahoo
     rows = list(yahoo.index) + [row for row in sec.index if row not in yahoo.index]
-    columns = list(yahoo.columns) + [column for column in sec.columns if column not in yahoo.columns]
-    merged = yahoo.reindex(index=rows, columns=columns)
+
+    sec_columns = list(sec.columns)
+
+    def canonical_column(column: Any) -> tuple[Any, int]:
+        if not isinstance(column, pd.Timestamp):
+            return column, SEC_PERIOD_END_MATCH_DAYS + 1
+        candidates = []
+        for sec_column in sec_columns:
+            if not isinstance(sec_column, pd.Timestamp):
+                continue
+            distance = abs((column - sec_column).days)
+            if distance <= SEC_PERIOD_END_MATCH_DAYS:
+                candidates.append((distance, sec_column))
+        if not candidates:
+            return column, SEC_PERIOD_END_MATCH_DAYS + 1
+        distance, matched_column = min(candidates, key=lambda item: item[0])
+        return matched_column, distance
+
+    yahoo_columns = []
+    for column in yahoo.columns:
+        canonical, distance = canonical_column(column)
+        yahoo_columns.append((distance, column, canonical))
+    columns = list(sec_columns)
+    columns.extend(
+        canonical
+        for _, _, canonical in yahoo_columns
+        if canonical not in columns
+    )
+    merged = pd.DataFrame(index=rows, columns=columns, dtype=float)
+    for _, source_column, target_column in sorted(yahoo_columns, key=lambda item: item[0]):
+        for row in yahoo.index:
+            value = yahoo.at[row, source_column]
+            if pd.notna(value) and pd.isna(merged.at[row, target_column]):
+                merged.at[row, target_column] = value
     for row in sec.index:
         for column in sec.columns:
             value = sec.at[row, column]

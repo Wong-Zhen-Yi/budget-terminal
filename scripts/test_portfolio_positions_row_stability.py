@@ -119,6 +119,7 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
         self.weight_chart_count = 0
         self.heatmap_refresh_count = 0
         self.cash_balance = 0.0
+        self.portfolio_entry = {"include_cash_in_weight": True}
         self.p4_weight_chart = object()
         self._invoke_main = _ImmediateSignal()
         self._data_service_client = _PortfolioDataClient(self)
@@ -160,6 +161,9 @@ class _PortfolioProbe(QObject, PortfolioSetupMixin, PortfolioMetricsMixin):
 
     def _p4_active_cash_balance(self, portfolio_id=None) -> float:
         return self.cash_balance
+
+    def _get_portfolio_entry(self, portfolio_id=None):
+        return self.portfolio_entry
 
     def _persist_all_portfolios(self, *, immediate: bool = False) -> None:
         self.persist_count += 1
@@ -422,6 +426,37 @@ def test_weight_checkbox_filters_only_requested_views() -> None:
     _assert(cache_key[2] == ("AAA",), "Dip Finder cache key should include the enabled ticker signature")
 
 
+def test_cash_checkbox_persists_and_rebases_filtered_views() -> None:
+    _qt_app()
+    probe = _PortfolioProbe()
+    probe.cash_balance = 10.0
+    probe.update_page4(probe.last_data)
+    probe.weight_chart_count = 0
+    probe.heatmap_refresh_count = 0
+    probe.returns_fetch_count = 0
+    probe.momentum_fetch_count = 0
+    probe.metrics_refresh_count = 0
+
+    probe._p4_on_cash_weight_inclusion_changed(False)
+
+    _assert(probe.portfolio_entry["include_cash_in_weight"] is False, "unchecked Cash should persist per portfolio")
+    _assert(probe.persist_immediate is True, "Cash checkbox changes should persist immediately")
+    _assert("CASH" not in probe.last_weights, "unchecked Cash should not appear in Portfolio Weight")
+    _assert(abs(probe.last_weights["AAA"] - (100.0 / 3.0)) < 0.001, "AAA should rebase without Cash")
+    _assert(abs(probe.last_weights["BBB"] - (200.0 / 3.0)) < 0.001, "BBB should rebase without Cash")
+    _assert(probe.p4_total_label.text() == "Total:  $30.00  USD", "checked total should exclude unchecked Cash")
+    _assert(probe.weight_chart_count == 1, "Cash toggle should refresh Portfolio Weight once")
+    _assert(probe.heatmap_refresh_count == 1, "Cash toggle should refresh the linked Heatmap once")
+    _assert(probe.returns_fetch_count == 0, "Cash toggle should not fetch returns")
+    _assert(probe.momentum_fetch_count == 0, "Cash toggle should not refresh Momentum")
+    _assert(probe.metrics_refresh_count == 0, "Cash toggle should not refresh Portfolio Metrics")
+
+    probe._p4_on_cash_weight_inclusion_changed(True)
+    _assert(probe.portfolio_entry["include_cash_in_weight"] is True, "checked Cash should persist per portfolio")
+    _assert(abs(probe.last_weights["CASH"] - 25.0) < 0.001, "checked Cash should return to Portfolio Weight")
+    _assert(probe.p4_total_label.text() == "Total:  $40.00  USD", "checked total should include checked Cash")
+
+
 def test_holdings_refresh_is_single_flight_and_preserves_dashboard_payload() -> None:
     _qt_app()
     probe = _DeferredPortfolioProbe()
@@ -662,6 +697,7 @@ def main() -> None:
     test_incomplete_position_entry_does_not_fetch_or_move()
     test_complete_position_entry_waits_for_manual_refresh()
     test_weight_checkbox_filters_only_requested_views()
+    test_cash_checkbox_persists_and_rebases_filtered_views()
     test_holdings_refresh_is_single_flight_and_preserves_dashboard_payload()
     test_hidden_holdings_completion_defers_one_render()
     test_portfolio_switch_queues_new_context_and_rejects_old_result()

@@ -40,6 +40,7 @@ def _window_bootstrap_default_portfolio_entry(portfolio_id: Any) -> Any:
         'portfolio_tracker': {},
         'options_tracker': [],
         'cash_balance': 0.0,
+        'include_cash_in_weight': True,
     }
 
 
@@ -381,12 +382,14 @@ class WindowBootstrapMixin:
             'portfolio_tracker': {},
             'options_tracker': [],
             'cash_balance': 0.0,
+            'include_cash_in_weight': True,
         })
         entry.setdefault('portfolio', [])
         entry.setdefault('chart_slots', list(DEFAULT_CHART_SLOTS))
         entry.setdefault('portfolio_tracker', {})
         entry.setdefault('options_tracker', [])
         entry['cash_balance'] = _window_bootstrap_normalize_cash_balance(entry.get('cash_balance'))
+        entry['include_cash_in_weight'] = entry.get('include_cash_in_weight') is not False
         return entry
 
     def _apply_main_portfolio_runtime(self) -> None:
@@ -856,13 +859,6 @@ class WindowBootstrapMixin:
             self.last_data = None
             self.p2_current_data = None
             self.valuation_current_data = None
-            self.p2_selected_configuration = str(
-                self.fundamentals_page_state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-                or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-            ).strip().lower()
-            self.p2_custom_selections_by_ticker = dict(
-                self.fundamentals_page_state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
-            )
             self.tracker_data = {}
             self._mktcap_cache = {}
             self._mktcap_cache_ts = {}

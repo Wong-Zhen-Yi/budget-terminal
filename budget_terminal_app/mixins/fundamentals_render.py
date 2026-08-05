@@ -101,7 +101,7 @@ class FundamentalsRenderMixin:
                 color = '#80ff80' if num >= 0 else '#ff6060'
             except Exception:
                 color = 'white'
-            lbl_widget.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
+            lbl_widget.setStyleSheet(f'font-size: 17px; font-weight: bold; color: {color};')
         pe = sg('trailingPE')
         fpe = sg('forwardPE')
         ps = sg('priceToSalesTrailing12Months')
@@ -115,10 +115,10 @@ class FundamentalsRenderMixin:
         fcf = reported_flow('cashflow', ['free cash flow'])
         if fcf is None:
             fcf = sg('freeCashflow')
-        total_cash = reported_instant([
-            'cash cash equivalents and short term investments',
-            'cash and cash equivalents',
-        ])
+        cash_values, _, _, _ = self._p2_resolve_curated_series(data, 'quarterly', 'cash')
+        if not cash_values:
+            cash_values, _, _, _ = self._p2_resolve_curated_series(data, 'annual', 'cash')
+        total_cash = float(cash_values[-1]) if cash_values else None
         if total_cash is None:
             total_cash = sg('totalCash')
         total_debt = self._p2_latest_total_debt_value(data, 'quarterly')

@@ -1072,14 +1072,6 @@ class SettingsMixin:
         self.fundamentals_page_state = save_fundamentals_page_settings(
             payload.get('fundamentals_page', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS)
         ) if isinstance(payload, dict) else save_fundamentals_page_settings(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS)
-        fundamentals_page_state = dict(self.fundamentals_page_state)
-        self.p2_selected_configuration = str(
-            fundamentals_page_state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-            or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-        ).strip().lower()
-        self.p2_custom_selections_by_ticker = dict(
-            fundamentals_page_state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
-        )
         self.valuation_page_state = save_valuation_page_settings(
             payload.get('valuation_page', DEFAULT_VALUATION_PAGE_SETTINGS)
         ) if isinstance(payload, dict) else save_valuation_page_settings(DEFAULT_VALUATION_PAGE_SETTINGS)

@@ -138,6 +138,9 @@ class PortfolioSetupMixin:
         cash_input = getattr(self, 'p4_cash_input', None)
         if cash_input is not None:
             cash_input.setEnabled(not read_only)
+        cash_checkbox = getattr(self, 'p4_cash_include_checkbox', None)
+        if cash_checkbox is not None:
+            cash_checkbox.setEnabled(not read_only)
         stock_table = getattr(self, 'p4_table', None)
         if stock_table is not None:
             stock_table.setEditTriggers(
@@ -944,7 +947,7 @@ class PortfolioSetupMixin:
         heading_layout.setSpacing(2)
         title_label = QLabel('Included Portfolio Allocation')
         self.set_theme_role(title_label, 'section_title')
-        subtitle_label = QLabel('Checked stock positions plus brokerage cash')
+        subtitle_label = QLabel('Checked positions')
         self.set_theme_role(subtitle_label, 'muted')
         heading_layout.addWidget(title_label)
         heading_layout.addWidget(subtitle_label)
@@ -1374,6 +1377,8 @@ class PortfolioSetupMixin:
 
     def _p4_heatmap_cash_metric_text(self, rows: Any) -> str:
         """Return the cash metric shown outside the heatmap."""
+        if hasattr(self, '_p4_cash_included_in_weight') and not self._p4_cash_included_in_weight():
+            return 'Excluded'
         cash_balance = self._p4_active_cash_balance() if hasattr(self, '_p4_active_cash_balance') else 0.0
         stock_value = 0.0
         for row in rows or []:
@@ -1656,7 +1661,7 @@ class PortfolioSetupMixin:
         self.set_theme_role(title_lbl, 'page_title')
         self.p4_total_label = QLabel('Total:  $0.00  USD')
         self.set_theme_role(self.p4_total_label, 'metric')
-        self.p4_stock_positions_label = QLabel('Stock Positions:  0')
+        self.p4_stock_positions_label = QLabel('Positions:  0')
         self.set_theme_role(self.p4_stock_positions_label, 'badge')
         self.p4_stock_pl_label = QLabel('Stock P&L:  +$0.00')
         self.set_theme_role(self.p4_stock_pl_label, 'badge')
@@ -1667,8 +1672,13 @@ class PortfolioSetupMixin:
         cash_chip_layout = QHBoxLayout(self.p4_cash_chip)
         cash_chip_layout.setContentsMargins(10, 4, 8, 4)
         cash_chip_layout.setSpacing(8)
-        cash_label = QLabel('BROKERAGE CASH')
-        self.set_theme_role(cash_label, 'summary_chip_label')
+        self.p4_cash_include_checkbox = QCheckBox('BROKERAGE CASH')
+        self.p4_cash_include_checkbox.setChecked(True)
+        self.p4_cash_include_checkbox.setToolTip(
+            'Include Cash in Portfolio Weight, Pie Chart, Dip Finder, and Portfolio Heatmap'
+        )
+        self.set_theme_role(self.p4_cash_include_checkbox, 'summary_chip_label')
+        self.p4_cash_include_checkbox.toggled.connect(self._p4_on_cash_weight_inclusion_changed)
         self.p4_cash_input = QDoubleSpinBox()
         self.p4_cash_input.setRange(0.0, 999999999999.99)
         self.p4_cash_input.setDecimals(2)
@@ -1684,7 +1694,7 @@ class PortfolioSetupMixin:
         self.p4_cash_input.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.set_theme_role(self.p4_cash_input, 'cash_input')
         self.p4_cash_input.valueChanged.connect(self._p4_on_cash_balance_changed)
-        cash_chip_layout.addWidget(cash_label)
+        cash_chip_layout.addWidget(self.p4_cash_include_checkbox)
         cash_chip_layout.addWidget(self.p4_cash_input)
         summary_bar.addWidget(title_lbl)
         summary_bar.addSpacing(8)
@@ -1733,7 +1743,7 @@ class PortfolioSetupMixin:
         stock_layout.setContentsMargins(8, 8, 8, 8)
         stock_layout.setSpacing(6)
         stock_header_layout = QHBoxLayout()
-        stock_header = QLabel('Stock Positions')
+        stock_header = QLabel('Positions')
         self.set_theme_role(stock_header, 'section_title')
         self.p4_add_stock_btn = QPushButton('+ Add Position')
         self.p4_add_stock_btn.setMinimumHeight(24)

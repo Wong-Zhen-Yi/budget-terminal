@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from budget_terminal_app.dependencies import pd
+from PyQt6.QtTest import QTest
+
+from budget_terminal_app.dependencies import QHBoxLayout, QLabel, QPushButton, QToolTip, Qt, QWidget, pd, pg
 from budget_terminal_app.persistence import _normalize_fundamentals_page_settings
 
 
@@ -33,8 +35,8 @@ def _build_window():
         window.fundamentals_page_state = _normalize_fundamentals_page_settings(
             {
                 "last_ticker": "NVDA",
-                "selected_configuration": "default",
-                "custom_selections_by_ticker": {},
+                "selected_configuration": "custom",
+                "custom_selections_by_ticker": {"NVDA": {"financials": ["Total Revenue"]}},
             }
         )
         window._startup_session_restored_tabs.add("fundamentals")
@@ -81,18 +83,40 @@ def _payload(ticker: str = "NVDA") -> dict[str, object]:
             "totalCash": 500.0,
             "totalDebt": 100.0,
         },
-        "financials": _statement_frame(["Total Revenue", "Net Income"], annual_columns, 100.0),
+        "financials": _statement_frame(
+            [
+                "Total Revenue",
+                "Net Income",
+                "Selling General And Administrative",
+                "Research And Development",
+            ],
+            annual_columns,
+            100.0,
+        ),
         "quarterly_financials": _statement_frame(
-            ["Total Revenue", "Operating Expense"], quarterly_columns, 25.0
+            [
+                "Total Revenue",
+                "Net Income",
+                "Selling General And Administrative",
+                "Research And Development",
+            ],
+            quarterly_columns,
+            25.0,
         ),
         "cashflow": _statement_frame(["Operating Cash Flow", "Free Cash Flow"], annual_columns, 40.0),
         "quarterly_cashflow": _statement_frame(
-            ["Operating Cash Flow", "Capital Expenditure"], quarterly_columns, 10.0
+            ["Operating Cash Flow", "Free Cash Flow", "Capital Expenditure"], quarterly_columns, 10.0
         ),
         "balance_sheet": _statement_frame(
-            ["Cash And Cash Equivalents", "Total Debt"], annual_columns, 80.0
+            ["Ordinary Shares Number", "Cash And Cash Equivalents", "Total Debt"],
+            annual_columns,
+            80.0,
         ),
-        "quarterly_balance_sheet": _statement_frame(["Total Assets"], quarterly_columns, 200.0),
+        "quarterly_balance_sheet": _statement_frame(
+            ["Ordinary Shares Number", "Cash And Cash Equivalents", "Total Debt"],
+            quarterly_columns,
+            60.0,
+        ),
         "earnings_dates": pd.DataFrame(),
         "av_used": False,
         "statement_sources": {"primary": "SEC EDGAR", "fallback": "yfinance"},
@@ -138,15 +162,17 @@ def _payload(ticker: str = "NVDA") -> dict[str, object]:
     }
 
 
-def test_fundamentals_configuration_page() -> None:
+def test_fundamentals_page() -> None:
     app, window, fundamentals_mixin, original_save = _build_window()
     try:
+        assert window.fundamentals_page_state == {"last_ticker": "NVDA"}
         assert not hasattr(window, "p2_configuration_combo")
-        assert list(window.p2_configuration_buttons) == ["default", "custom"]
-        assert window.p2_configuration_group.exclusive()
-        assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["default"]
+        assert not hasattr(window, "p2_configuration_buttons")
+        assert not hasattr(window, "p2_configuration_group")
+        assert not hasattr(window, "p2_custom_workspace")
+        assert not hasattr(window, "p2_custom_editor_frame")
         assert window.p2_workspace_stack.currentWidget() is window.p2_default_workspace
-        assert window.p2_custom_editor_frame.isHidden()
+        assert window.p2_workspace_stack.count() == 1
         assert window.page2.minimumSizeHint().width() <= 1280
         assert [
             window.p2_source_tabs.tabText(index)
@@ -163,13 +189,145 @@ def test_fundamentals_configuration_page() -> None:
             "Cash & Total Debt",
             "Operating Expenses",
         )
+        assert len(window.p2_expand_buttons) == 6
+        assert not any(button.isEnabled() for button in window.p2_expand_buttons)
 
         window.update_page2(_payload(), update_collection_info=False)
+        assert all(
+            "font-size: 17px" in value_label.styleSheet()
+            for value_label in window.p2_metric_vals.values()
+        )
+        window._apply_fundamentals_theme()
+        assert all(
+            "font-size: 17px" in value_label.styleSheet()
+            for value_label in window.p2_metric_vals.values()
+        )
         window.stacked_widget.setCurrentIndex(8)
         window.show()
         app.processEvents()
         window._p2_relayout_charts()
         app.processEvents()
+        frame_widths = [frame.width() for frame in window.p2_chart_frames]
+        assert max(frame_widths) - min(frame_widths) <= 2
+        window.p2_quarterly_btn.click()
+        app.processEvents()
+        window._p2_relayout_charts()
+        app.processEvents()
+        app.processEvents()
+        app.processEvents()
+        quarterly_count = window.p2_current_data["quarterly_financials"].shape[1]
+        assert len(window.p2_simple_charts[0]._p2_bar_regions) == quarterly_count
+        def assert_compact_annotations(plot_index, plot):
+            window._p2_layout_chart_annotations(plot)
+            annotations = list(plot._p2_annotation_items)
+            visible_bars = [region for region in plot._p2_bar_regions if region["value"] != 0]
+            assert len(annotations) == len(visible_bars)
+            assert all("\n" in entry["item"].toPlainText() for entry in annotations)
+            annotation_rects = [
+                entry["item"].sceneBoundingRect().adjusted(-1.0, -1.0, 1.0, 1.0)
+                for entry in annotations
+            ]
+            plot_rect = plot.getPlotItem().vb.sceneBoundingRect()
+            for entry in annotations:
+                item_rect = entry["item"].sceneBoundingRect()
+                assert plot_rect.contains(item_rect), (
+                    f'{default_titles[plot_index]} label outside plot: plot={plot_rect}, label={item_rect}'
+                )
+            for left_index, left_rect in enumerate(annotation_rects):
+                overlaps = [
+                    right_rect
+                    for right_rect in annotation_rects[left_index + 1:]
+                    if left_rect.intersects(right_rect)
+                ]
+                assert not overlaps, (
+                    f'{default_titles[plot_index]} overlapping labels: left={left_rect}, right={overlaps[0]}'
+                )
+            for entry in annotations:
+                displaced = bool(entry.get("displaced"))
+                assert entry["leader"].isVisible() is displaced
+                if displaced:
+                    continue
+                region = entry["region"]
+                base_scene = plot.getPlotItem().vb.mapViewToScene(
+                    pg.QtCore.QPointF(region["x"], region["value"])
+                )
+                item_rect = entry["item"].sceneBoundingRect()
+                bar_gap = (
+                    base_scene.y() - item_rect.bottom()
+                    if region["value"] >= 0
+                    else item_rect.top() - base_scene.y()
+                )
+                assert 0.0 <= bar_gap <= 4.0
+            if plot_index in {2, 4, 5}:
+                assert any(entry.get("displaced") for entry in annotations)
+                assert any(not entry.get("displaced") for entry in annotations)
+
+        for plot_index, plot in enumerate(window.p2_simple_charts):
+            assert_compact_annotations(plot_index, plot)
+        revenue_annotations = window.p2_simple_charts[0]._p2_annotation_items
+        assert revenue_annotations[0]["item"].toPlainText() == "25.00\n—"
+        assert revenue_annotations[1]["item"].toPlainText() == "26.00\n+4.0%"
+        assert all(button.isEnabled() for button in window.p2_expand_buttons)
+
+        first_region, second_region = window.p2_simple_charts[0]._p2_bar_regions[:2]
+        assert window._p2_bar_tooltip_text(first_region) == "2022-Q1\nRevenue: 25.00\nGrowth: —"
+        assert window._p2_bar_tooltip_text(second_region) == "2022-Q2\nRevenue: 26.00\nGrowth: +4.0%"
+        hover_plot = window.p2_simple_charts[0]
+        hover_position = hover_plot.getPlotItem().vb.mapViewToScene(
+            pg.QtCore.QPointF(second_region["x"], second_region["value"] / 2.0)
+        )
+        window._p2_on_chart_mouse_moved(hover_plot, hover_position)
+        assert hover_plot._p2_hover_key == second_region["key"]
+        assert "Revenue: 26.00" in QToolTip.text()
+        outside_position = hover_plot.getPlotItem().vb.mapViewToScene(pg.QtCore.QPointF(100.0, 100.0))
+        window._p2_on_chart_mouse_moved(hover_plot, outside_position)
+        assert hover_plot._p2_hover_key is None
+        grouped_region = next(
+            region
+            for region in window.p2_simple_charts[4]._p2_bar_regions
+            if region["series"] == "Total Debt"
+        )
+        assert "Total Debt:" in window._p2_bar_tooltip_text(grouped_region)
+
+        edge_model = window._p2_chart_model(
+            "Edge Cases",
+            "quarterly",
+            [{
+                "name": "Edge",
+                "data": ([0.0, -5.0, 5.0], ["Q1", "Q2", "Q3"], [1, 2, 3]),
+                "color": "#ffffff",
+                "width": 0.7,
+            }],
+        )
+        edge_points = edge_model["series"][0]["points"]
+        assert [point["growth"] for point in edge_points] == [None, None, 200.0]
+        assert window._p2_growth_text(edge_points[0]["growth"]) == "—"
+        edge_legend = QWidget()
+        QHBoxLayout(edge_legend)
+        edge_plot = pg.PlotWidget()
+        edge_plot.resize(600, 240)
+        edge_plot.show()
+        window._p2_render_chart_model(edge_plot, edge_legend, edge_model)
+        app.processEvents()
+        window._p2_layout_chart_annotations(edge_plot)
+        edge_annotations = list(edge_plot._p2_annotation_items)
+        assert len(edge_annotations) == 2
+        assert not any(entry["leader"].isVisible() for entry in edge_annotations)
+        for entry in edge_annotations:
+            region = entry["region"]
+            base_scene = edge_plot.getPlotItem().vb.mapViewToScene(
+                pg.QtCore.QPointF(region["x"], region["value"])
+            )
+            item_rect = entry["item"].sceneBoundingRect()
+            if region["value"] >= 0:
+                assert 0.0 <= base_scene.y() - item_rect.bottom() <= 4.0
+            else:
+                assert 0.0 <= item_rect.top() - base_scene.y() <= 4.0
+        edge_plot.close()
+        window.p2_annual_btn.click()
+        app.processEvents()
+        for plot_index, plot in enumerate(window.p2_simple_charts):
+            assert_compact_annotations(plot_index, plot)
         workspace_bottom = window.p2_workspace_stack.contentsRect().bottom()
         for title, frame in zip(default_titles[3:], window.p2_chart_frames[3:]):
             frame_bottom = frame.mapTo(window.p2_workspace_stack, frame.rect().bottomRight()).y()
@@ -178,7 +336,8 @@ def test_fundamentals_configuration_page() -> None:
         assert window.p2_current_data["financials"].shape[1] == 10
         assert window.p2_current_data["quarterly_financials"].shape[1] == 12
         assert "SEC cached + yfinance" in window.p2_status_lbl.text()
-        assert window.p2_metric_vals["fcf_margin"].text() == "42.8%"
+        fcf_margin_text = window.p2_metric_vals["fcf_margin"].text()
+        assert fcf_margin_text == "85.5%", fcf_margin_text
         assert window.p2_filings_table.rowCount() == 3
         window.p2_filings_form_filter.setCurrentText("10-Q")
         app.processEvents()
@@ -188,29 +347,6 @@ def test_fundamentals_configuration_page() -> None:
         app.processEvents()
         assert sum(not window.p2_filings_table.isRowHidden(row) for row in range(3)) == 1
         window.p2_filings_search.clear()
-        assert sum(len(rows) for rows in window.p2_custom_available_rows.values()) == 9
-
-        window.p2_configuration_buttons["custom"].click()
-        app.processEvents()
-        assert window.p2_selected_configuration == "custom"
-        assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["custom"]
-        assert window.p2_workspace_stack.currentWidget() is window.p2_custom_workspace
-        assert not window.p2_custom_editor_frame.isHidden()
-        assert window.fundamentals_page_state["selected_configuration"] == "custom"
-
-        selection_before_search = window._p2_current_custom_selection("NVDA")
-        window.p2_custom_filter_input.setText("revenue")
-        app.processEvents()
-        assert not window.p2_custom_checkboxes["financials"]["Total Revenue"].isHidden()
-        assert window.p2_custom_checkboxes["financials"]["Net Income"].isHidden()
-        assert window.p2_custom_group_boxes["cashflow"].isHidden()
-        assert window._p2_current_custom_selection("NVDA") == selection_before_search
-
-        window.p2_custom_checkboxes["financials"]["Total Revenue"].click()
-        app.processEvents()
-        assert window._p2_current_custom_selection("NVDA")["financials"] == ["Total Revenue"]
-        assert window.p2_custom_selection_count.text() == "1 / 9 selected"
-        assert window.p2_custom_clear_btn.isEnabled()
         screenshot_path = str(os.environ.get("BT_FUNDAMENTALS_SCREENSHOT", "") or "").strip()
         if not screenshot_path and "--screenshot" in sys.argv:
             screenshot_index = sys.argv.index("--screenshot")
@@ -222,73 +358,120 @@ def test_fundamentals_configuration_page() -> None:
             if screenshot_tab == "filings":
                 window.p2_source_tabs.setCurrentIndex(1)
             else:
-                window.p2_configuration_buttons["default"].click()
                 window.p2_source_tabs.setCurrentIndex(0)
             app.processEvents()
             assert window.grab().save(screenshot_path)
             window.p2_source_tabs.setCurrentIndex(0)
-            window.p2_configuration_buttons["custom"].click()
-
-        window.p2_custom_filter_input.clear()
-        window.p2_custom_selected_only_cb.setChecked(True)
-        app.processEvents()
-        assert not window.p2_custom_checkboxes["financials"]["Total Revenue"].isHidden()
-        assert window.p2_custom_checkboxes["financials"]["Net Income"].isHidden()
-
-        window.p2_custom_clear_btn.click()
-        app.processEvents()
-        assert not any(window._p2_current_custom_selection("NVDA").values())
-        assert window.p2_custom_panel_descriptors == []
-        assert window.p2_custom_selection_count.text() == "0 / 9 selected"
-        assert not window.p2_custom_clear_btn.isEnabled()
-        assert window.p2_custom_no_matches_label.text() == "No selected metrics yet."
-        assert not window.p2_custom_no_matches_label.isHidden()
-
-        window.p2_custom_selected_only_cb.setChecked(False)
-        window.p2_custom_checkboxes["financials"]["Net Income"].click()
-        assert window._p2_current_custom_selection("NVDA")["financials"] == ["Net Income"]
-
-        window.p2_ticker_input.setText("MSFT")
-        window.update_page2(_payload("MSFT"), update_collection_info=False)
-        app.processEvents()
-        assert not any(window._p2_current_custom_selection("MSFT").values())
-        window.p2_custom_checkboxes["balance_sheet"]["Total Debt"].click()
-        assert window._p2_current_custom_selection("MSFT")["balance_sheet"] == ["Total Debt"]
-
-        window.p2_ticker_input.setText("NVDA")
-        window.update_page2(_payload("NVDA"), update_collection_info=False)
-        app.processEvents()
-        assert window.p2_custom_checkboxes["financials"]["Net Income"].isChecked()
-        assert not window.p2_custom_checkboxes["balance_sheet"]["Total Debt"].isChecked()
-        window.p2_custom_clear_btn.click()
-        assert not any(window._p2_current_custom_selection("NVDA").values())
-        assert window._p2_current_custom_selection("MSFT")["balance_sheet"] == ["Total Debt"]
-
-        window.p2_ticker_input.setText("MSFT")
-        window.update_page2(_payload("MSFT"), update_collection_info=False)
-        app.processEvents()
-        assert window.p2_custom_checkboxes["balance_sheet"]["Total Debt"].isChecked()
-
-        window.p2_configuration_buttons["default"].click()
-        app.processEvents()
-        assert window.p2_workspace_stack.currentWidget() is window.p2_default_workspace
-        assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["default"]
         assert tuple(window.p2_chart_frames) == default_frames
         assert tuple(label.text() for label in window.p2_simple_titles) == default_titles
+
+        first_dialog = None
+        for chart_index, title in enumerate(default_titles):
+            window._p2_open_fullscreen_chart(chart_index)
+            app.processEvents()
+            dialog = window.p2_fullscreen_dialog
+            assert dialog is not None
+            assert dialog.isFullScreen()
+            assert title in dialog.windowTitle()
+            assert "Annual" in dialog.windowTitle()
+            assert any(
+                button.text() == "Close"
+                for button in dialog.findChildren(QPushButton)
+            )
+            if first_dialog is None:
+                first_dialog = dialog
+            annotations = list(dialog._p2_plot._p2_annotation_items)
+            visible_bars = [
+                region for region in dialog._p2_plot._p2_bar_regions
+                if region["value"] != 0
+            ]
+            assert len(annotations) == len(visible_bars)
+            assert all("\n" in entry["item"].toPlainText() for entry in annotations)
+            dialog.close()
+            app.processEvents()
+            assert window.p2_fullscreen_dialog is None
+
+        window._p2_open_fullscreen_chart(0)
+        app.processEvents()
+        replaced_dialog = window.p2_fullscreen_dialog
+        window._p2_open_fullscreen_chart(1)
+        app.processEvents()
+        assert window.p2_fullscreen_dialog is not None
+        assert window.p2_fullscreen_dialog is not replaced_dialog
+        QTest.keyClick(window.p2_fullscreen_dialog, Qt.Key.Key_Escape)
+        app.processEvents()
+        assert window.p2_fullscreen_dialog is None
+
+        window.p2_quarterly_btn.click()
+        app.processEvents()
+        window._p2_open_fullscreen_chart(4)
+        app.processEvents()
+        collision_dialog = window.p2_fullscreen_dialog
+        assert collision_dialog is not None
+        collision_dialog.showNormal()
+        for fullscreen_size in ((1280, 720), (1920, 1080)):
+            collision_dialog.resize(*fullscreen_size)
+            app.processEvents()
+            window._p2_layout_chart_annotations(collision_dialog._p2_plot)
+            app.processEvents()
+            annotation_items = [
+                entry["item"]
+                for entry in collision_dialog._p2_plot._p2_annotation_items
+            ]
+            annotation_rects = [
+                item.sceneBoundingRect().adjusted(-1.0, -1.0, 1.0, 1.0)
+                for item in annotation_items
+            ]
+            assert len(annotation_rects) == 24
+            plot_rect = collision_dialog._p2_plot.getPlotItem().vb.sceneBoundingRect()
+            assert all(plot_rect.contains(item.sceneBoundingRect()) for item in annotation_items)
+            for left_index, left_rect in enumerate(annotation_rects):
+                assert not any(
+                    left_rect.intersects(right_rect)
+                    for right_rect in annotation_rects[left_index + 1:]
+                )
+        screenshot_path = str(os.environ.get("BT_FUNDAMENTALS_FULLSCREEN_SCREENSHOT", "") or "").strip()
+        if screenshot_path:
+            assert collision_dialog.grab().save(screenshot_path)
+        collision_dialog.close()
+        app.processEvents()
+        window.p2_annual_btn.click()
+        app.processEvents()
+
+        empty_model = window._p2_chart_model(
+            "Revenue",
+            "annual",
+            [{
+                "name": "Revenue",
+                "data": ([], [], []),
+                "color": "#ffffff",
+            }],
+        )
+        saved_model = window.p2_chart_models[0]
+        window.p2_chart_models[0] = empty_model
+        window._p2_open_fullscreen_chart(0)
+        app.processEvents()
+        no_data_dialog = window.p2_fullscreen_dialog
+        assert no_data_dialog is not None
+        assert any(
+            label.text() == "No data for this period." and label.isVisible()
+            for label in no_data_dialog.findChildren(QLabel)
+        )
+        no_data_dialog.close()
+        app.processEvents()
+        window.p2_chart_models[0] = saved_model
 
         window.fundamentals_page_state = _normalize_fundamentals_page_settings(
             {
                 "last_ticker": "NVDA",
                 "selected_configuration": "custom",
-                "custom_selections_by_ticker": window.p2_custom_selections_by_ticker,
+                "custom_selections_by_ticker": {"NVDA": {"financials": ["Net Income"]}},
             }
         )
         window._p2_apply_runtime_state()
         app.processEvents()
-        assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["custom"]
-        assert window.p2_workspace_stack.currentWidget() is window.p2_custom_workspace
-        assert window.p2_ticker_input.text() == "MSFT"
-        assert window.p2_custom_editor_hint.text().startswith("MSFT selections")
+        assert window.p2_ticker_input.text() == "NVDA"
+        assert window.fundamentals_page_state == {"last_ticker": "NVDA"}
 
         wrong_typed_data = {
             "ticker": "NVDA",
@@ -303,20 +486,16 @@ def test_fundamentals_configuration_page() -> None:
         for invalid_data in ({}, wrong_typed_data):
             invalid_snapshot = {
                 "ticker": "NVDA",
-                "configuration": "default",
                 "data": invalid_data,
             }
             assert window._p2_restore_session_snapshot(invalid_snapshot) is False
-            assert window.p2_ticker_input.text() == "MSFT"
-            assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["custom"]
-            assert window.p2_workspace_stack.currentWidget() is window.p2_custom_workspace
+            assert window.p2_ticker_input.text() == "NVDA"
 
         snapshot = window._p2_session_snapshot()
         assert snapshot is not None
-        snapshot["configuration"] = "default"
+        assert "configuration" not in snapshot
         assert window._p2_restore_session_snapshot(snapshot) is True
         app.processEvents()
-        assert window.p2_configuration_group.checkedButton() is window.p2_configuration_buttons["default"]
         assert window.p2_workspace_stack.currentWidget() is window.p2_default_workspace
 
         yahoo_only = _payload("SPY")
@@ -338,7 +517,7 @@ def test_fundamentals_configuration_page() -> None:
 
 
 if __name__ == "__main__":
-    test_fundamentals_configuration_page()
-    print("fundamentals configuration page smoke passed")
+    test_fundamentals_page()
+    print("fundamentals page smoke passed")
     sys.stdout.flush()
     os._exit(0)

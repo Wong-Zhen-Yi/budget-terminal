@@ -1,18 +1,23 @@
 from __future__ import annotations
 from typing import Any
-from PyQt6.QtWidgets import QAbstractItemView
+from PyQt6.QtWidgets import QAbstractItemView, QStyle
 from ..compat import *
 from budget_terminal_app.paths import user_data_path
 from budget_terminal_app.workers.fundamentals import FundamentalsWorker
 
 
+class _FundamentalsFullscreenDialog(QDialog):
+    """Fullscreen Fundamentals chart surface with resize notifications."""
+
+    resized = pyqtSignal()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self.resized.emit()
+
+
 class FundamentalsSetupMixin:
     _P2_CONFIG_PATH = user_data_path('fundamentals_config.json')
-    _P2_CUSTOM_FAMILIES = (
-        ('financials', 'Income Statement'),
-        ('cashflow', 'Cash Flow'),
-        ('balance_sheet', 'Balance Sheet'),
-    )
 
     def _p2_legacy_last_ticker(self) -> str:
         """Read the historical standalone Fundamentals config as a migration fallback."""
@@ -23,25 +28,14 @@ class FundamentalsSetupMixin:
             return ''
         return str((payload or {}).get('last_ticker', '') or '').upper().strip()
 
-    def _p2_current_ticker(self) -> str:
-        """Return the active Fundamentals ticker key for persisted custom selections."""
-        if isinstance(getattr(self, 'p2_current_data', None), dict):
-            ticker = str(self.p2_current_data.get('ticker', '') or '').upper().strip()
-            if ticker:
-                return ticker
-        if hasattr(self, 'p2_ticker_input'):
-            return str(self.p2_ticker_input.text() or '').upper().strip()
-        return str(getattr(self, 'p2_last_ticker', '') or '').upper().strip()
-
     def _p2_settings_payload(self) -> dict[str, Any]:
         """Build the persisted Fundamentals page settings payload."""
         return {
-            'last_ticker': str(self.p2_ticker_input.text() if hasattr(self, 'p2_ticker_input') else getattr(self, 'p2_last_ticker', '')).upper().strip(),
-            'selected_configuration': str(
-                getattr(self, 'p2_selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-                or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-            ).strip().lower(),
-            'custom_selections_by_ticker': dict(getattr(self, 'p2_custom_selections_by_ticker', {})),
+            'last_ticker': str(
+                self.p2_ticker_input.text()
+                if hasattr(self, 'p2_ticker_input')
+                else getattr(self, 'p2_last_ticker', '')
+            ).upper().strip(),
         }
 
     def _p2_persist_settings(self) -> None:
@@ -53,7 +47,6 @@ class FundamentalsSetupMixin:
         self._p2_request_seq = 0
         self._p2_active_request_id = 0
         self._p2_request_contexts = {}
-        self._p2_checklist_sync_guard = False
         self.p2_website_url = ''
         self.p2_ir_url = ''
         self.fundamentals_page_state = getattr(self, 'fundamentals_page_state', load_fundamentals_page_settings())
@@ -63,21 +56,7 @@ class FundamentalsSetupMixin:
                 **self.fundamentals_page_state,
                 'last_ticker': migrated_ticker,
             })
-        self.p2_selected_configuration = str(
-            self.fundamentals_page_state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-            or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-        ).strip().lower()
-        if self.p2_selected_configuration not in {'default', 'custom'}:
-            self.p2_selected_configuration = DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-        self.p2_custom_selections_by_ticker = dict(
-            self.fundamentals_page_state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
-        )
         self.p2_last_ticker = str(self.fundamentals_page_state.get('last_ticker', '') or '').upper().strip()
-        self.p2_custom_available_rows = {family: [] for family, _ in self._P2_CUSTOM_FAMILIES}
-        self.p2_custom_checkboxes = {family: {} for family, _ in self._P2_CUSTOM_FAMILIES}
-        self.p2_custom_group_boxes = {}
-        self.p2_custom_panel_descriptors = []
-        self.p2_custom_panel_widgets = []
 
         search_row = QHBoxLayout()
         self.p2_ticker_input = QLineEdit(self.p2_last_ticker)
@@ -187,33 +166,10 @@ class FundamentalsSetupMixin:
         period_row.addWidget(self.p2_annual_btn)
         period_row.addSpacing(8)
         period_row.addWidget(self.p2_quarterly_btn)
-        period_row.addSpacing(18)
-        config_label = QLabel('Configuration')
-        self.set_theme_role(config_label, 'muted')
-        period_row.addWidget(config_label)
-        period_row.addSpacing(8)
-        self.p2_configuration_group = QButtonGroup(self)
-        self.p2_configuration_group.setExclusive(True)
-        self.p2_configuration_buttons = {}
-        for configuration, label in (('default', 'Default'), ('custom', 'Custom')):
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setFixedHeight(24)
-            button.setMinimumWidth(82)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            button.clicked.connect(partial(self._p2_on_configuration_changed, configuration))
-            self.p2_configuration_group.addButton(button)
-            self.p2_configuration_buttons[configuration] = button
-            period_row.addWidget(button)
-            if configuration == 'default':
-                period_row.addSpacing(8)
         period_row.addStretch()
         self.p2_statements_layout.addWidget(self.p2_period_widget)
 
-        self.p2_workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.p2_workspace_splitter.setChildrenCollapsible(False)
         self.p2_workspace_stack = QStackedWidget()
-        self.p2_workspace_splitter.addWidget(self.p2_workspace_stack)
 
         self.p2_default_workspace = QWidget()
         default_layout = QVBoxLayout(self.p2_default_workspace)
@@ -229,104 +185,34 @@ class FundamentalsSetupMixin:
         self.p2_simple_titles = []
         self.p2_simple_legend_bars = []
         self.p2_chart_frames = []
-        for title in ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash & Total Debt', 'Operating Expenses']:
-            card = self._p2_create_chart_card(title)
+        self.p2_chart_cards = []
+        self.p2_expand_buttons = []
+        self.p2_chart_models = []
+        self.p2_chart_hover_proxies = []
+        self.p2_fullscreen_dialog = None
+        for chart_index, title in enumerate(
+            ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash & Total Debt', 'Operating Expenses']
+        ):
+            card = self._p2_create_chart_card(title, chart_index)
+            self.p2_chart_cards.append(card)
             self.p2_chart_frames.append(card['frame'])
             self.p2_simple_titles.append(card['title'])
             self.p2_simple_legend_bars.append(card['legend'])
             self.p2_simple_charts.append(card['plot'])
+            self.p2_expand_buttons.append(card['expand'])
         default_layout.addWidget(self.p2_charts_box, 1)
         self.p2_workspace_stack.addWidget(self.p2_default_workspace)
+        self.p2_statements_layout.addWidget(self.p2_workspace_stack, 1)
 
-        self.p2_custom_workspace = QWidget()
-        custom_layout = QVBoxLayout(self.p2_custom_workspace)
-        custom_layout.setContentsMargins(0, 0, 0, 0)
-        custom_layout.setSpacing(0)
-        self.p2_custom_box = QGroupBox('Custom Overview')
-        self.set_theme_role(self.p2_custom_box, 'panel')
-        custom_box_layout = QVBoxLayout(self.p2_custom_box)
-        custom_box_layout.setContentsMargins(12, 18, 12, 12)
-        custom_box_layout.setSpacing(8)
-        self.p2_custom_scroll = QScrollArea()
-        self.p2_custom_scroll.setWidgetResizable(True)
-        self.p2_custom_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.p2_custom_grid_widget = QWidget()
-        self.p2_custom_grid_layout = QGridLayout(self.p2_custom_grid_widget)
-        self.p2_custom_grid_layout.setContentsMargins(0, 0, 0, 0)
-        self.p2_custom_grid_layout.setHorizontalSpacing(12)
-        self.p2_custom_grid_layout.setVerticalSpacing(12)
-        self.p2_custom_scroll.setWidget(self.p2_custom_grid_widget)
-        custom_box_layout.addWidget(self.p2_custom_scroll, 1)
-        custom_layout.addWidget(self.p2_custom_box, 1)
-        self.p2_workspace_stack.addWidget(self.p2_custom_workspace)
-
-        self.p2_custom_editor_frame = QFrame()
-        self.set_theme_role(self.p2_custom_editor_frame, 'panel')
-        self.p2_custom_editor_frame.setMinimumWidth(340)
-        self.p2_custom_editor_frame.setMaximumWidth(420)
-        editor_layout = QVBoxLayout(self.p2_custom_editor_frame)
-        editor_layout.setContentsMargins(14, 14, 14, 14)
-        editor_layout.setSpacing(10)
-        editor_header = QHBoxLayout()
-        editor_header.setContentsMargins(0, 0, 0, 0)
-        editor_header.setSpacing(8)
-        editor_title = QLabel('Custom Configuration')
-        self.set_theme_role(editor_title, 'section_title')
-        self.p2_custom_selection_count = QLabel('0 selected')
-        self.set_theme_role(self.p2_custom_selection_count, 'muted')
-        editor_header.addWidget(editor_title)
-        editor_header.addStretch()
-        editor_header.addWidget(self.p2_custom_selection_count)
-        self.p2_custom_editor_hint = QLabel('Load a ticker to see available data.')
-        self.p2_custom_editor_hint.setWordWrap(True)
-        self.set_theme_role(self.p2_custom_editor_hint, 'muted')
-        self.p2_custom_filter_input = QLineEdit()
-        self.p2_custom_filter_input.setPlaceholderText('Search statement metrics')
-        self.p2_custom_filter_input.setClearButtonEnabled(True)
-        self.p2_custom_filter_input.setAccessibleName('Filter custom Fundamentals metrics')
-        self.p2_custom_filter_input.textChanged.connect(self._p2_apply_custom_filter)
-        custom_filter_row = QHBoxLayout()
-        custom_filter_row.setContentsMargins(0, 0, 0, 0)
-        custom_filter_row.setSpacing(8)
-        self.p2_custom_selected_only_cb = QCheckBox('Selected only')
-        self.p2_custom_selected_only_cb.toggled.connect(self._p2_apply_custom_filter)
-        self.p2_custom_clear_btn = QPushButton('Clear selection')
-        self.p2_custom_clear_btn.setToolTip('Remove every metric from this ticker\'s Custom view')
-        self.p2_custom_clear_btn.clicked.connect(self._p2_clear_custom_selection)
-        custom_filter_row.addWidget(self.p2_custom_selected_only_cb)
-        custom_filter_row.addStretch()
-        custom_filter_row.addWidget(self.p2_custom_clear_btn)
-        self.p2_custom_editor_scroll = QScrollArea()
-        self.p2_custom_editor_scroll.setWidgetResizable(True)
-        self.p2_custom_editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.p2_custom_editor_content = QWidget()
-        self.p2_custom_editor_content_layout = QVBoxLayout(self.p2_custom_editor_content)
-        self.p2_custom_editor_content_layout.setContentsMargins(0, 0, 0, 0)
-        self.p2_custom_editor_content_layout.setSpacing(10)
-        self.p2_custom_editor_scroll.setWidget(self.p2_custom_editor_content)
-        editor_layout.addLayout(editor_header)
-        editor_layout.addWidget(self.p2_custom_editor_hint)
-        editor_layout.addWidget(self.p2_custom_filter_input)
-        editor_layout.addLayout(custom_filter_row)
-        editor_layout.addWidget(self.p2_custom_editor_scroll, 1)
-        self.p2_custom_editor_frame.setVisible(self.p2_selected_configuration == 'custom')
-        self.p2_workspace_splitter.addWidget(self.p2_custom_editor_frame)
-        self.p2_workspace_splitter.setStretchFactor(0, 5)
-        self.p2_workspace_splitter.setStretchFactor(1, 2)
-        self.p2_statements_layout.addWidget(self.p2_workspace_splitter, 1)
-
-        self._p2_sync_configuration_buttons()
-        self._p2_rebuild_custom_checklist()
-        self._p2_rebuild_custom_panels()
-        self._p2_refresh_workspace_mode()
         self._apply_fundamentals_theme()
         self._p2_relayout_charts()
 
-    def _p2_create_chart_card(self, title: str, *, include_status: bool=False) -> dict[str, Any]:
+    def _p2_create_chart_card(self, title: str, chart_index: int) -> dict[str, Any]:
         """Create one reusable Fundamentals chart card."""
         frame = QFrame()
         self.set_theme_role(frame, 'panel')
-        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        frame.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        frame.setMinimumWidth(0)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(10, 8, 10, 8)
         frame_layout.setSpacing(4)
@@ -340,309 +226,123 @@ class FundamentalsSetupMixin:
         title_row.addWidget(title_label)
         title_row.addStretch()
         title_row.addWidget(legend_bar)
+        expand_button = QToolButton()
+        expand_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+        expand_button.setFixedSize(24, 24)
+        expand_button.setEnabled(False)
+        expand_button.setToolTip(f'Open {title} fullscreen')
+        expand_button.setAccessibleName(f'Open {title} fullscreen')
+        expand_button.clicked.connect(partial(self._p2_open_fullscreen_chart, chart_index))
+        title_row.addWidget(expand_button)
         plot_widget = pg.PlotWidget(axisItems={'left': FmtAxisItem(orientation='left')})
+        plot_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        plot_widget.setMinimumWidth(0)
         plot_widget.getPlotItem().hideButtons()
         plot_widget.getPlotItem().setMenuEnabled(False)
         plot_widget.setMouseEnabled(x=False, y=False)
         plot_widget.showGrid(x=False, y=True, alpha=0.15)
         self.style_plot_widget(plot_widget)
+        self._p2_register_chart_hover(plot_widget)
         frame_layout.addLayout(title_row)
-        status_label = QLabel('')
-        status_label.setWordWrap(True)
-        self.set_theme_role(status_label, 'muted')
-        status_label.setVisible(False)
-        if include_status:
-            frame_layout.addWidget(status_label)
         frame_layout.addWidget(plot_widget)
         return {
             'frame': frame,
             'title': title_label,
             'legend': legend_bar,
             'plot': plot_widget,
-            'status': status_label,
+            'expand': expand_button,
         }
 
-    def _p2_sync_configuration_buttons(self) -> None:
-        """Keep the visible Default / Custom options aligned with persisted state."""
-        buttons = getattr(self, 'p2_configuration_buttons', {})
-        if not buttons:
+    def _p2_open_fullscreen_chart(self, chart_index: int, *_: Any) -> None:
+        """Open one of the six Fundamentals overviews on the current screen."""
+        data = getattr(self, 'p2_current_data', None)
+        if not isinstance(data, dict):
             return
-        configuration = str(getattr(self, 'p2_selected_configuration', 'default') or 'default').strip().lower()
-        if configuration not in buttons:
-            configuration = 'default'
-            self.p2_selected_configuration = configuration
-        for button in buttons.values():
-            button.blockSignals(True)
-        try:
-            buttons[configuration].setChecked(True)
-            for key, button in buttons.items():
-                if key != configuration:
-                    button.setChecked(False)
-        finally:
-            for button in buttons.values():
-                button.blockSignals(False)
-
-    def _p2_current_custom_selection(self, ticker: Any=None) -> dict[str, list[str]]:
-        """Return the normalized per-family selection for one ticker."""
-        ticker_key = str(ticker or self._p2_current_ticker() or '').upper().strip()
-        raw = {}
-        if ticker_key:
-            raw = dict(getattr(self, 'p2_custom_selections_by_ticker', {}).get(ticker_key, {}))
-        return {
-            'financials': list(raw.get('financials', [])) if isinstance(raw.get('financials', []), list) else [],
-            'cashflow': list(raw.get('cashflow', [])) if isinstance(raw.get('cashflow', []), list) else [],
-            'balance_sheet': list(raw.get('balance_sheet', [])) if isinstance(raw.get('balance_sheet', []), list) else [],
-        }
-
-    def _p2_store_custom_selection(self, selection: Any, *, ticker: Any=None) -> None:
-        """Persist one ticker's checklist selection into the in-memory Fundamentals state."""
-        ticker_key = str(ticker or self._p2_current_ticker() or '').upper().strip()
-        if not ticker_key:
+        period = self._p2_period()
+        models = list(getattr(self, 'p2_chart_models', []))
+        if len(models) != 6 or any(model.get('period') != period for model in models):
+            self._render_simple_charts(data, period)
+            models = list(getattr(self, 'p2_chart_models', []))
+        if not 0 <= chart_index < len(models):
             return
-        cleaned = {
-            family: list(selection.get(family, [])) if isinstance(selection.get(family, []), list) else []
-            for family, _ in self._P2_CUSTOM_FAMILIES
-        }
-        if any(cleaned.values()):
-            self.p2_custom_selections_by_ticker[ticker_key] = cleaned
-        else:
-            self.p2_custom_selections_by_ticker.pop(ticker_key, None)
 
-    def _p2_update_custom_editor_summary(self) -> None:
-        """Refresh selection counts, family counts, and Custom editor availability."""
-        available_total = sum(len(rows) for rows in getattr(self, 'p2_custom_available_rows', {}).values())
-        selected_total = sum(
-            1
-            for family_boxes in getattr(self, 'p2_custom_checkboxes', {}).values()
-            for checkbox in family_boxes.values()
-            if checkbox.isChecked()
+        active_dialog = getattr(self, 'p2_fullscreen_dialog', None)
+        if active_dialog is not None:
+            active_dialog.close()
+
+        model = models[chart_index]
+        ticker = str(data.get('ticker', '') or self.p2_ticker_input.text() or '').upper().strip()
+        period_label = 'Annual' if period == 'annual' else 'Quarterly'
+        dialog = _FundamentalsFullscreenDialog(self)
+        dialog.setWindowTitle(f'{ticker} - {model["title"]} ({period_label})')
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setModal(True)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 14, 18, 18)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        title_label = QLabel(f'{ticker} - {model["title"]}')
+        title_label.setStyleSheet(
+            f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};'
         )
-        ticker = self._p2_current_ticker()
-        has_data = isinstance(getattr(self, 'p2_current_data', None), dict) and bool(ticker)
-        if hasattr(self, 'p2_custom_selection_count'):
-            if available_total:
-                self.p2_custom_selection_count.setText(f'{selected_total} / {available_total} selected')
-            else:
-                self.p2_custom_selection_count.setText('0 selected')
-        if hasattr(self, 'p2_custom_editor_hint'):
-            if not has_data:
-                self.p2_custom_editor_hint.setText('Load a ticker to see available data.')
-            elif not available_total:
-                self.p2_custom_editor_hint.setText(f'No statement metrics are available for {ticker}.')
-            else:
-                self.p2_custom_editor_hint.setText(
-                    f'{ticker} selections are saved separately. Search or tick metrics to build this view.'
-                )
-        for family, label in self._P2_CUSTOM_FAMILIES:
-            group_box = getattr(self, 'p2_custom_group_boxes', {}).get(family)
-            if group_box is None:
-                continue
-            family_boxes = getattr(self, 'p2_custom_checkboxes', {}).get(family, {})
-            family_selected = sum(1 for checkbox in family_boxes.values() if checkbox.isChecked())
-            group_box.setTitle(f'{label}  ·  {family_selected} / {len(family_boxes)} selected')
-        controls_enabled = has_data and available_total > 0
-        if hasattr(self, 'p2_custom_filter_input'):
-            self.p2_custom_filter_input.setEnabled(controls_enabled)
-        if hasattr(self, 'p2_custom_selected_only_cb'):
-            self.p2_custom_selected_only_cb.setEnabled(controls_enabled)
-        if hasattr(self, 'p2_custom_clear_btn'):
-            self.p2_custom_clear_btn.setEnabled(controls_enabled and selected_total > 0)
+        context_label = QLabel(period_label)
+        self.set_theme_role(context_label, 'muted')
+        legend_bar = QWidget()
+        legend_layout = QHBoxLayout(legend_bar)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        legend_layout.setSpacing(6)
+        close_button = QPushButton('Close')
+        close_button.setFixedHeight(28)
+        close_button.clicked.connect(dialog.close)
+        header.addWidget(title_label)
+        header.addWidget(context_label)
+        header.addStretch()
+        header.addWidget(legend_bar)
+        header.addSpacing(12)
+        header.addWidget(close_button)
+        layout.addLayout(header)
 
-    def _p2_apply_custom_filter(self, *_: Any) -> None:
-        """Filter the Custom checklist without changing any saved selection."""
-        query = ''
-        if hasattr(self, 'p2_custom_filter_input'):
-            query = str(self.p2_custom_filter_input.text() or '').strip().casefold()
-        selected_only = bool(
-            hasattr(self, 'p2_custom_selected_only_cb') and self.p2_custom_selected_only_cb.isChecked()
-        )
-        visible_count = 0
-        for family, _ in self._P2_CUSTOM_FAMILIES:
-            group_visible = False
-            for row, checkbox in getattr(self, 'p2_custom_checkboxes', {}).get(family, {}).items():
-                matches_query = not query or query in str(row or '').casefold()
-                visible = matches_query and (not selected_only or checkbox.isChecked())
-                checkbox.setVisible(visible)
-                group_visible = group_visible or visible
-                visible_count += int(visible)
-            group_box = getattr(self, 'p2_custom_group_boxes', {}).get(family)
-            if group_box is not None:
-                group_box.setVisible(group_visible)
-        no_matches_label = getattr(self, 'p2_custom_no_matches_label', None)
-        if no_matches_label is not None:
-            no_matches_label.setText(
-                'No selected metrics yet.' if selected_only and not query else 'No metrics match this search.'
-            )
-            no_matches_label.setVisible(visible_count == 0)
+        no_data_label = QLabel('No data for this period.')
+        no_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(no_data_label, 'muted')
+        no_data_label.setVisible(not self._p2_chart_model_has_data(model))
+        layout.addWidget(no_data_label)
+        plot_widget = pg.PlotWidget(axisItems={'left': FmtAxisItem(orientation='left')})
+        plot_widget.getPlotItem().hideButtons()
+        plot_widget.getPlotItem().setMenuEnabled(False)
+        plot_widget.setMouseEnabled(x=False, y=False)
+        plot_widget.showGrid(x=False, y=True, alpha=0.15)
+        self.style_plot_widget(plot_widget)
+        self._p2_register_chart_hover(plot_widget, owner=dialog)
+        layout.addWidget(plot_widget, 1)
 
-    def _p2_clear_custom_selection(self, *_: Any) -> None:
-        """Remove all metrics from the current ticker's Custom view."""
-        ticker = self._p2_current_ticker()
-        if not ticker or not any(self._p2_current_custom_selection(ticker).values()):
-            return
-        self._p2_checklist_sync_guard = True
-        try:
-            for family_boxes in self.p2_custom_checkboxes.values():
-                for checkbox in family_boxes.values():
-                    checkbox.setChecked(False)
-        finally:
-            self._p2_checklist_sync_guard = False
-        self._p2_store_custom_selection(
-            {family: [] for family, _ in self._P2_CUSTOM_FAMILIES},
-            ticker=ticker,
-        )
-        self._p2_persist_settings()
-        self._p2_update_custom_panel_descriptors()
-        self._p2_rebuild_custom_panels()
-        self._p2_update_custom_editor_summary()
-        self._p2_apply_custom_filter()
-        self._p2_relayout_charts()
+        escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), dialog)
+        escape_shortcut.activated.connect(dialog.close)
+        dialog._p2_escape_shortcut = escape_shortcut
+        dialog._p2_plot = plot_widget
+        dialog._p2_model = model
+        self._p2_render_chart_model(plot_widget, legend_bar, model, fullscreen=True)
+        dialog.resized.connect(lambda: QTimer.singleShot(0, partial(self._p2_layout_chart_annotations, plot_widget)))
+        dialog.finished.connect(lambda *_: self._p2_clear_fullscreen_dialog(dialog))
+        self.p2_fullscreen_dialog = dialog
 
-    def _p2_rebuild_custom_checklist(self) -> None:
-        """Rebuild the right-side checklist from the currently loaded ticker data."""
-        while self.p2_custom_editor_content_layout.count():
-            item = self.p2_custom_editor_content_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-        self.p2_custom_checkboxes = {family: {} for family, _ in self._P2_CUSTOM_FAMILIES}
-        self.p2_custom_available_rows = {family: [] for family, _ in self._P2_CUSTOM_FAMILIES}
-        self.p2_custom_group_boxes = {}
-        self.p2_custom_no_matches_label = None
-        ticker = self._p2_current_ticker()
-        if not isinstance(self.p2_current_data, dict) or not ticker:
-            prompt = QLabel('Load a ticker to see available data.')
-            prompt.setWordWrap(True)
-            self.set_theme_role(prompt, 'muted')
-            self.p2_custom_editor_content_layout.addWidget(prompt)
-            self.p2_custom_editor_content_layout.addStretch(1)
-            self._p2_update_custom_panel_descriptors()
-            self._p2_update_custom_editor_summary()
-            return
-        selection = self._p2_current_custom_selection(ticker)
-        selection_changed = False
-        has_rows = False
-        self._p2_checklist_sync_guard = True
-        try:
-            for family, label in self._P2_CUSTOM_FAMILIES:
-                rows = self._p2_statement_rows_for_family(self.p2_current_data, family)
-                self.p2_custom_available_rows[family] = list(rows)
-                if not rows:
-                    continue
-                has_rows = True
-                cleaned_rows = [row for row in selection.get(family, []) if row in rows]
-                if cleaned_rows != selection.get(family, []):
-                    selection[family] = cleaned_rows
-                    selection_changed = True
-                group_box = QGroupBox(label)
-                self.set_theme_role(group_box, 'panel')
-                group_layout = QVBoxLayout(group_box)
-                group_layout.setContentsMargins(10, 12, 10, 10)
-                group_layout.setSpacing(6)
-                self.p2_custom_group_boxes[family] = group_box
-                selected_rows = set(selection.get(family, []))
-                for row in rows:
-                    checkbox = QCheckBox(row)
-                    checkbox.setToolTip(row)
-                    checkbox.setChecked(row in selected_rows)
-                    checkbox.toggled.connect(partial(self._p2_on_custom_metric_toggled, family, row))
-                    self.p2_custom_checkboxes[family][row] = checkbox
-                    group_layout.addWidget(checkbox)
-                self.p2_custom_editor_content_layout.addWidget(group_box)
-            if not has_rows:
-                prompt = QLabel('No fundamentals statement rows are available for this ticker.')
-                prompt.setWordWrap(True)
-                self.set_theme_role(prompt, 'muted')
-                self.p2_custom_editor_content_layout.addWidget(prompt)
-            else:
-                self.p2_custom_no_matches_label = QLabel('No metrics match this search.')
-                self.p2_custom_no_matches_label.setWordWrap(True)
-                self.set_theme_role(self.p2_custom_no_matches_label, 'muted')
-                self.p2_custom_no_matches_label.setVisible(False)
-                self.p2_custom_editor_content_layout.addWidget(self.p2_custom_no_matches_label)
-            self.p2_custom_editor_content_layout.addStretch(1)
-        finally:
-            self._p2_checklist_sync_guard = False
-        if selection_changed:
-            self._p2_store_custom_selection(selection, ticker=ticker)
-            self._p2_persist_settings()
-        self._p2_update_custom_panel_descriptors()
-        self._p2_update_custom_editor_summary()
-        self._p2_apply_custom_filter()
+        dialog.create()
+        handle = dialog.windowHandle()
+        current_screen = self.windowHandle().screen() if self.windowHandle() is not None else self.screen()
+        if handle is not None and current_screen is not None:
+            handle.setScreen(current_screen)
+        dialog.showFullScreen()
+        QTimer.singleShot(0, partial(self._p2_layout_chart_annotations, plot_widget))
 
-    def _p2_update_custom_panel_descriptors(self) -> None:
-        """Flatten the current ticker selection into renderable custom chart descriptors."""
-        ticker = self._p2_current_ticker()
-        selection = self._p2_current_custom_selection(ticker)
-        descriptors = []
-        for family, _ in self._P2_CUSTOM_FAMILIES:
-            selected_rows = set(selection.get(family, []))
-            for row in self.p2_custom_available_rows.get(family, []):
-                if row in selected_rows:
-                    descriptors.append({'family': family, 'row': row, 'title': row})
-        self.p2_custom_panel_descriptors = descriptors
-
-    def _p2_rebuild_custom_panels(self) -> None:
-        """Recreate the visible custom chart cards from the current ticker selection."""
-        self.p2_custom_panel_widgets = []
-        while self.p2_custom_grid_layout.count():
-            item = self.p2_custom_grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-        if not self.p2_custom_panel_descriptors:
-            message = (
-                'Load a ticker to see available data.'
-                if self.p2_current_data is None
-                else 'Select metrics in Custom Configuration to add charts.'
-            )
-            empty_label = QLabel(message)
-            empty_label.setWordWrap(True)
-            self.set_theme_role(empty_label, 'muted')
-            self.p2_custom_grid_layout.addWidget(empty_label, 0, 0)
-            return
-        for descriptor in self.p2_custom_panel_descriptors:
-            card = self._p2_create_chart_card(str(descriptor.get('title', '') or 'Custom'), include_status=True)
-            self.p2_custom_panel_widgets.append(card)
-        self._p2_relayout_custom_panels()
-        if self.p2_current_data is not None:
-            self._p2_render_custom_charts(self.p2_current_data, self._p2_period())
-
-    def _p2_relayout_custom_panels(self) -> None:
-        """Lay out custom panels as one or two columns depending on available width."""
-        while self.p2_custom_grid_layout.count():
-            item = self.p2_custom_grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(self.p2_custom_grid_widget)
-        if not self.p2_custom_panel_widgets:
-            if self.p2_custom_grid_layout.count() == 0:
-                message = (
-                    'Load a ticker to see available data.'
-                    if self.p2_current_data is None
-                    else 'Select metrics in Custom Configuration to add charts.'
-                )
-                empty_label = QLabel(message)
-                empty_label.setWordWrap(True)
-                self.set_theme_role(empty_label, 'muted')
-                self.p2_custom_grid_layout.addWidget(empty_label, 0, 0)
-            return
-        available_width = max(self.p2_custom_box.width(), self.page2.contentsRect().width() - 420 if hasattr(self, 'page2') else 0)
-        columns = 2 if available_width >= 980 else 1
-        for index, widget_info in enumerate(self.p2_custom_panel_widgets):
-            frame = widget_info['frame']
-            chart_height = 188 if columns == 2 else 204
-            plot_height = 112 if columns == 2 else 124
-            frame.setFixedHeight(chart_height)
-            frame.layout().setContentsMargins(8, 6, 8, 6)
-            widget_info['plot'].setMinimumHeight(plot_height)
-            widget_info['plot'].setMaximumHeight(plot_height)
-            self.p2_custom_grid_layout.addWidget(frame, index // columns, index % columns)
-        for column in range(columns):
-            self.p2_custom_grid_layout.setColumnStretch(column, 1)
+    def _p2_clear_fullscreen_dialog(self, dialog: Any) -> None:
+        """Release the tracked fullscreen dialog after it closes."""
+        if getattr(self, 'p2_fullscreen_dialog', None) is dialog:
+            self.p2_fullscreen_dialog = None
 
     def _p2_relayout_charts(self) -> None:
-        """Resize and reflow the Default and Custom Fundamentals grids."""
+        """Resize and reflow the Fundamentals chart grid."""
         if hasattr(self, 'p2_charts_grid'):
             frames = getattr(self, 'p2_chart_frames', [])
             if frames:
@@ -681,8 +381,23 @@ class FundamentalsSetupMixin:
                     self.p2_charts_grid.addWidget(frame, index // columns, index % columns)
                 for column in range(columns):
                     self.p2_charts_grid.setColumnStretch(column, 1)
-        if hasattr(self, 'p2_custom_grid_layout'):
-            self._p2_relayout_custom_panels()
+        self._p2_schedule_chart_density_refresh()
+
+    def _p2_schedule_chart_density_refresh(self) -> None:
+        """Coalesce resize-driven rerenders so label density follows the final chart widths."""
+        if getattr(self, '_p2_chart_density_refresh_pending', False):
+            return
+        self._p2_chart_density_refresh_pending = True
+        QTimer.singleShot(0, self._p2_refresh_chart_density)
+
+    def _p2_refresh_chart_density(self) -> None:
+        """Rerender chart annotations after layout geometry has settled."""
+        self._p2_chart_density_refresh_pending = False
+        data = getattr(self, 'p2_current_data', None)
+        if data is None:
+            return
+        period = self._p2_period()
+        self._render_simple_charts(data, period)
 
     def _p2_status_text_for_payload(self, data: Any, *, restored: bool=False) -> str:
         """Build the user-facing status text for a Fundamentals payload."""
@@ -716,7 +431,6 @@ class FundamentalsSetupMixin:
         return {
             'ticker': ticker,
             'period': self._p2_period() if hasattr(self, 'p2_annual_btn') else 'annual',
-            'configuration': str(getattr(self, 'p2_selected_configuration', 'default') or 'default').strip().lower(),
             'data': serialize_session_value(self.p2_current_data),
         }
 
@@ -752,11 +466,6 @@ class FundamentalsSetupMixin:
         if not ticker:
             return False
         self.p2_ticker_input.setText(ticker)
-        configuration = str(payload.get('configuration', '') or '').strip().lower()
-        if configuration in {'default', 'custom'}:
-            self.p2_selected_configuration = configuration
-            if hasattr(self, 'p2_workspace_stack'):
-                self._p2_refresh_workspace_mode()
         self.update_page2(
             restored_data,
             update_collection_info=False,
@@ -777,15 +486,6 @@ class FundamentalsSetupMixin:
     def _p2_apply_runtime_state(self) -> None:
         """Apply the persisted Fundamentals state to the live page widgets."""
         state = getattr(self, 'fundamentals_page_state', load_fundamentals_page_settings())
-        self.p2_selected_configuration = str(
-            state.get('selected_configuration', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration'])
-            or DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-        ).strip().lower()
-        if self.p2_selected_configuration not in {'default', 'custom'}:
-            self.p2_selected_configuration = DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['selected_configuration']
-        self.p2_custom_selections_by_ticker = dict(
-            state.get('custom_selections_by_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['custom_selections_by_ticker'])
-        )
         saved_last_ticker = str(state.get('last_ticker', '') or '').upper().strip()
         loaded_ticker = ''
         if isinstance(getattr(self, 'p2_current_data', None), dict):
@@ -793,12 +493,8 @@ class FundamentalsSetupMixin:
         self.p2_last_ticker = loaded_ticker or saved_last_ticker
         if hasattr(self, 'p2_ticker_input'):
             self.p2_ticker_input.setText(self.p2_last_ticker)
-        self._p2_sync_configuration_buttons()
-        self._p2_rebuild_custom_checklist()
-        self._p2_rebuild_custom_panels()
-        self._p2_refresh_workspace_mode()
         if self.p2_current_data is not None:
-            self._p2_render_active_configuration()
+            self._render_simple_charts(self.p2_current_data, self._p2_period())
         self._p2_relayout_charts()
 
     def analyze_stock_p2(self, *_: Any, update_collection_info: bool=True) -> bool | None:
@@ -1000,83 +696,25 @@ class FundamentalsSetupMixin:
         self.p2_quarterly_btn.setChecked(period == 'quarterly')
         self._on_period_toggle()
 
-    def _p2_refresh_workspace_mode(self) -> None:
-        """Toggle the visible workspace and checklist editor for the selected configuration."""
-        is_custom = str(getattr(self, 'p2_selected_configuration', 'default') or 'default').strip().lower() == 'custom'
-        self._p2_sync_configuration_buttons()
-        self.p2_workspace_stack.setCurrentWidget(self.p2_custom_workspace if is_custom else self.p2_default_workspace)
-        self.p2_custom_editor_frame.setVisible(is_custom)
-        if is_custom:
-            self.p2_workspace_splitter.setSizes([860, 380])
-        else:
-            self.p2_workspace_splitter.setSizes([1, 0])
-
-    def _p2_render_active_configuration(self) -> None:
-        """Render the currently selected Fundamentals configuration."""
-        if self.p2_current_data is None:
-            return
-        self._p2_rebuild_custom_checklist()
-        self._p2_rebuild_custom_panels()
-        period = self._p2_period()
-        self._render_simple_charts(self.p2_current_data, period)
-        self._p2_render_custom_charts(self.p2_current_data, period)
-
     def _on_period_toggle(self) -> None:
         """Handle Annual / Quarterly toggles."""
         if self.p2_current_data is None:
             return
-        self._p2_render_active_configuration()
+        self._render_simple_charts(self.p2_current_data, self._p2_period())
         self._p2_relayout_charts()
         self._p2_save_session_snapshot()
-
-    def _p2_on_configuration_changed(self, configuration: Any, _: bool=False) -> None:
-        """Persist and apply a configuration switch between Default and Custom."""
-        config = str(configuration or 'default').strip().lower()
-        self.p2_selected_configuration = config if config in {'default', 'custom'} else 'default'
-        self._p2_refresh_workspace_mode()
-        self._p2_persist_settings()
-        if self.p2_current_data is not None:
-            self._p2_render_active_configuration()
-        self._p2_save_session_snapshot()
-
-    def _p2_on_custom_metric_toggled(self, family: str, row: str, checked: bool) -> None:
-        """Handle ticking or unticking one raw statement row in the Custom checklist."""
-        if self._p2_checklist_sync_guard:
-            return
-        ticker = self._p2_current_ticker()
-        if not ticker:
-            return
-        selection = self._p2_current_custom_selection(ticker)
-        rows = [value for value in selection.get(family, []) if value in self.p2_custom_available_rows.get(family, [])]
-        if checked:
-            rows.append(row)
-        else:
-            rows = [value for value in rows if value != row]
-        ordered_rows = [value for value in self.p2_custom_available_rows.get(family, []) if value in rows]
-        selection[family] = ordered_rows
-        self._p2_store_custom_selection(selection, ticker=ticker)
-        self._p2_persist_settings()
-        self._p2_update_custom_panel_descriptors()
-        self._p2_rebuild_custom_panels()
-        self._p2_update_custom_editor_summary()
-        self._p2_apply_custom_filter()
-        if self.p2_current_data is not None:
-            self._p2_render_custom_charts(self.p2_current_data, self._p2_period())
-            self._p2_relayout_charts()
 
     def _apply_fundamentals_theme(self) -> None:
         """Refresh Fundamentals colors when the active theme changes."""
         self.p2_name_lbl.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.p2_info_lbl.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         self.set_status_text(self.p2_status_lbl, self.p2_status_lbl.text(), status=self.p2_status_lbl.property('bt_status') or 'muted')
-        for label in list(getattr(self, 'p2_simple_titles', [])) + [item.get('title') for item in list(getattr(self, 'p2_custom_panel_widgets', []))]:
+        for label in getattr(self, 'p2_simple_titles', []):
             if label is not None:
                 label.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {self.theme_color("text_primary")}; background: transparent;')
         for value_label in getattr(self, 'p2_metric_vals', {}).values():
-            value_label.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {self.theme_color("text_primary")};')
+            value_label.setStyleSheet(f'font-size: 17px; font-weight: bold; color: {self.theme_color("text_primary")};')
         for plot_widget in getattr(self, 'p2_simple_charts', []):
             self.style_plot_widget(plot_widget)
-        for widget_info in list(getattr(self, 'p2_custom_panel_widgets', [])):
-            self.style_plot_widget(widget_info['plot'])
         if self.p2_current_data is not None:
             self.update_page2(self.p2_current_data, update_collection_info=False, status_text=self.p2_status_lbl.text())

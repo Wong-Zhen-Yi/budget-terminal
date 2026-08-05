@@ -257,21 +257,6 @@ class SimpleChartsMixin:
         values, _, _ = self._p2_total_debt_series(data.get(frame_key), period)
         return values[-1] if values else None
 
-    def _p2_statement_rows_for_family(self, data: Any, family: Any) -> list[str]:
-        """Return the union of visible statement rows for one family, preserving source order."""
-        rows = {}
-        ordered = []
-        for period in ('annual', 'quarterly'):
-            frame = self._p2_statement_frame(data, family, period)
-            for row in list(getattr(frame, 'index', [])):
-                row_text = str(row or '').strip()
-                if row_text:
-                    row_key = row_text.casefold()
-                    if row_key not in rows:
-                        rows[row_key] = row_text
-                        ordered.append(row_text)
-        return ordered
-
     def _p2_intersection_series_operation(self, left: Any, right: Any, op: Any) -> Any:
         """Combine two time series on their shared statement columns."""
         left_vals, left_labels, left_cols = left
@@ -360,30 +345,142 @@ class SimpleChartsMixin:
         pen = pg.mkPen(color, width=1)
         return pg.BarGraphItem(x=x_values, height=heights, width=width, brush=brush, pen=pen)
 
-    def _p2_add_bar_labels(self, pw: Any, x_positions: Any, heights: Any, color: Any=None, *, grouped: bool=False) -> None:
-        """Annotate bars with formatted values and optional growth percentages."""
-        color = color or self.theme_color('text_primary')
-        font = pg.QtGui.QFont('Arial', 8 if grouped else 10, pg.QtGui.QFont.Weight.Bold)
-        for index, (x_value, height) in enumerate(zip(x_positions, heights)):
-            if height == 0:
-                continue
-            above = height >= 0
-            anchor = (0.5, 1.0 if above else 0.0)
-            text = fmt_num(height)
-            if (not grouped) and index > 0 and heights[index - 1] != 0:
-                previous = heights[index - 1]
-                try:
-                    pct = (height - previous) / abs(previous) * 100
-                    pct_text = f'(+{pct:.1f}%)' if pct >= 0 else f'({pct:.1f}%)'
-                    text = f'{fmt_num(height)} {pct_text}'
-                except Exception:
-                    text = fmt_num(height)
-            item = pg.TextItem(text, color=color, anchor=anchor)
-            item.setFont(font)
-            item.setPos(x_value, height)
-            pw.addItem(item)
+    def _p2_register_chart_hover(self, plot: Any, *, owner: Any=None) -> None:
+        """Attach one retained mouse proxy to a Fundamentals plot."""
+        proxy = pg.SignalProxy(
+            plot.scene().sigMouseMoved,
+            rateLimit=30,
+            slot=partial(self._p2_on_chart_mouse_moved, plot),
+        )
+        if owner is not None:
+            proxies = list(getattr(owner, '_p2_hover_proxies', []))
+            proxies.append(proxy)
+            owner._p2_hover_proxies = proxies
+        else:
+            self.p2_chart_hover_proxies.append(proxy)
 
-    def _p2_set_plot_y_range(self, pw: Any, values: Any) -> None:
+    def _p2_on_chart_mouse_moved(self, plot: Any, event: Any) -> None:
+        """Show contextual data only while the pointer is inside a rendered bar."""
+        position = event[0] if isinstance(event, (tuple, list)) else event
+        if position is None or not plot.sceneBoundingRect().contains(position):
+            plot._p2_hover_key = None
+            QToolTip.hideText()
+            return
+        point = plot.getPlotItem().vb.mapSceneToView(position)
+        match = None
+        for region in list(getattr(plot, '_p2_bar_regions', [])):
+            value = float(region['value'])
+            low, high = sorted((0.0, value))
+            half_width = float(region['width']) / 2.0
+            if region['x'] - half_width <= point.x() <= region['x'] + half_width and low <= point.y() <= high:
+                match = region
+                break
+        if match is None:
+            plot._p2_hover_key = None
+            QToolTip.hideText()
+            return
+        hover_key = match['key']
+        if getattr(plot, '_p2_hover_key', None) == hover_key:
+            return
+        plot._p2_hover_key = hover_key
+        QToolTip.showText(pg.QtGui.QCursor.pos(), self._p2_bar_tooltip_text(match), plot)
+
+    def _p2_growth_rate(self, current: Any, previous: Any) -> float | None:
+        """Return growth versus the previous valid point in the same series."""
+        if previous in (None, 0):
+            return None
+        try:
+            return (float(current) - float(previous)) / abs(float(previous)) * 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    def _p2_growth_text(self, growth: Any) -> str:
+        """Format one chart growth value consistently."""
+        if growth is None:
+            return '—'
+        try:
+            value = float(growth)
+        except (TypeError, ValueError):
+            return '—'
+        sign = '+' if value >= 0 else ''
+        return f'{sign}{value:.1f}%'
+
+    def _p2_bar_tooltip_text(self, region: Any) -> str:
+        """Build the compact-chart hover text for one bar."""
+        return '\n'.join(
+            (
+                str(region.get('period', '') or ''),
+                f'{region.get("series", "Value")}: {fmt_num(region.get("value"))}',
+                f'Growth: {self._p2_growth_text(region.get("growth"))}',
+            )
+        )
+
+    def _p2_chart_model(
+        self,
+        title: str,
+        period: str,
+        series_specs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Normalize one overview into a shared compact/fullscreen chart model."""
+        all_columns = []
+        labels_by_column = {}
+        normalized_specs = []
+        for raw_spec in series_specs:
+            values, labels, columns = raw_spec.get('data', ([], [], []))
+            points = []
+            previous = None
+            for point_index, (value, label, column) in enumerate(zip(values, labels, columns)):
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if pd.isna(numeric_value):
+                    continue
+                if column not in all_columns:
+                    all_columns.append(column)
+                labels_by_column[column] = str(label)
+                points.append({
+                    'column': column,
+                    'period': str(label),
+                    'value': numeric_value,
+                    'growth': self._p2_growth_rate(numeric_value, previous),
+                    'point_index': point_index,
+                })
+                previous = numeric_value
+            normalized_specs.append({
+                'name': str(raw_spec.get('name', title) or title),
+                'color': raw_spec.get('color') or self.theme_series_color(0),
+                'label_color': raw_spec.get('label_color') or self.theme_color('text_secondary'),
+                'offset': float(raw_spec.get('offset', 0.0) or 0.0),
+                'width': float(raw_spec.get('width', 0.7) or 0.7),
+                'points': points,
+            })
+        try:
+            ordered_columns = sorted(all_columns)
+        except TypeError:
+            ordered_columns = all_columns
+        column_positions = {column: index for index, column in enumerate(ordered_columns)}
+        for series_index, series in enumerate(normalized_specs):
+            for point in series['points']:
+                point['x'] = column_positions[point['column']] + series['offset']
+                point['key'] = (title, series_index, point['point_index'])
+        return {
+            'title': title,
+            'period': period,
+            'columns': ordered_columns,
+            'labels': [labels_by_column.get(column, str(column)) for column in ordered_columns],
+            'series': normalized_specs,
+        }
+
+    def _p2_chart_model_has_data(self, model: Any) -> bool:
+        """Return whether a chart model contains at least one visible bar."""
+        return any(
+            point.get('value') not in (None, 0)
+            for series in (model or {}).get('series', [])
+            for point in series.get('points', [])
+        )
+
+    def _p2_set_plot_y_range(self, pw: Any, values: Any, *, annotation_profile: str='compact') -> None:
         """Apply a comfortable Y-range around a bar series."""
         nonzero = [value for value in values if value != 0]
         if not nonzero:
@@ -391,135 +488,379 @@ class SimpleChartsMixin:
         y_max = max(nonzero) if max(nonzero) > 0 else 0
         y_min = min(nonzero) if min(nonzero) < 0 else 0
         data_range = abs(y_max - y_min) or abs(y_max or y_min)
-        pad_top = max(abs(y_max) * 0.22, data_range * 0.15) if y_max >= 0 else 0
-        pad_bottom = max(abs(y_min) * 0.22, data_range * 0.15) if y_min <= 0 else 0
+        is_fullscreen = annotation_profile == 'fullscreen'
+        pad_ratio = 0.32 if is_fullscreen else 0.24
+        value_ratio = 0.36 if is_fullscreen else 0.30
+        pad_top = max(abs(y_max) * value_ratio, data_range * pad_ratio) if y_max >= 0 else 0
+        pad_bottom = max(abs(y_min) * value_ratio, data_range * pad_ratio) if y_min <= 0 else 0
         pw.setYRange(y_min - pad_bottom, y_max + pad_top, padding=0)
 
-    def _p2_set_plot_ticks(self, pw: Any, labels: Any) -> None:
+    def _p2_set_plot_ticks(self, pw: Any, labels: Any, *, fullscreen: bool=False) -> None:
         """Apply statement-period labels to the plot X-axis."""
-        pw.getAxis('bottom').setTicks([[(index, label) for index, label in enumerate(labels)]])
+        count = len(labels)
+        if fullscreen:
+            tick_stride = 1
+        else:
+            slot_width = max(1.0, float(pw.width()) / max(1, count))
+            widest_label = max((len(str(label)) for label in labels), default=0)
+            target_width = max(26.0, widest_label * 5.5)
+            tick_stride = max(1, int(math.ceil(target_width / slot_width)))
+        ticks = [
+            (index, label)
+            for index, label in enumerate(labels)
+            if index % tick_stride == 0 or index == count - 1
+        ]
+        pw.getAxis('bottom').setTicks([ticks])
         pw.getAxis('bottom').setStyle(tickFont=pg.QtGui.QFont('Arial', 7))
 
-    def _p2_set_plot_x_range(self, pw: Any, count: int) -> None:
+    def _p2_set_plot_x_range(self, pw: Any, count: int, *, annotation_profile: str | None='compact') -> None:
         """Apply a fixed X-range for one bar chart."""
-        pw.setXRange(-0.6, count - 0.4, padding=0)
+        if annotation_profile == 'compact':
+            edge_padding = 1.35
+        elif annotation_profile == 'fullscreen':
+            edge_padding = 1.0
+        else:
+            edge_padding = 0.6
+        pw.setXRange(-edge_padding, max(0, count - 1) + edge_padding, padding=0)
 
-    def _p2_plot_single_series(self, pw: Any, legend_bar: Any, values: Any, labels: Any, color: Any) -> None:
-        """Render one single-series Fundamentals chart."""
+    def _p2_render_chart_model(
+        self,
+        pw: Any,
+        legend_bar: Any,
+        model: dict[str, Any],
+        *,
+        fullscreen: bool=False,
+    ) -> None:
+        """Render one shared chart model in compact or fullscreen mode."""
         pw.clear()
+        QToolTip.hideText()
+        pw._p2_hover_key = None
+        pw._p2_bar_regions = []
+        pw._p2_annotation_items = []
         self._p2_clear_legend_bar(legend_bar)
-        if not values:
+        series_list = list(model.get('series', []))
+        labels = list(model.get('labels', []))
+        if len(series_list) > 1:
+            bar_layout = legend_bar.layout()
+            if bar_layout is not None:
+                for series in series_list:
+                    swatch = QLabel()
+                    swatch.setFixedSize(12, 12)
+                    swatch.setStyleSheet(f'background: {series["color"]}; border-radius: 2px;')
+                    text = QLabel(series['name'])
+                    text.setStyleSheet(
+                        f'color: {self.theme_color("text_primary")}; font-size: 11px; background: transparent;'
+                    )
+                    bar_layout.addWidget(swatch)
+                    bar_layout.addWidget(text)
+                    bar_layout.addSpacing(12)
+        if not labels:
+            pw.getAxis('bottom').setTicks([[]])
+            pw.getPlotItem().vb.autoRange()
             return
-        x_values = list(range(len(values)))
-        pw.addItem(self._p2_solid_bars(x_values, values, color))
-        self._p2_add_bar_labels(pw, x_values, values, self.theme_color('text_secondary'))
-        self._p2_set_plot_ticks(pw, labels)
-        self._p2_set_plot_x_range(pw, len(values))
-        self._p2_set_plot_y_range(pw, values)
-
-    def _p2_plot_grouped_series(self, pw: Any, legend_bar: Any, series_list: Any, offsets: Any, legend_items: Any) -> None:
-        """Render one grouped Fundamentals chart on a shared statement timeline."""
-        pw.clear()
-        self._p2_clear_legend_bar(legend_bar)
-        all_cols = sorted(set(column for _, _, cols in series_list for column in cols))
-        if not all_cols:
-            return
-        col_index = {column: index for index, column in enumerate(all_cols)}
-        labels = [self._p2_col_label(column, self._p2_period()) for column in all_cols]
-        bar_layout = legend_bar.layout()
-        if bar_layout is not None:
-            for color, _, name in legend_items:
-                swatch = QLabel()
-                swatch.setFixedSize(12, 12)
-                swatch.setStyleSheet(f'background: {color}; border-radius: 2px;')
-                text = QLabel(name)
-                text.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 11px; background: transparent;')
-                bar_layout.addWidget(swatch)
-                bar_layout.addWidget(text)
-                bar_layout.addSpacing(12)
         all_values = []
-        for (values, _, cols), offset, (color, label_color, _) in zip(series_list, offsets, legend_items):
-            if not values:
+        for series_index, series in enumerate(series_list):
+            points = list(series.get('points', []))
+            if not points:
                 continue
-            x_values = [col_index[column] + offset for column in cols]
-            pw.addItem(self._p2_solid_bars(x_values, values, color, width=0.42))
-            self._p2_add_bar_labels(pw, x_values, values, label_color, grouped=True)
+            x_values = [point['x'] for point in points]
+            values = [point['value'] for point in points]
+            pw.addItem(self._p2_solid_bars(x_values, values, series['color'], width=series['width']))
+            for point in points:
+                region = {
+                    **point,
+                    'series': series['name'],
+                    'width': series['width'],
+                    'label_color': series['label_color'],
+                    'series_index': series_index,
+                }
+                pw._p2_bar_regions.append(region)
             all_values.extend(values)
-        self._p2_set_plot_ticks(pw, labels)
-        self._p2_set_plot_x_range(pw, len(all_cols))
-        self._p2_set_plot_y_range(pw, all_values)
+        self._p2_set_plot_ticks(pw, labels, fullscreen=fullscreen)
+        annotation_profile = 'fullscreen' if fullscreen else 'compact'
+        self._p2_set_plot_x_range(pw, len(labels), annotation_profile=annotation_profile)
+        self._p2_set_plot_y_range(pw, all_values, annotation_profile=annotation_profile)
+        self._p2_create_chart_annotations(pw, profile=annotation_profile)
 
-    def _p2_render_custom_panel(self, widget_info: Any, descriptor: Any, data: Any, period: Any) -> None:
-        """Render one custom Fundamentals panel from a checked raw statement row."""
-        title_label = widget_info.get('title')
-        status_label = widget_info.get('status')
-        legend_bar = widget_info.get('legend')
-        pw = widget_info.get('plot')
-        title = str((descriptor or {}).get('title', '') or 'Custom').strip()
-        title_label.setText(title)
-        pw.clear()
-        self._p2_clear_legend_bar(legend_bar)
-        family = str((descriptor or {}).get('family', 'financials') or 'financials').strip().lower()
-        row_name = str((descriptor or {}).get('row', '') or '').strip()
-        frame = self._p2_statement_frame(data, family, period)
-        values, labels, _ = self._p2_extract_statement_series(frame, [row_name], period)
-        color = self.theme_series_color(0)
-        if values:
-            status_label.setVisible(False)
-            x_values = list(range(len(values)))
-            pw.addItem(self._p2_solid_bars(x_values, values, color))
-            self._p2_add_bar_labels(pw, x_values, values, self.theme_color('text_secondary'))
-            self._p2_set_plot_ticks(pw, labels)
-            self._p2_set_plot_x_range(pw, len(values))
-            self._p2_set_plot_y_range(pw, values)
+    def _p2_create_chart_annotations(self, pw: Any, *, profile: str) -> None:
+        """Create every value/growth label for a compact or fullscreen plot."""
+        font_size = 9 if profile == 'fullscreen' else 7
+        font = pg.QtGui.QFont('Arial', font_size, pg.QtGui.QFont.Weight.Bold)
+        if profile == 'compact':
+            font.setStretch(pg.QtGui.QFont.Stretch.Condensed)
+        annotations = []
+        for region in pw._p2_bar_regions:
+            if region['value'] == 0:
+                continue
+            value_text = str(fmt_num(region['value']))
+            growth_text = self._p2_growth_text(region.get('growth'))
+            text = f'{value_text}\n{growth_text}'
+            anchor = (0.5, 1.0 if region['value'] >= 0 else 0.0)
+            item = pg.TextItem(text=text, color=region['label_color'], anchor=anchor)
+            item.setFont(font)
+            if profile == 'compact':
+                item.textItem.document().setDocumentMargin(0.0)
+                item.updateTextPos()
+            item.setZValue(20)
+            item.setPos(region['x'], region['value'])
+            leader = pg.PlotDataItem(pen=pg.mkPen(region['label_color'], width=1))
+            leader.setZValue(10)
+            leader.setVisible(False)
+            pw.addItem(leader)
+            pw.addItem(item)
+            annotations.append({'item': item, 'leader': leader, 'region': region})
+        pw._p2_annotation_items = annotations
+        pw._p2_annotation_profile = profile
+        QTimer.singleShot(0, partial(self._p2_layout_chart_annotations, pw))
+
+    def _p2_layout_chart_annotations(self, pw: Any) -> None:
+        """Place chart labels into measured, non-overlapping vertical lanes."""
+        annotations = list(getattr(pw, '_p2_annotation_items', []))
+        if not annotations or not pw.isVisible():
             return
-        status_label.setText('No data for this period.')
-        status_label.setVisible(True)
-        pw.getAxis('bottom').setTicks([[]])
-        pw.getPlotItem().vb.autoRange()
+        view_box = pw.getPlotItem().vb
+        scene_rect = view_box.sceneBoundingRect()
+        if scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return
+        compact = getattr(pw, '_p2_annotation_profile', 'compact') == 'compact'
+        if compact:
+            self._p2_layout_compact_annotations(pw, annotations, scene_rect)
+            return
+        minimum_item_height = 20.0
+        lane_gap = 4.0
+        for _ in range(4):
+            placed_rects = []
+            view_extents = []
+            ordered = sorted(
+                annotations,
+                key=lambda entry: (entry['region']['x'], entry['region']['series_index']),
+            )
+            for entry in ordered:
+                item = entry['item']
+                leader = entry['leader']
+                region = entry['region']
+                base_scene = view_box.mapViewToScene(pg.QtCore.QPointF(region['x'], region['value']))
+                direction = -1.0 if region['value'] >= 0 else 1.0
+                item_height = max(minimum_item_height, item.sceneBoundingRect().height())
+                chosen_y = float(region['value'])
+                chosen_rect = None
+                chosen_lane = 0
+                for lane in range(len(annotations) + 2):
+                    scene_y = base_scene.y() + direction * lane * (item_height + lane_gap)
+                    view_position = view_box.mapSceneToView(pg.QtCore.QPointF(base_scene.x(), scene_y))
+                    item.setPos(region['x'], view_position.y())
+                    candidate = item.sceneBoundingRect().adjusted(-2.0, -2.0, 2.0, 2.0)
+                    if not any(candidate.intersects(existing) for existing in placed_rects):
+                        chosen_y = view_position.y()
+                        chosen_rect = candidate
+                        chosen_lane = lane
+                        break
+                if chosen_rect is None:
+                    chosen_rect = item.sceneBoundingRect().adjusted(-2.0, -2.0, 2.0, 2.0)
+                placed_rects.append(chosen_rect)
+                leader.setVisible(chosen_lane > 0)
+                leader.setData([region['x'], region['x']], [region['value'], chosen_y])
+                top_view = view_box.mapSceneToView(chosen_rect.topLeft()).y()
+                bottom_view = view_box.mapSceneToView(chosen_rect.bottomRight()).y()
+                view_extents.extend((top_view, bottom_view))
+            values = [float(region['value']) for region in pw._p2_bar_regions]
+            if not values or not view_extents:
+                return
+            current_min, current_max = view_box.viewRange()[1]
+            required_min = min(min(values), min(view_extents))
+            required_max = max(max(values), max(view_extents))
+            span = max(1e-9, max(current_max, required_max) - min(current_min, required_min))
+            maximum_label_height = max(
+                (entry['item'].sceneBoundingRect().height() for entry in annotations),
+                default=minimum_item_height,
+            )
+            view_padding = span * (maximum_label_height + lane_gap) / max(1.0, scene_rect.height())
+            target_min = required_min - view_padding if required_min < current_min else current_min
+            target_max = required_max + view_padding if required_max > current_max else current_max
+            if target_min < current_min or target_max > current_max:
+                pw.setYRange(target_min, target_max, padding=0)
 
-    def _render_simple_charts(self, data: Any, period: Any) -> Any:
-        """Render the fixed Default Fundamentals configuration."""
+    def _p2_layout_compact_annotations(self, pw: Any, annotations: Any, scene_rect: Any) -> None:
+        """Keep compact labels at bar ends, displacing only actual collisions."""
+        view_box = pw.getPlotItem().vb
+        label_gap = 2.0
+        lane_gap = 4.0
+        plot_margin = 3.0
+        collision_padding = 1.0
+        maximum_label_height = max(
+            (entry['item'].sceneBoundingRect().height() for entry in annotations),
+            default=16.0,
+        )
+        row_height = maximum_label_height + lane_gap
+
+        def assign_lanes(entries: Any) -> tuple[dict[int, int], int]:
+            """Color overlapping horizontal intervals into stable compact lanes."""
+            lane_right_edges = []
+            intervals = []
+            for entry in entries:
+                region = entry['region']
+                center = view_box.mapViewToScene(pg.QtCore.QPointF(region['x'], region['value'])).x()
+                width = max(1.0, entry['item'].sceneBoundingRect().width())
+                intervals.append((center - width / 2.0, center + width / 2.0, entry))
+            assignments = {}
+            for left, right, entry in sorted(intervals, key=lambda value: value[0]):
+                lane = next(
+                    (
+                        index
+                        for index, previous_right in enumerate(lane_right_edges)
+                        if left >= previous_right + collision_padding * 2.0
+                    ),
+                    len(lane_right_edges),
+                )
+                if lane == len(lane_right_edges):
+                    lane_right_edges.append(right)
+                else:
+                    lane_right_edges[lane] = right
+                assignments[id(entry)] = lane
+            return assignments, len(lane_right_edges)
+
+        positive = [entry for entry in annotations if entry['region']['value'] >= 0]
+        negative = [entry for entry in annotations if entry['region']['value'] < 0]
+        positive_lanes, positive_lane_count = assign_lanes(positive)
+        negative_lanes, negative_lane_count = assign_lanes(negative)
+        top_reserve = positive_lane_count * row_height + plot_margin if positive else 0.0
+        bottom_reserve = negative_lane_count * row_height + plot_margin if negative else 0.0
+        values = [float(region['value']) for region in pw._p2_bar_regions]
+        data_min = min(0.0, min(values))
+        data_max = max(0.0, max(values))
+        data_span = max(1e-9, data_max - data_min or abs(data_max or data_min))
+        for _ in range(4):
+            available_data_height = max(
+                8.0,
+                scene_rect.height() - top_reserve - bottom_reserve,
+            )
+            top_padding = data_span * top_reserve / available_data_height
+            bottom_padding = data_span * bottom_reserve / available_data_height
+            pw.setYRange(data_min - bottom_padding, data_max + top_padding, padding=0)
+
+            preferred_scene_y = {}
+            for entry in annotations:
+                region = entry['region']
+                is_positive = region['value'] >= 0
+                direction = -1.0 if is_positive else 1.0
+                base_scene = view_box.mapViewToScene(pg.QtCore.QPointF(region['x'], region['value']))
+                preferred_scene_y[id(entry)] = base_scene.y() + direction * label_gap
+
+            placed_rects = []
+            outside_plot = False
+
+            def place_sign(entries: Any, lanes: Any, lane_count: int, *, positive_sign: bool) -> None:
+                nonlocal outside_plot
+                for lane in range(lane_count):
+                    lane_entries = sorted(
+                        (entry for entry in entries if lanes[id(entry)] == lane),
+                        key=lambda entry: entry['region']['x'],
+                    )
+                    for entry in lane_entries:
+                        item = entry['item']
+                        leader = entry['leader']
+                        region = entry['region']
+                        item.setAnchor((0.5, 1.0 if positive_sign else 0.0))
+                        base_scene = view_box.mapViewToScene(
+                            pg.QtCore.QPointF(region['x'], region['value'])
+                        )
+                        anchor_scene_y = preferred_scene_y[id(entry)]
+                        candidate = None
+                        for _ in range(len(annotations) + 1):
+                            label_position = view_box.mapSceneToView(
+                                pg.QtCore.QPointF(base_scene.x(), anchor_scene_y)
+                            )
+                            item.setPos(region['x'], label_position.y())
+                            candidate = item.sceneBoundingRect().adjusted(
+                                -collision_padding,
+                                -collision_padding,
+                                collision_padding,
+                                collision_padding,
+                            )
+                            conflicts = [
+                                existing
+                                for existing in placed_rects
+                                if candidate.intersects(existing)
+                            ]
+                            if not conflicts:
+                                break
+                            if positive_sign:
+                                shift = max(
+                                    candidate.bottom() - existing.top() + lane_gap
+                                    for existing in conflicts
+                                )
+                                anchor_scene_y -= shift
+                            else:
+                                shift = max(
+                                    existing.bottom() - candidate.top() + lane_gap
+                                    for existing in conflicts
+                                )
+                                anchor_scene_y += shift
+                        if candidate is None:
+                            continue
+                        placed_rects.append(candidate)
+                        displaced = not math.isclose(
+                            anchor_scene_y,
+                            preferred_scene_y[id(entry)],
+                            abs_tol=0.5,
+                        )
+                        entry['displaced'] = displaced
+                        leader.setVisible(displaced)
+                        leader.setData(
+                            [region['x'], region['x']],
+                            [region['value'], label_position.y()],
+                        )
+                        if not scene_rect.adjusted(
+                            plot_margin,
+                            plot_margin,
+                            -plot_margin,
+                            -plot_margin,
+                        ).contains(candidate):
+                            outside_plot = True
+
+            place_sign(positive, positive_lanes, positive_lane_count, positive_sign=True)
+            place_sign(negative, negative_lanes, negative_lane_count, positive_sign=False)
+
+            collisions = any(
+                left.intersects(right)
+                for left_index, left in enumerate(placed_rects)
+                for right in placed_rects[left_index + 1:]
+            )
+            if not outside_plot and not collisions:
+                return
+            if positive:
+                top_reserve += row_height
+            if negative:
+                bottom_reserve += row_height
+
+    def _p2_default_chart_models(self, data: Any, period: Any) -> list[dict[str, Any]]:
+        """Build the six fixed overview models from the selected statement period."""
         fin_df = data['financials'] if period == 'annual' else data['quarterly_financials']
         bs_df = data['balance_sheet'] if period == 'annual' else data['quarterly_balance_sheet']
         cf_df = data['cashflow'] if period == 'annual' else data['quarterly_cashflow']
         info = data['info']
+        text_color = self.theme_color('text_secondary')
 
-        values, labels, _, color = self._p2_resolve_curated_series(data, period, 'revenue')
-        self._p2_plot_single_series(self.p2_simple_charts[0], self.p2_simple_legend_bars[0], values, labels, color)
-
-        values, labels, _, color = self._p2_resolve_curated_series(data, period, 'net_income')
-        self._p2_plot_single_series(self.p2_simple_charts[1], self.p2_simple_legend_bars[1], values, labels, color)
-
-        operating_cf = self._p2_extract_statement_series(cf_df, ['operating cash flow', 'cash from operations'], period)
-        free_cf = self._p2_extract_statement_series(cf_df, ['free cash flow'], period)
-        self._p2_plot_grouped_series(
-            self.p2_simple_charts[2],
-            self.p2_simple_legend_bars[2],
-            [operating_cf, free_cf],
-            [-0.22, +0.22],
-            [
-                (self.theme_series_color(2), self.theme_color('text_secondary'), 'Operating CF'),
-                (self.theme_series_color(3), self.theme_color('text_secondary'), 'Free CF'),
-            ],
+        revenue = self._p2_resolve_curated_series(data, period, 'revenue')
+        net_income = self._p2_resolve_curated_series(data, period, 'net_income')
+        operating_cf = self._p2_extract_statement_series(
+            cf_df,
+            ['operating cash flow', 'cash from operations'],
+            period,
         )
-
-        shares = self._p2_extract_statement_series(bs_df, ['ordinary shares number', 'shares outstanding', 'common stock shares outstanding'], period)
+        free_cf = self._p2_extract_statement_series(cf_df, ['free cash flow'], period)
+        shares = self._p2_extract_statement_series(
+            bs_df,
+            ['ordinary shares number', 'shares outstanding', 'common stock shares outstanding'],
+            period,
+        )
         if not shares[0]:
             shares_scalar = info.get('sharesOutstanding')
             if shares_scalar is not None:
                 try:
                     shares = ([float(shares_scalar)], ['Current'], ['current'])
-                except Exception:
+                except (TypeError, ValueError):
                     shares = ([], [], [])
-        self._p2_plot_single_series(
-            self.p2_simple_charts[3],
-            self.p2_simple_legend_bars[3],
-            shares[0],
-            shares[1],
-            self.theme_series_color(4),
-        )
-
         cash_series = self._p2_sum_statement_series(
             bs_df,
             period,
@@ -527,33 +868,66 @@ class SimpleChartsMixin:
             ['available for sale securities', 'marketable securities'],
         )
         debt_series = self._p2_total_debt_series(bs_df, period)
-        self._p2_plot_grouped_series(
-            self.p2_simple_charts[4],
-            self.p2_simple_legend_bars[4],
-            [cash_series, debt_series],
-            [-0.25, +0.25],
-            [
-                (self.theme_color('accent_positive'), self.theme_color('text_secondary'), 'Cash'),
-                (self.theme_color('accent_negative'), self.theme_color('text_secondary'), 'Total Debt'),
-            ],
+        sga_series = self._p2_extract_statement_series(
+            fin_df,
+            ['selling general', 'general and administrative'],
+            period,
         )
-
-        sga_series = self._p2_extract_statement_series(fin_df, ['selling general', 'general and administrative'], period)
         rd_series = self._p2_extract_statement_series(fin_df, ['research and development'], period)
-        self._p2_plot_grouped_series(
-            self.p2_simple_charts[5],
-            self.p2_simple_legend_bars[5],
-            [sga_series, rd_series],
-            [-0.25, +0.25],
-            [
-                (self.theme_series_color(0), self.theme_color('text_secondary'), 'SG&A'),
-                (self.theme_series_color(1), self.theme_color('text_secondary'), 'R&D'),
-            ],
-        )
 
-    def _p2_render_custom_charts(self, data: Any, period: Any) -> None:
-        """Render the Custom Fundamentals configuration."""
-        widgets = list(getattr(self, 'p2_custom_panel_widgets', []))
-        descriptors = list(getattr(self, 'p2_custom_panel_descriptors', []))
-        for widget_info, descriptor in zip(widgets, descriptors):
-            self._p2_render_custom_panel(widget_info, descriptor, data, period)
+        def spec(name: str, series: Any, color: Any, *, offset: float=0.0, width: float=0.7) -> dict[str, Any]:
+            return {
+                'name': name,
+                'data': (series[0], series[1], series[2]),
+                'color': color,
+                'label_color': text_color,
+                'offset': offset,
+                'width': width,
+            }
+
+        return [
+            self._p2_chart_model('Revenue', period, [spec('Revenue', revenue, revenue[3])]),
+            self._p2_chart_model('Net Income', period, [spec('Net Income', net_income, net_income[3])]),
+            self._p2_chart_model(
+                'Cash Flow',
+                period,
+                [
+                    spec('Operating CF', operating_cf, self.theme_series_color(2), offset=-0.22, width=0.42),
+                    spec('Free CF', free_cf, self.theme_series_color(3), offset=0.22, width=0.42),
+                ],
+            ),
+            self._p2_chart_model(
+                'Shares Outstanding',
+                period,
+                [spec('Shares Outstanding', shares, self.theme_series_color(4))],
+            ),
+            self._p2_chart_model(
+                'Cash & Total Debt',
+                period,
+                [
+                    spec('Cash', cash_series, self.theme_color('accent_positive'), offset=-0.25, width=0.42),
+                    spec('Total Debt', debt_series, self.theme_color('accent_negative'), offset=0.25, width=0.42),
+                ],
+            ),
+            self._p2_chart_model(
+                'Operating Expenses',
+                period,
+                [
+                    spec('SG&A', sga_series, self.theme_series_color(0), offset=-0.25, width=0.42),
+                    spec('R&D', rd_series, self.theme_series_color(1), offset=0.25, width=0.42),
+                ],
+            ),
+        ]
+
+    def _render_simple_charts(self, data: Any, period: Any) -> Any:
+        """Render the fixed Default Fundamentals configuration."""
+        models = self._p2_default_chart_models(data, period)
+        self.p2_chart_models = models
+        for index, model in enumerate(models):
+            self._p2_render_chart_model(
+                self.p2_simple_charts[index],
+                self.p2_simple_legend_bars[index],
+                model,
+            )
+        for button in getattr(self, 'p2_expand_buttons', []):
+            button.setEnabled(True)
