@@ -24,6 +24,7 @@ class EmbeddedDataServiceRuntime:
         self.port: int | None = None
         self.base_url: str | None = None
         self._server: Any = None
+        self._server_socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._client: Any = None
         self._ready = threading.Event()
@@ -56,7 +57,8 @@ class EmbeddedDataServiceRuntime:
             from .client import DataServiceClient
             from .server import create_app
 
-            self.port = self._find_available_port()
+            self._server_socket = self._reserve_available_socket()
+            self.port = int(self._server_socket.getsockname()[1])
             self.base_url = f"http://{self.host}:{self.port}"
             app = create_app()
             config = uvicorn.Config(
@@ -68,7 +70,12 @@ class EmbeddedDataServiceRuntime:
                 lifespan="on",
             )
             self._server = uvicorn.Server(config)
-            self._thread = threading.Thread(target=self._server.run, name="BudgetTerminalDataService", daemon=True)
+            self._thread = threading.Thread(
+                target=self._server.run,
+                kwargs={"sockets": [self._server_socket]},
+                name="BudgetTerminalDataService",
+                daemon=True,
+            )
             self._thread.start()
             self._client = DataServiceClient(self.base_url)
             if self._wait_until_ready(timeout_seconds):
@@ -95,6 +102,13 @@ class EmbeddedDataServiceRuntime:
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
+        server_socket = self._server_socket
+        self._server_socket = None
+        if server_socket is not None:
+            try:
+                server_socket.close()
+            except OSError:
+                pass
         self._server = None
         self._thread = None
         self.port = None
@@ -111,17 +125,14 @@ class EmbeddedDataServiceRuntime:
         logger.warning("Embedded data service did not become ready within %.1f seconds.", timeout_seconds)
         return False
 
-    def _find_available_port(self) -> int:
+    def _reserve_available_socket(self) -> socket.socket:
         for port in range(self.preferred_port, self.preferred_port + 50):
-            if self._port_available(port):
-                return port
-        raise RuntimeError("no available localhost port for embedded data service")
-
-    def _port_available(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                sock.bind((self.host, int(port)))
-                return True
+                if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                server_socket.bind((self.host, int(port)))
+                return server_socket
             except OSError:
-                return False
+                server_socket.close()
+        raise RuntimeError("no available localhost port for embedded data service")

@@ -1370,8 +1370,6 @@ class SettingsMixin:
     def _settings_refresh_after_backup_import(
         self,
         result: Any,
-        *,
-        paper_store_factory: Any = PaperTradingStore,
     ) -> None:
         """Apply a completed folder import to every initialized live data surface."""
         self._apply_runtime_user_data(result.user_data)
@@ -1381,21 +1379,9 @@ class SettingsMixin:
                 self._p29_performance_cache.clear()
             if hasattr(self, '_p29_refresh_cards'):
                 self._p29_refresh_cards(request_data=False)
-        if self._page_initialized(page_attr='page32'):
-            self._p32_store = paper_store_factory()
-            self._p32_engine.store = self._p32_store
-            self._p32_refresh_accounts()
 
     def _on_import_backup_bundle(self) -> None:
         """Validate and import a complete three-file backup folder."""
-        virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if virtual_busy:
-            QMessageBox.warning(
-                self,
-                'Virtual Trading Busy',
-                'Wait for the current Virtual quote refresh to finish, then import again.',
-            )
-            return
         folder = self._settings_choose_backup_directory('Select Backup Folder to Import')
         if not folder:
             self._set_settings_status('Backup-folder import cancelled.')
@@ -1660,10 +1646,6 @@ class SettingsMixin:
 
     def _on_import_paper_trading(self) -> None:
         """Replace the Virtual Trading ledger from a validated JSON backup."""
-        virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if virtual_busy:
-            QMessageBox.warning(self, 'Virtual Trading Busy', 'Wait for the current Virtual quote refresh to finish, then import again.')
-            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             'Import Virtual Trading',
@@ -1698,10 +1680,6 @@ class SettingsMixin:
             return
         try:
             rollback = store.import_backup(payload)
-            if self._page_initialized(page_attr='page32'):
-                self._p32_store = PaperTradingStore()
-                self._p32_engine.store = self._p32_store
-                self._p32_refresh_accounts()
         except Exception as exc:
             self._set_settings_status(f'Virtual Trading import failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Import Failed', f'Unable to import Virtual Trading.\n\n{exc}')
@@ -1715,10 +1693,6 @@ class SettingsMixin:
 
     def _on_reset_paper_trading(self) -> None:
         """Clear all Virtual Trading accounts after creating a rollback database."""
-        virtual_busy = self._page_initialized(page_attr='page32') and getattr(self, '_p32_task_inflight', False)
-        if virtual_busy:
-            QMessageBox.warning(self, 'Virtual Trading Busy', 'Wait for the current Virtual quote refresh to finish, then reset again.')
-            return
         reply = QMessageBox.question(
             self,
             'Reset Virtual Trading',
@@ -1731,8 +1705,6 @@ class SettingsMixin:
             return
         try:
             rollback = PaperTradingStore().reset()
-            if self._page_initialized(page_attr='page32'):
-                self._p32_refresh_accounts()
         except Exception as exc:
             self._set_settings_status(f'Virtual Trading reset failed: {exc}', 'negative')
             QMessageBox.critical(self, 'Reset Failed', f'Unable to reset Virtual Trading.\n\n{exc}')

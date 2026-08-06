@@ -32,13 +32,12 @@ REFRESH_ROUTE_ARCHITECTURE = {
     27: 'background-single-flight',
     28: 'background-single-flight',
     29: 'background-single-flight',
-    31: 'background-active-subtab',
     33: 'background-single-flight',
     37: 'local-only',
 }
 
 _MIGRATED_REFRESH_ROUTES = {
-    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 31, 33,
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33,
 }
 REFRESH_ROUTE_CLASSIFICATION = {
     page_index: (
@@ -113,7 +112,6 @@ class WindowLifecycleMixin:
         self._register_page(0, self.btn_page1, on_show=self._dashboard_on_show if hasattr(self, '_dashboard_on_show') else None)
         self._register_page(25, self.btn_page26, on_show=self._p26_on_show if hasattr(self, '_p26_on_show') else None)
         self._register_page(1, self.btn_page4, on_show=self._p4_on_show if hasattr(self, '_p4_on_show') else None)
-        self._register_page(31, self.btn_page32, on_show=self._p32_on_show if hasattr(self, '_p32_on_show') else None, on_hide=self._p32_on_hide if hasattr(self, '_p32_on_hide') else None)
         self._register_page(28, self.btn_page29, on_show=self._p29_on_show if hasattr(self, '_p29_on_show') else None)
         self._register_page(2, self.btn_page6, on_show=self._p6_on_show if hasattr(self, '_p6_on_show') else None)
         self._register_page(3, self.btn_page7, on_show=self._p7_on_show if hasattr(self, '_p7_on_show') else None)
@@ -1589,10 +1587,6 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p30_fetch'):
                 self._p30_fetch()
             return
-        if current_index == 31:
-            if hasattr(self, '_p32_run_engine_cycle'):
-                self._p32_run_engine_cycle(mark=True, force=True)
-            return
         if current_index == 26:
             if hasattr(self, '_p27_request_refresh'):
                 self._p27_request_refresh(force=True)
@@ -1830,7 +1824,7 @@ class WindowLifecycleMixin:
         if coordinator is not None:
             coordinator.clear()
         cancel_all_batched(self)
-        for cleanup_name in ('_stop_recurring_scheduler', '_p32_stop', '_p36_stop'):
+        for cleanup_name in ('_p36_stop',):
             cleanup = getattr(self, cleanup_name, None)
             if not callable(cleanup):
                 continue

@@ -28,7 +28,6 @@ from .paths import resource_path
 DEFAULT_PAGE_LABELS: tuple[tuple[int, str], ...] = (
     (0, 'Dashboard'),
     (1, 'Portfolio'),
-    (31, 'Virtual'),
     (28, 'Cards'),
     (2, 'Personal Finance'),
     (3, 'Calendar'),

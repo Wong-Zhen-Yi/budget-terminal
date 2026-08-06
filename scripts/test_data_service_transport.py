@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import socket
 import sys
 import tempfile
 import threading
@@ -22,6 +23,7 @@ from budget_terminal_app.data_service.client import (
     InProcessDataServiceClient,
 )
 from budget_terminal_app.data_service.coordinator import DashboardFetchCoordinator
+from budget_terminal_app.data_service.runtime import EmbeddedDataServiceRuntime
 from budget_terminal_app.data_service.serialization import serialize_dashboard_payload
 from budget_terminal_app.data_service.tasks import MarketDataTaskRunner
 from budget_terminal_app.workers.data import DataWorker
@@ -244,6 +246,45 @@ def test_inprocess_transport_avoids_serialization_overhead() -> None:
     print(f"transport benchmark: inprocess={direct_elapsed:.4f}s http-loopback={http_elapsed:.4f}s")
 
 
+def test_concurrent_http_runtimes_reserve_distinct_ports() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        preferred_port = int(probe.getsockname()[1])
+
+    synchronized_selection = threading.Barrier(2)
+    synchronized_reservation = threading.Barrier(2)
+
+    class SynchronizedPortSelectionRuntime(EmbeddedDataServiceRuntime):
+        def _reserve_available_socket(self) -> socket.socket:
+            server_socket = super()._reserve_available_socket()
+            synchronized_reservation.wait(timeout=5.0)
+            return server_socket
+
+        # This hook keeps the regression red-capable against the former
+        # check-then-bind implementation. The current reservation path above
+        # is the hook exercised by production.
+        def _port_available(self, port: int) -> bool:
+            available = super()._port_available(port)
+            if int(port) == preferred_port:
+                synchronized_selection.wait(timeout=5.0)
+            return available
+
+    runtimes = [
+        SynchronizedPortSelectionRuntime(preferred_port=preferred_port, transport="http")
+        for _ in range(2)
+    ]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            started = list(executor.map(lambda runtime: runtime.start(timeout_seconds=5.0), runtimes))
+        assert started == [True, True]
+        assert None not in {runtime.port for runtime in runtimes}
+        assert len({runtime.port for runtime in runtimes}) == 2
+        assert all(runtime.client is not None and runtime.client.health() for runtime in runtimes)
+    finally:
+        for runtime in runtimes:
+            runtime.stop()
+
+
 if __name__ == "__main__":
     test_transport_contract_parity()
     test_identical_requests_are_coalesced()
@@ -251,4 +292,5 @@ if __name__ == "__main__":
     test_task_runner_reuses_executor_and_closes()
     test_cache_supports_concurrent_readers_and_writers()
     test_inprocess_transport_avoids_serialization_overhead()
+    test_concurrent_http_runtimes_reserve_distinct_ports()
     print("data service transport smoke tests passed")

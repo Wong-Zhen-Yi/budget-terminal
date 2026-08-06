@@ -39,7 +39,6 @@ jobs:
           python scripts/test_persistence_safety.py
       - name: Desktop smokes
         run: |
-          python scripts/test_single_instance.py
           python scripts/test_tab_picker_search.py
           python scripts/test_refresh_control.py
           python scripts/test_batched_render.py
@@ -49,7 +48,6 @@ jobs:
           python scripts/test_refresh_route_inventory.py
           python scripts/test_refresh_responsiveness.py
           python scripts/test_bulk_render_responsiveness.py
-          python scripts/test_paper_virtual_refresh_async.py
           python scripts/test_networth_fx_hidden_render.py
           python scripts/test_portfolio_positions_row_stability.py
           python scripts/test_options_refresh_responsiveness.py

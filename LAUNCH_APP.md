@@ -58,6 +58,16 @@ python budget_terminal.py
 
 Budget Terminal should open as a desktop app.
 
+## Open Multiple Windows
+
+Run the launch command again whenever you want another Budget Terminal window:
+
+```powershell
+python budget_terminal.py
+```
+
+Each launch starts an independent app process. The windows share the same saved portfolios, settings, caches, and paper-trading database. Avoid changing the same saved setting in two windows at exactly the same time; for JSON-backed settings, the most recent save wins.
+
 ## Next Time
 
 After the setup is done, open PowerShell in the project folder and run:

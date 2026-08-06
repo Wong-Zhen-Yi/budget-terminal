@@ -312,6 +312,7 @@ def test_strategies_page_smoke(temp_dir: Path) -> None:
         window._refresh_main_tab_picker_items()
         picker_labels = [entry["label"] for entry in window._tab_picker_entries]
         _assert("Cards" in picker_labels, "Cards should be discoverable in page search")
+        _assert("Virtual" not in picker_labels, "Virtual should be absent from page search")
     finally:
         window.close()
         app.processEvents()

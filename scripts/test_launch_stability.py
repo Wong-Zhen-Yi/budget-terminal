@@ -163,9 +163,11 @@ def test_reentrant_lazy_build_initializes_once(window: Any, app: Any) -> None:
     assert window.stacked_widget.currentWidget() is page, 'deferred navigation did not show the built page'
 
 
-def test_close_before_lazy_virtual_page_initializes(window: Any, app: Any) -> None:
+def test_close_with_retired_page_placeholders(window: Any, app: Any) -> None:
     assert 30 not in window._lazy_page_registry
-    assert not window._page_initialized(page_attr='page32')
+    assert 31 not in window._lazy_page_registry
+    assert not window._page_initialized(index=31)
+    assert window.stacked_widget.indexOf(window._retired_page31) == 31
 
     callback_errors: list[tuple[type[BaseException], BaseException]] = []
     original_excepthook = sys.excepthook
@@ -202,7 +204,6 @@ def main() -> int:
 
         from budget_terminal_app.app import BudgetTerminalApp
         from budget_terminal_app.dependencies import QApplication
-        from budget_terminal_app.mixins.window_bootstrap import WindowBootstrapMixin
         from budget_terminal_app.mixins.window_lifecycle import WindowLifecycleMixin
         from budget_terminal_app.mixins.window_setup import WindowSetupMixin
         from budget_terminal_app.startup_loading import (
@@ -210,10 +211,8 @@ def main() -> int:
             StartupLoadingScreen,
         )
 
-        original_init_recurring_scheduler = WindowBootstrapMixin._init_recurring_scheduler
         original_schedule_startup_refresh = WindowLifecycleMixin._schedule_startup_refresh
         original_start_lazy_warmup = WindowLifecycleMixin._start_lazy_warmup
-        WindowBootstrapMixin._init_recurring_scheduler = lambda self: None
         WindowLifecycleMixin._schedule_startup_refresh = lambda self: None
         WindowLifecycleMixin._start_lazy_warmup = lambda self: None
 
@@ -229,13 +228,12 @@ def main() -> int:
             window = BudgetTerminalApp()
             test_failed_lazy_build_rolls_back(window, app)
             test_reentrant_lazy_build_initializes_once(window, app)
-            test_close_before_lazy_virtual_page_initializes(window, app)
+            test_close_with_retired_page_placeholders(window, app)
             window = None
         finally:
             if window is not None:
                 window.close()
                 app.processEvents()
-            WindowBootstrapMixin._init_recurring_scheduler = original_init_recurring_scheduler
             WindowLifecycleMixin._schedule_startup_refresh = original_schedule_startup_refresh
             WindowLifecycleMixin._start_lazy_warmup = original_start_lazy_warmup
             app.quit()

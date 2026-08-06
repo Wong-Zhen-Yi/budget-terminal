@@ -94,7 +94,6 @@ class WindowSetupMixin:
         27: 'Projections',
         28: 'Cards',
         29: 'Price',
-        31: 'Virtual',
         33: 'News',
         37: 'Dictionary',
     }
@@ -167,8 +166,6 @@ class WindowSetupMixin:
         self.btn_page34.setCheckable(True)
         self.btn_page4 = QPushButton('Portfolio')
         self.btn_page4.setCheckable(True)
-        self.btn_page32 = QPushButton('Virtual')
-        self.btn_page32.setCheckable(True)
         self.btn_page29 = QPushButton('Cards')
         self.btn_page29.setCheckable(True)
         self.btn_page5 = QPushButton('Options')
@@ -223,7 +220,6 @@ class WindowSetupMixin:
             self.btn_page1,
             self.btn_page26,
             self.btn_page4,
-            self.btn_page32,
             self.btn_page29,
             self.btn_page6,
             self.btn_page14,
@@ -978,7 +974,7 @@ class WindowSetupMixin:
             {'index': 28, 'page_attr': 'page29', 'init_method': 'init_page29', 'theme_hook': '_apply_strategies_theme'},
             {'index': 29, 'page_attr': 'page30', 'init_method': 'init_page30'},
             {'index': 30, 'page_attr': '_retired_page30', 'placeholder_only': True},
-            {'index': 31, 'page_attr': 'page32', 'init_method': 'init_page32', 'theme_hook': '_apply_virtual_trading_theme', 'rollback_hook': '_p32_stop'},
+            {'index': 31, 'page_attr': '_retired_page31', 'placeholder_only': True},
             {'index': 32, 'page_attr': '_retired_page32', 'placeholder_only': True},
             {'index': 33, 'page_attr': 'page34', 'init_method': 'init_page34', 'theme_hook': '_apply_news_theme', 'hydrate_hook': '_hydrate_lazy_page34'},
             {'index': 34, 'page_attr': '_retired_page34', 'placeholder_only': True},

@@ -5,7 +5,6 @@ from contextlib import contextmanager, nullcontext
 from typing import Any
 from .. import __version__
 from ..compat import *
-from ..paper_trading import RecurringTradingService
 from ..services.refresh_control import RefreshCoordinator
 from ..startup_metrics import make_launch_id, upsert_startup_launch, utc_now_iso
 
@@ -74,8 +73,6 @@ def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: 
 
 
 class WindowBootstrapMixin:
-    _RECURRING_SCHEDULER_INTERVAL_MS = 30_000
-    _RECURRING_SCHEDULER_START_DELAY_MS = 250
     _PORTFOLIO_PERSIST_DEBOUNCE_MS = 250
     _DASHBOARD_STATE_PERSIST_DEBOUNCE_MS = 250
     _SESSION_CACHE_PERSIST_DEBOUNCE_MS = 250
@@ -937,207 +934,10 @@ class WindowBootstrapMixin:
                 self.theme_manager.apply_theme(self.current_theme_id)
             self._sync_after_portfolio_change(refresh_main=False)
             self._apply_startup_window_size()
-            self._init_recurring_scheduler()
 
     def _on_invoke_main(self, fn: Any) -> None:
         """Handle invoke main."""
         fn()
-
-    def _init_recurring_scheduler(self) -> None:
-        """Defer the optional account automation runner until Qt can process events."""
-        self._recurring_scheduler_service = None
-        self._recurring_scheduler_executor = None
-        self._recurring_scheduler_init_future = None
-        self._recurring_scheduler_timer = None
-        self._recurring_scheduler_stopped = False
-        self._recurring_scheduler_inflight = False
-        self._recurring_scheduler_inflight_catch_up = False
-        self._recurring_scheduler_catch_up_pending = True
-        self._recurring_scheduler_available = False
-        self._recurring_scheduler_activation_pending = True
-        self._recurring_scheduler_startup_status = 'pending'
-        self._recurring_scheduler_startup_error = ''
-        try:
-            QTimer.singleShot(self._RECURRING_SCHEDULER_START_DELAY_MS, self._activate_recurring_scheduler)
-        except Exception as exc:
-            self._disable_recurring_scheduler(exc, phase='startup scheduling')
-
-    def _activate_recurring_scheduler(self) -> None:
-        """Start recurring-trading service initialization outside the Qt thread."""
-        self._recurring_scheduler_activation_pending = False
-        status = str(getattr(self, '_recurring_scheduler_startup_status', '') or '')
-        if getattr(self, '_recurring_scheduler_stopped', False) or status in {'starting', 'ready', 'disabled', 'stopped'}:
-            return
-        self._recurring_scheduler_startup_status = 'starting'
-        try:
-            executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix='BudgetTerminalRecurring',
-            )
-            self._recurring_scheduler_executor = executor
-            future = executor.submit(RecurringTradingService)
-            self._recurring_scheduler_init_future = future
-        except Exception as exc:
-            self._disable_recurring_scheduler(exc, phase='startup submission')
-            return
-
-        def complete(done_future: Any) -> None:
-            try:
-                self._invoke_main.emit(
-                    lambda completed=done_future, owner=executor: (
-                        self._on_recurring_scheduler_initialized(completed, owner)
-                    )
-                )
-            except RuntimeError:
-                try:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
-
-        future.add_done_callback(complete)
-
-    def _on_recurring_scheduler_initialized(self, future: Any, executor: Any) -> None:
-        """Finish scheduler setup on the Qt thread after its service is ready."""
-        if (
-            future is not getattr(self, '_recurring_scheduler_init_future', None)
-            or executor is not getattr(self, '_recurring_scheduler_executor', None)
-            or getattr(self, '_recurring_scheduler_stopped', False)
-        ):
-            return
-        try:
-            service = future.result()
-        except Exception as exc:
-            self._disable_recurring_scheduler(exc, phase='startup initialization')
-            return
-
-        self._recurring_scheduler_init_future = None
-        self._recurring_scheduler_service = service
-        try:
-            self._recurring_scheduler_timer = QTimer(self)
-            self._recurring_scheduler_timer.setInterval(self._RECURRING_SCHEDULER_INTERVAL_MS)
-            self._recurring_scheduler_timer.timeout.connect(self._run_recurring_scheduler)
-            self._recurring_scheduler_timer.start()
-            self._recurring_scheduler_available = True
-            self._recurring_scheduler_startup_status = 'ready'
-            self._recurring_scheduler_startup_error = ''
-            QTimer.singleShot(0, self._run_recurring_scheduler)
-        except Exception as exc:
-            self._disable_recurring_scheduler(exc, phase='startup initialization')
-
-    def _dispose_recurring_scheduler_resources(self) -> None:
-        """Stop and release any partially or fully initialized scheduler resources."""
-        timer = getattr(self, '_recurring_scheduler_timer', None)
-        self._recurring_scheduler_timer = None
-        if timer is not None:
-            try:
-                timer.stop()
-            except Exception:
-                logger.debug('Unable to stop recurring scheduler timer.', exc_info=True)
-            delete_later = getattr(timer, 'deleteLater', None)
-            if callable(delete_later):
-                try:
-                    delete_later()
-                except Exception:
-                    logger.debug('Unable to release recurring scheduler timer.', exc_info=True)
-        init_future = getattr(self, '_recurring_scheduler_init_future', None)
-        self._recurring_scheduler_init_future = None
-        if init_future is not None:
-            try:
-                init_future.cancel()
-            except Exception:
-                logger.debug('Unable to cancel recurring scheduler initialization.', exc_info=True)
-        executor = getattr(self, '_recurring_scheduler_executor', None)
-        self._recurring_scheduler_executor = None
-        if executor is not None:
-            try:
-                executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                logger.debug('Unable to release recurring scheduler executor.', exc_info=True)
-        self._recurring_scheduler_service = None
-        self._recurring_scheduler_inflight = False
-        self._recurring_scheduler_inflight_catch_up = False
-
-    def _disable_recurring_scheduler(self, error: Any, *, phase: str) -> None:
-        """Disable recurring automation for this session without aborting the application."""
-        self._dispose_recurring_scheduler_resources()
-        self._recurring_scheduler_available = False
-        self._recurring_scheduler_activation_pending = False
-        self._recurring_scheduler_startup_status = 'disabled'
-        self._recurring_scheduler_startup_error = str(error or 'Recurring automation is unavailable.')
-        logger.warning(
-            'Recurring automation disabled after %s failure: %s',
-            phase,
-            self._recurring_scheduler_startup_error,
-            exc_info=True,
-        )
-        record_health = getattr(self, '_record_data_health_exception', None)
-        if callable(record_health):
-            try:
-                record_health(
-                    'Recurring automation',
-                    self._recurring_scheduler_startup_error,
-                    severity='warning',
-                )
-            except Exception:
-                logger.debug('Unable to record recurring scheduler startup warning.', exc_info=True)
-
-    def _run_recurring_scheduler(self) -> None:
-        """Submit one scheduler check when no earlier check is still running."""
-        executor = getattr(self, '_recurring_scheduler_executor', None)
-        service = getattr(self, '_recurring_scheduler_service', None)
-        if (
-            executor is None
-            or service is None
-            or getattr(self, '_recurring_scheduler_stopped', False)
-            or getattr(self, '_recurring_scheduler_inflight', False)
-        ):
-            return
-        self._recurring_scheduler_inflight = True
-        catch_up = bool(getattr(self, '_recurring_scheduler_catch_up_pending', False))
-        self._recurring_scheduler_inflight_catch_up = catch_up
-        try:
-            future = executor.submit(service.run_due, catch_up=catch_up)
-        except Exception as exc:
-            self._disable_recurring_scheduler(exc, phase='task submission')
-            return
-
-        def complete(done_future: Any) -> None:
-            try:
-                self._invoke_main.emit(
-                    lambda completed=done_future: self._on_recurring_scheduler_complete(completed)
-                )
-            except RuntimeError:
-                return
-
-        future.add_done_callback(complete)
-
-    def _on_recurring_scheduler_complete(self, future: Any) -> None:
-        """Refresh initialized trading pages after one automation check."""
-        self._recurring_scheduler_inflight = False
-        if getattr(self, '_recurring_scheduler_stopped', False):
-            return
-        try:
-            result = future.result()
-        except Exception:
-            logger.exception('Recurring scheduler check failed.')
-            return
-        if getattr(self, '_recurring_scheduler_inflight_catch_up', False):
-            self._recurring_scheduler_catch_up_pending = False
-        self._recurring_scheduler_inflight_catch_up = False
-        if not int(result.get('claimed', 0) or 0):
-            return
-        if self._page_initialized(page_attr='page32') and hasattr(self, '_p32_refresh_accounts'):
-            active_id = getattr(self, '_p32_active_account_id', '')
-            self._p32_refresh_accounts(select_account_id=active_id)
-
-    def _stop_recurring_scheduler(self) -> None:
-        """Stop recurring checks and release the worker during application shutdown."""
-        self._recurring_scheduler_stopped = True
-        self._recurring_scheduler_activation_pending = False
-        if str(getattr(self, '_recurring_scheduler_startup_status', '') or '') != 'disabled':
-            self._recurring_scheduler_startup_status = 'stopped'
-        self._recurring_scheduler_available = False
-        self._dispose_recurring_scheduler_resources()
 
     def _apply_startup_window_size(self) -> None:
         """Apply one stable startup size after the initial UI has its final size hints."""

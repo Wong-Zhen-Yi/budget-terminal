@@ -20,17 +20,14 @@ def _run_profile() -> int:
     app_import_started = time.perf_counter()
     from budget_terminal_app.app import BudgetTerminalApp
     from budget_terminal_app.dependencies import logger
-    from budget_terminal_app.mixins.window_bootstrap import WindowBootstrapMixin
     from budget_terminal_app.mixins.window_lifecycle import WindowLifecycleMixin
     from budget_terminal_app.startup_profile import StartupProfiler
     import_app_seconds = time.perf_counter() - app_import_started
 
     original_schedule_startup_refresh = WindowLifecycleMixin._schedule_startup_refresh
     original_start_lazy_warmup = WindowLifecycleMixin._start_lazy_warmup
-    original_init_recurring_scheduler = WindowBootstrapMixin._init_recurring_scheduler
     WindowLifecycleMixin._schedule_startup_refresh = lambda self: None
     WindowLifecycleMixin._start_lazy_warmup = lambda self: None
-    WindowBootstrapMixin._init_recurring_scheduler = lambda self: None
 
     app = QApplication([])
     profiler = StartupProfiler(logger)
@@ -58,7 +55,6 @@ def _run_profile() -> int:
     finally:
         WindowLifecycleMixin._schedule_startup_refresh = original_schedule_startup_refresh
         WindowLifecycleMixin._start_lazy_warmup = original_start_lazy_warmup
-        WindowBootstrapMixin._init_recurring_scheduler = original_init_recurring_scheduler
         app.quit()
     return 0
 

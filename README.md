@@ -48,6 +48,16 @@ python budget_terminal.py
 
 When `.venv` exists, the launcher re-executes itself with `.\.venv\Scripts\python.exe` unless `BUDGET_TERMINAL_SKIP_LOCAL_VENV=1` is set.
 
+## Open Multiple Windows
+
+Run the launch command again whenever you want another Budget Terminal window:
+
+```powershell
+python budget_terminal.py
+```
+
+Each launch starts an independent app process. The windows share the same saved portfolios, settings, caches, and paper-trading database. Avoid changing the same saved setting in two windows at exactly the same time; for JSON-backed settings, the most recent save wins.
+
 ## Development
 
 Use the checks that match the code you touched. Common commands:

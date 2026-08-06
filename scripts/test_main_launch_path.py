@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import types
 from pathlib import Path
@@ -85,40 +84,6 @@ def _run_child(mode: str, *, env: dict[str, str], timeout_seconds: float = 20.0)
     return _parse_child_result(completed)
 
 
-def _ownership_child() -> int:
-    start_path = Path(os.environ["BT_TEST_START_PATH"])
-    release_path = Path(os.environ["BT_TEST_RELEASE_PATH"])
-    ready_path = Path(os.environ["BT_TEST_READY_PATH"])
-    result_path = Path(os.environ["BT_TEST_OWNERSHIP_RESULT_PATH"])
-
-    from budget_terminal_app.single_instance import BudgetTerminalInstanceOwnership
-
-    ownership = BudgetTerminalInstanceOwnership()
-    ready_path.write_text("ready", encoding="utf-8")
-    _wait_for_paths((start_path,), timeout_seconds=10.0)
-    acquired = ownership.try_acquire()
-    result_path.write_text(
-        json.dumps({"pid": os.getpid(), "acquired": acquired}),
-        encoding="utf-8",
-    )
-    try:
-        if acquired:
-            _wait_for_paths((release_path,), timeout_seconds=10.0)
-    finally:
-        ownership.release()
-    return 0
-
-
-def _acquire_once_child() -> int:
-    from budget_terminal_app.single_instance import BudgetTerminalInstanceOwnership
-
-    ownership = BudgetTerminalInstanceOwnership()
-    acquired = ownership.try_acquire()
-    ownership.release()
-    _emit_result({"acquired": acquired})
-    return 0
-
-
 def _close_qt_windows(qapplication: Any) -> None:
     app = qapplication.instance()
     if app is None:
@@ -129,10 +94,15 @@ def _close_qt_windows(qapplication: Any) -> None:
 
 def _failure_main_child() -> int:
     import budget_terminal_app.main as main_module
-    from budget_terminal_app.single_instance import BudgetTerminalInstanceOwnership
+    from budget_terminal_app.startup_loading import StartupLoadingLogHandler
 
     dialog_calls: list[str] = []
+    data_service_stop_calls: list[bool] = []
     fake_app_module = types.ModuleType("budget_terminal_app.app")
+
+    class FakeDataService:
+        def stop(self) -> None:
+            data_service_stop_calls.append(True)
 
     class FailingBudgetTerminalApp:
         def __init__(self, **_kwargs: Any) -> None:
@@ -145,23 +115,24 @@ def _failure_main_child() -> int:
 
     fake_app_module.BudgetTerminalApp = FailingBudgetTerminalApp
     sys.modules["budget_terminal_app.app"] = fake_app_module
+    main_module.EmbeddedDataServiceRuntime = FakeDataService
     main_module.QMessageBox = NoDialog
 
+    handlers_before = sum(isinstance(handler, StartupLoadingLogHandler) for handler in main_module.logger.handlers)
     started_at = time.monotonic()
     exit_code = main_module.main()
     elapsed_seconds = time.monotonic() - started_at
-
-    next_owner = BudgetTerminalInstanceOwnership()
-    ownership_reacquired_before_process_exit = next_owner.try_acquire()
-    next_owner.release()
+    handlers_after = sum(isinstance(handler, StartupLoadingLogHandler) for handler in main_module.logger.handlers)
     _close_qt_windows(main_module.QApplication)
 
     _emit_result(
         {
             "dialog_calls": len(dialog_calls),
+            "data_service_stop_calls": len(data_service_stop_calls),
             "elapsed_seconds": elapsed_seconds,
             "exit_code": exit_code,
-            "ownership_reacquired_before_process_exit": ownership_reacquired_before_process_exit,
+            "startup_log_handlers_after": handlers_after,
+            "startup_log_handlers_before": handlers_before,
         }
     )
     return 0
@@ -172,7 +143,6 @@ def _ready_main_child() -> int:
     from PyQt6.QtCore import QTimer as RealQTimer
     from PyQt6.QtWidgets import QWidget
 
-    from budget_terminal_app.single_instance import BudgetTerminalInstanceOwnership
     from budget_terminal_app.startup_loading import REQUIRED_STARTUP_TASK_KEYS
 
     state: dict[str, Any] = {
@@ -243,203 +213,97 @@ def _ready_main_child() -> int:
     exit_code = main_module.main()
     elapsed_seconds = time.monotonic() - started_at
 
-    next_owner = BudgetTerminalInstanceOwnership()
-    ownership_reacquired_before_process_exit = next_owner.try_acquire()
-    next_owner.release()
     _close_qt_windows(main_module.QApplication)
-
     state.pop("fallback_callback", None)
-    state.update(
-        {
-            "elapsed_seconds": elapsed_seconds,
-            "exit_code": exit_code,
-            "ownership_reacquired_before_process_exit": ownership_reacquired_before_process_exit,
-        }
-    )
+    state.update({"elapsed_seconds": elapsed_seconds, "exit_code": exit_code})
     _emit_result(state)
     return 0
 
 
-def _shutdown_tail_main_child() -> int:
-    from concurrent.futures import ThreadPoolExecutor
-
+def _early_failure_main_child() -> int:
     import budget_terminal_app.main as main_module
 
-    from budget_terminal_app.single_instance import BudgetTerminalInstanceOwnership
+    state = {
+        "data_service_stop_calls": 0,
+        "handler_close_calls": 0,
+        "progress_close_calls": 0,
+        "screen_close_calls": 0,
+    }
 
-    worker_started_path = Path(os.environ["BT_TEST_WORKER_STARTED_PATH"])
-    main_returned_path = Path(os.environ["BT_TEST_MAIN_RETURNED_PATH"])
-    worker_release_path = Path(os.environ["BT_TEST_WORKER_RELEASE_PATH"])
-    executors: list[ThreadPoolExecutor] = []
+    class FakeDataService:
+        def stop(self) -> None:
+            state["data_service_stop_calls"] += 1
+
+    class FakeLoadingScreen:
+        def close(self) -> None:
+            state["screen_close_calls"] += 1
+
+    class FakeProgressReporter:
+        def __init__(self, _screen: Any) -> None:
+            return
+
+        def close(self) -> None:
+            state["progress_close_calls"] += 1
+
+    class FailingLogHandler:
+        def __init__(self, _screen: Any) -> None:
+            return
+
+        def setFormatter(self, _formatter: Any) -> None:
+            raise RuntimeError("intentional startup log formatter failure")
+
+        def close(self) -> None:
+            state["handler_close_calls"] += 1
+
+    main_module.EmbeddedDataServiceRuntime = FakeDataService
+    main_module.StartupLoadingScreen = FakeLoadingScreen
+    main_module.StartupProgressReporter = FakeProgressReporter
+    main_module.StartupLoadingLogHandler = FailingLogHandler
+
+    exit_code = main_module.main()
+    _close_qt_windows(main_module.QApplication)
+    state["exit_code"] = exit_code
+    _emit_result(state)
+    return 0
+
+
+def _concurrent_main_child() -> int:
+    import budget_terminal_app.main as main_module
+
+    ready_path = Path(os.environ["BT_TEST_READY_PATH"])
+    release_path = Path(os.environ["BT_TEST_RELEASE_PATH"])
 
     class FakeDataService:
         def stop(self) -> None:
             return
 
-    def run_until_qt_exits(
-        _app: Any,
-        _profiler: Any,
-        _data_service: Any,
-        _single_instance_server: Any,
-        _activation: Any,
-    ) -> int:
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="BudgetTerminalShutdownTailTest")
-        executors.append(executor)
-
-        def block_during_shutdown() -> None:
-            worker_started_path.write_text("started", encoding="utf-8")
-            deadline = time.monotonic() + 30.0
-            while not worker_release_path.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-
-        executor.submit(block_during_shutdown)
-        _wait_for_paths((worker_started_path,), timeout_seconds=5.0)
+    def run_until_released(*_args: Any, **_kwargs: Any) -> int:
+        ready_path.write_text(str(os.getpid()), encoding="utf-8")
+        _wait_for_paths((release_path,), timeout_seconds=10.0)
         return 0
 
     main_module.EmbeddedDataServiceRuntime = FakeDataService
-    main_module._run_primary_application = run_until_qt_exits
-
-    started_at = time.monotonic()
-    exit_code = main_module.main()
-    elapsed_seconds = time.monotonic() - started_at
-    main_returned_path.write_text("returned", encoding="utf-8")
-
-    next_owner = BudgetTerminalInstanceOwnership()
-    ownership_reacquired_before_process_exit = next_owner.try_acquire()
-    next_owner.release()
-
-    for executor in executors:
-        executor.shutdown(wait=False, cancel_futures=False)
-    _emit_result(
-        {
-            "elapsed_seconds": elapsed_seconds,
-            "exit_code": exit_code,
-            "ownership_reacquired_before_process_exit": ownership_reacquired_before_process_exit,
-        }
-    )
-    return 0
-
-
-def _contended_main_child() -> int:
-    import budget_terminal_app.main as main_module
-
-    fatal_errors: list[str] = []
-    primary_runs: list[bool] = []
-    real_activate_existing_instance = main_module.activate_existing_instance
-    real_wait_for_resolution = main_module._wait_for_existing_instance_resolution
-    wait_started_path = Path(os.environ["BT_TEST_WAIT_STARTED_PATH"])
-
-    def activate_with_short_timeout(*_args: Any, **_kwargs: Any) -> bool:
-        return real_activate_existing_instance(timeout_ms=250, retry_interval_ms=25)
-
-    def capture_fatal_error(error: BaseException) -> None:
-        fatal_errors.append(f"{type(error).__name__}: {error}")
-
-    def capture_primary_run(*_args: Any, **_kwargs: Any) -> int:
-        primary_runs.append(True)
-        return 0
-
-    def capture_wait_for_resolution(app: Any, ownership: Any, **_kwargs: Any) -> str:
-        wait_started_path.write_text("waiting", encoding="utf-8")
-        return real_wait_for_resolution(app, ownership, timeout_ms=5_000)
-
-    main_module.activate_existing_instance = activate_with_short_timeout
-    main_module._show_fatal_startup_error = capture_fatal_error
-    main_module._run_primary_application = capture_primary_run
-    main_module._wait_for_existing_instance_resolution = capture_wait_for_resolution
+    main_module._run_primary_application = run_until_released
 
     started_at = time.monotonic()
     exit_code = main_module.main()
     elapsed_seconds = time.monotonic() - started_at
     _close_qt_windows(main_module.QApplication)
-    _emit_result(
-        {
-            "elapsed_seconds": elapsed_seconds,
-            "exit_code": exit_code,
-            "fatal_errors": fatal_errors,
-            "primary_runs": len(primary_runs),
-        }
-    )
+    _emit_result({"exit_code": exit_code, "elapsed_seconds": elapsed_seconds})
     return 0
 
 
-def test_synchronized_processes_have_one_owner(root: Path) -> None:
-    case_root = root / "ownership-contention"
-    case_root.mkdir(parents=True)
-    start_path = case_root / "start"
-    release_path = case_root / "release"
-    ready_paths = (case_root / "ready-0", case_root / "ready-1")
-    result_paths = (case_root / "result-0.json", case_root / "result-1.json")
-    processes: list[subprocess.Popen[str]] = []
-
-    try:
-        for ready_path, result_path in zip(ready_paths, result_paths, strict=True):
-            env = _isolated_environment(case_root)
-            env.update(
-                {
-                    "BT_TEST_START_PATH": str(start_path),
-                    "BT_TEST_RELEASE_PATH": str(release_path),
-                    "BT_TEST_READY_PATH": str(ready_path),
-                    "BT_TEST_OWNERSHIP_RESULT_PATH": str(result_path),
-                }
-            )
-            processes.append(
-                subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), "--ownership-child"],
-                    cwd=PROJECT_ROOT,
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-            )
-
-        _wait_for_paths(ready_paths, timeout_seconds=10.0)
-        start_path.write_text("start", encoding="utf-8")
-        _wait_for_paths(result_paths, timeout_seconds=10.0)
-        results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
-        acquired = [bool(result["acquired"]) for result in results]
-        assert sorted(acquired) == [False, True], f"expected exactly one process owner, got {results}"
-    finally:
-        release_path.write_text("release", encoding="utf-8")
-        for process in processes:
-            try:
-                stdout, stderr = process.communicate(timeout=10.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-                raise AssertionError(
-                    f"ownership child did not terminate\nstdout:\n{stdout}\nstderr:\n{stderr}"
-                )
-            if process.returncode != 0:
-                raise AssertionError(
-                    f"ownership child exited with {process.returncode}\n"
-                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
-                )
-
-    followup = _run_child("--acquire-once-child", env=_isolated_environment(case_root))
-    assert followup == {"acquired": True}, f"ownership remained locked after contenders exited: {followup}"
-
-
-def test_main_failure_returns_one_and_releases_at_process_exit(root: Path) -> None:
-    env = _isolated_environment(root / "construction-failure")
-    result = _run_child(
-        "--failure-main-child",
-        env=env,
-    )
+def test_main_failure_returns_one(root: Path) -> None:
+    result = _run_child("--failure-main-child", env=_isolated_environment(root / "construction-failure"))
     assert result["exit_code"] == 1, result
-    assert result["ownership_reacquired_before_process_exit"] is False, result
     assert result["dialog_calls"] == 0, result
+    assert result["data_service_stop_calls"] >= 1, result
+    assert result["startup_log_handlers_after"] == result["startup_log_handlers_before"], result
     assert result["elapsed_seconds"] < 10.0, result
-    assert _run_child("--acquire-once-child", env=env) == {"acquired": True}
 
 
 def test_main_ready_path_does_not_use_fallback(root: Path) -> None:
-    env = _isolated_environment(root / "ready-path")
-    result = _run_child(
-        "--ready-main-child",
-        env=env,
-    )
+    result = _run_child("--ready-main-child", env=_isolated_environment(root / "ready-path"))
     assert result["exit_code"] == 0, result
     assert result["constructed"] is True, result
     assert result["prepare_calls"] == 1, result
@@ -451,103 +315,83 @@ def test_main_ready_path_does_not_use_fallback(root: Path) -> None:
     assert result["timeout_registered"] is True, result
     assert result["fallback_fired"] is False, result
     assert result["data_service_start_bypassed"] is True, result
-    assert result["ownership_reacquired_before_process_exit"] is False, result
     assert result["elapsed_seconds"] < 10.0, result
-    assert _run_child("--acquire-once-child", env=env) == {"acquired": True}
 
 
-def test_shutdown_tail_waits_then_relaunches(root: Path) -> None:
-    case_root = root / "shutdown-tail"
+def test_early_startup_failure_closes_partially_initialized_resources(root: Path) -> None:
+    result = _run_child("--early-failure-main-child", env=_isolated_environment(root / "early-failure"))
+    assert result["exit_code"] == 1, result
+    assert result["handler_close_calls"] == 1, result
+    assert result["progress_close_calls"] == 1, result
+    assert result["screen_close_calls"] == 0, result
+    assert result["data_service_stop_calls"] >= 1, result
+
+
+def test_two_launches_enter_application_concurrently(root: Path) -> None:
+    case_root = root / "concurrent-launches"
     case_root.mkdir(parents=True)
-    worker_started_path = case_root / "worker-started"
-    main_returned_path = case_root / "main-returned"
-    worker_release_path = case_root / "worker-release"
-    wait_started_path = case_root / "wait-started"
-    env = _isolated_environment(case_root)
-    env.update(
-        {
-            "BT_TEST_WORKER_STARTED_PATH": str(worker_started_path),
-            "BT_TEST_MAIN_RETURNED_PATH": str(main_returned_path),
-            "BT_TEST_WORKER_RELEASE_PATH": str(worker_release_path),
-            "BT_TEST_WAIT_STARTED_PATH": str(wait_started_path),
-        }
-    )
-    primary = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "--shutdown-tail-main-child"],
-        cwd=PROJECT_ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    primary_result: dict[str, Any] | None = None
-    release_thread: threading.Thread | None = None
+    release_path = case_root / "release"
+    ready_paths = (case_root / "ready-0", case_root / "ready-1")
+    processes: list[subprocess.Popen[str]] = []
+    completed_processes: list[subprocess.CompletedProcess[str]] = []
+
     try:
-        _wait_for_paths((worker_started_path, main_returned_path), timeout_seconds=10.0)
-        assert primary.poll() is None, "primary exited despite its in-flight non-daemon executor worker"
-
-        def release_previous_process() -> None:
-            _wait_for_paths((wait_started_path,), timeout_seconds=5.0)
-            time.sleep(0.5)
-            worker_release_path.write_text("release", encoding="utf-8")
-
-        release_thread = threading.Thread(target=release_previous_process, daemon=True)
-        release_thread.start()
-        relaunch = _run_child("--contended-main-child", env=env)
-        assert relaunch["exit_code"] == 0, relaunch
-        assert relaunch["fatal_errors"] == [], relaunch
-        assert relaunch["primary_runs"] == 1, relaunch
-        assert relaunch["elapsed_seconds"] >= 0.5, relaunch
-        assert relaunch["elapsed_seconds"] < 5.0, relaunch
-    finally:
-        worker_release_path.write_text("release", encoding="utf-8")
-        if release_thread is not None:
-            release_thread.join(timeout=5.0)
-        try:
-            stdout, stderr = primary.communicate(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            primary.kill()
-            stdout, stderr = primary.communicate()
-            raise AssertionError(
-                f"shutdown-tail primary did not terminate\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        for ready_path in ready_paths:
+            env = _isolated_environment(case_root)
+            env.update(
+                {
+                    "BT_TEST_READY_PATH": str(ready_path),
+                    "BT_TEST_RELEASE_PATH": str(release_path),
+                }
             )
-        completed = subprocess.CompletedProcess(
-            args=primary.args,
-            returncode=primary.returncode,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        primary_result = _parse_child_result(completed)
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), "--concurrent-main-child"],
+                    cwd=PROJECT_ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
 
-    assert primary_result["exit_code"] == 0, primary_result
-    assert primary_result["ownership_reacquired_before_process_exit"] is False, primary_result
-    assert primary_result["elapsed_seconds"] < 5.0, primary_result
-    assert _run_child("--acquire-once-child", env=env) == {"acquired": True}
+        _wait_for_paths(ready_paths, timeout_seconds=5.0)
+    finally:
+        release_path.write_text("release", encoding="utf-8")
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            completed_processes.append(
+                subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            )
+
+    for completed in completed_processes:
+        result = _parse_child_result(completed)
+        assert result["exit_code"] == 0, result
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="budget-terminal-main-launch-") as temp_dir:
         root = Path(temp_dir)
-        test_synchronized_processes_have_one_owner(root)
-        test_main_failure_returns_one_and_releases_at_process_exit(root)
+        test_two_launches_enter_application_concurrently(root)
+        test_early_startup_failure_closes_partially_initialized_resources(root)
+        test_main_failure_returns_one(root)
         test_main_ready_path_does_not_use_fallback(root)
-        test_shutdown_tail_waits_then_relaunches(root)
-    print("PASS real main launch ownership, shutdown-tail relaunch, and ready release")
+    print("PASS concurrent launch, startup failure, and ready release paths")
     return 0
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    if mode == "--ownership-child":
-        raise SystemExit(_ownership_child())
-    if mode == "--acquire-once-child":
-        raise SystemExit(_acquire_once_child())
     if mode == "--failure-main-child":
         raise SystemExit(_failure_main_child())
     if mode == "--ready-main-child":
         raise SystemExit(_ready_main_child())
-    if mode == "--shutdown-tail-main-child":
-        raise SystemExit(_shutdown_tail_main_child())
-    if mode == "--contended-main-child":
-        raise SystemExit(_contended_main_child())
+    if mode == "--early-failure-main-child":
+        raise SystemExit(_early_failure_main_child())
+    if mode == "--concurrent-main-child":
+        raise SystemExit(_concurrent_main_child())
     raise SystemExit(main())

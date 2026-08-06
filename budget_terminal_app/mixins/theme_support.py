@@ -27,7 +27,6 @@ class ThemeSupportMixin:
             ("_apply_window_theme", None),
             ("_apply_dashboard_theme", None),
             ("_apply_portfolio_theme", "page4"),
-            ("_apply_virtual_trading_theme", "page32"),
             ("_apply_calendar_theme", "page7"),
             ("_apply_news_theme", "page34"),
             ("_apply_networth_theme", "page6"),

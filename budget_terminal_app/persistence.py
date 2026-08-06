@@ -114,7 +114,7 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
@@ -807,8 +807,6 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.insert(order.index(9) + 1, page_index)
             elif page_index == 29 and 19 in order:
                 order.insert(order.index(19) + 1, page_index)
-            elif page_index == 31 and 1 in order:
-                order.insert(order.index(1) + 1, page_index)
             elif page_index == 33 and 5 in order:
                 order.insert(order.index(5) + 1, page_index)
             elif page_index == 37 and SETTINGS_PAGE_INDEX in order:

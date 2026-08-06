@@ -22,7 +22,7 @@ from budget_terminal_app.persistence import DEFAULT_NAVIGATION_PAGE_ORDER, norma
 
 
 EXPECTED_DEFAULT_NAVIGATION_ORDER = [
-    0, 25, 1, 31, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8,
+    0, 25, 1, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8,
     22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17,
 ]
 
@@ -32,10 +32,13 @@ def test_default_navigation_order_and_normalization() -> None:
     assert len(DEFAULT_NAVIGATION_PAGE_ORDER) == len(set(DEFAULT_NAVIGATION_PAGE_ORDER))
     assert DEFAULT_NAVIGATION_PAGE_ORDER[0] == 0
     assert DEFAULT_NAVIGATION_PAGE_ORDER[-1] == 17
+    assert 31 not in DEFAULT_NAVIGATION_PAGE_ORDER
+    assert 33 in DEFAULT_NAVIGATION_PAGE_ORDER
+    assert 37 in DEFAULT_NAVIGATION_PAGE_ORDER
 
     partial_order = [0, 25, 1, 5, 26, 27]
     normalized = normalize_navigation_settings({"page_order": partial_order, "hidden_pages": [21, 30]})
-    migrated_partial = [0, 25, 1, 31, 5, 33, 26, 27]
+    migrated_partial = [0, 25, 1, 5, 33, 26, 27]
     assert normalized["page_order"][:len(migrated_partial)] == migrated_partial
     assert normalized["page_order"][len(migrated_partial):] == [
         page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index not in migrated_partial
@@ -48,10 +51,6 @@ def test_default_navigation_order_and_normalization() -> None:
     old_saved_order = [page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index != 29]
     migrated = normalize_navigation_settings({"page_order": old_saved_order, "hidden_pages": []})
     assert migrated["page_order"].index(29) == migrated["page_order"].index(19) + 1
-
-    pre_virtual_order = [page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index != 31]
-    migrated = normalize_navigation_settings({"page_order": pre_virtual_order, "hidden_pages": []})
-    assert migrated["page_order"].index(31) == migrated["page_order"].index(1) + 1
 
     legacy_removed_pages = [0, 25, 1, 30, 31, 28, 21, 17]
     migrated = normalize_navigation_settings({"page_order": legacy_removed_pages, "hidden_pages": [21, 30]})
@@ -129,10 +128,6 @@ def _list_labels(window) -> list[str]:
 def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
     app, window = _build_window()
     try:
-        assert window._recurring_scheduler_startup_status in {"pending", "starting", "ready"}
-        executor = window._recurring_scheduler_executor
-        if executor is not None:
-            assert executor._max_workers == 1
         assert not window._page_initialized(index=31)
         visible_order = list(EXPECTED_DEFAULT_NAVIGATION_ORDER)
         assert [
@@ -160,7 +155,11 @@ def test_tab_picker_indexes_visible_pages_and_subpages() -> None:
         assert [label for label in labels if label.startswith("News")] == ["News"]
         assert "Paper" not in labels
         assert not hasattr(window, "btn_page31")
-        assert "Virtual" in labels
+        assert "Virtual" not in labels
+        assert not hasattr(window, "btn_page32")
+        assert 31 not in window._pages
+        assert 31 not in window._lazy_page_registry
+        assert hasattr(window, "_retired_page31")
         assert "Ticker Detective" not in labels
         assert "Chart Lab" not in labels
         assert "Analyst Academy" not in labels
@@ -403,44 +402,19 @@ def test_retired_page_slots_are_not_registered() -> None:
     try:
         assert 21 not in window._pages
         assert 30 not in window._pages
+        assert 31 not in window._pages
         assert 21 not in window._lazy_page_registry
         assert 30 not in window._lazy_page_registry
+        assert 31 not in window._lazy_page_registry
         assert not window._page_initialized(index=30)
         assert not window._page_initialized(index=21)
+        assert not window._page_initialized(index=31)
         assert window.stacked_widget.indexOf(window._retired_page21) == 21
         assert window.stacked_widget.indexOf(window._retired_page30) == 30
+        assert window.stacked_widget.indexOf(window._retired_page31) == 31
         assert 21 not in window._navigation_page_order()
         assert 30 not in window._navigation_page_order()
-    finally:
-        window.close()
-        app.processEvents()
-
-
-def test_virtual_page_is_lazy_and_engine_continues_when_hidden() -> None:
-    app, window = _build_window()
-    try:
-        assert not window._page_initialized(index=31)
-        refreshes = []
-        window._p32_run_engine_cycle = lambda *args, **kwargs: refreshes.append(dict(kwargs))
-        window._refresh_main_tab_picker_items()
-        window._filter_tab_picker_items("virtual")
-        item = window._tab_picker_list.currentItem()
-        assert item is not None
-        window._activate_tab_picker_item(item)
-        app.processEvents()
-
-        assert window.stacked_widget.currentIndex() == 31
-        assert window._page_initialized(index=31)
-        assert window._p32_engine_started is True
-        assert window._p32_engine_timer.isActive()
-        assert window._p32_mark_timer.isActive()
-        assert refreshes == [{"mark": True, "force": True}]
-
-        window.switch_page(0)
-        app.processEvents()
-        assert window._p32_engine_timer.isActive()
-        assert window._p32_mark_timer.isActive()
-        window._p32_stop()
+        assert 31 not in window._navigation_page_order()
     finally:
         window.close()
         app.processEvents()
@@ -508,7 +482,6 @@ if __name__ == "__main__":
     test_news_page_is_lazy_hydrated_and_refreshable()
     test_retired_page_slots_are_not_registered()
     test_tab_picker_activates_charts_relationship_without_eager_loading()
-    test_virtual_page_is_lazy_and_engine_continues_when_hidden()
     test_tab_picker_activates_portfolio_pie_chart()
     test_backtick_opens_and_refocuses_from_input()
     print("tab picker search smoke passed")

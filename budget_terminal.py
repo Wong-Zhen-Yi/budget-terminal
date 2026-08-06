@@ -18,10 +18,7 @@ def _truthy_env(name: str) -> bool:
 
 
 def _same_executable(left: Path, right: Path) -> bool:
-    try:
-        return os.path.normcase(str(left.resolve(strict=False))) == os.path.normcase(str(right.resolve(strict=False)))
-    except OSError:
-        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
 
 def _local_venv_python() -> Path | None:

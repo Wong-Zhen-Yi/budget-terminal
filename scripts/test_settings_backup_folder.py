@@ -266,11 +266,10 @@ def test_initialized_runtime_refresh_hooks() -> None:
             self.strategies_state = None
             self._p29_performance_cache = {"stale": object()}
             self.cards_refreshes = 0
-            self.virtual_refreshes = 0
-            self._p32_engine = SimpleNamespace(store=None)
 
         def _page_initialized(self, *, page_attr: str) -> bool:
-            return page_attr in {"page29", "page32"}
+            assert page_attr != "page32"
+            return page_attr == "page29"
 
         def _apply_runtime_user_data(self, payload: Any) -> None:
             self.runtime_payload = payload
@@ -279,32 +278,17 @@ def test_initialized_runtime_refresh_hooks() -> None:
             assert request_data is False
             self.cards_refreshes += 1
 
-        def _p32_refresh_accounts(self) -> None:
-            self.virtual_refreshes += 1
-
-    stores = []
-
-    def _store_factory() -> object:
-        store = object()
-        stores.append(store)
-        return store
-
     harness = _Harness()
     result = SimpleNamespace(
         user_data={"portfolios": {"portfolio_1": {}}},
         cards={"state": {"custom_cards": []}},
     )
-    SettingsMixin._settings_refresh_after_backup_import(
-        harness,
-        result,
-        paper_store_factory=_store_factory,
-    )
+    SettingsMixin._settings_refresh_after_backup_import(harness, result)
     assert harness.runtime_payload == result.user_data
     assert harness.strategies_state == result.cards["state"]
     assert harness._p29_performance_cache == {}
     assert harness.cards_refreshes == 1
-    assert harness.virtual_refreshes == 1
-    assert harness._p32_engine.store is stores[0]
+
 
 
 def main() -> None:
