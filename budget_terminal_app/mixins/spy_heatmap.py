@@ -4,7 +4,6 @@ from typing import Any
 
 from ..compat import *
 from budget_terminal_app.data_service.results import data_sources_from_meta, describe_market_data_status
-from budget_terminal_app.data_service.tasks import MarketDataTaskRunner
 from budget_terminal_app.mixins.spy_heatmap_presenters import (
     build_heatmap_detail,
     build_heatmap_summary,
@@ -21,6 +20,7 @@ from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
 
 class SpyHeatmapMixin:
     _P17_REFRESH_TTL_SECONDS = 120
+    _P17_FETCH_MAX_WORKERS = 1
     _P17_ETFS = (
         ("SPY", "SPY", "SPY"),
         ("NDX", "QQQ", "QQQ"),
@@ -219,16 +219,9 @@ class SpyHeatmapMixin:
             try:
                 from budget_terminal_app.workers.etf_heatmap import EtfHeatmapWorker
 
-                task_result = MarketDataTaskRunner(default_timeout_seconds=120.0, default_retries=1).run(
-                    f"etf_heatmap:{etf_symbol}",
-                    lambda: EtfHeatmapWorker().fetch(self._p17_etf_fetch_symbol(etf_symbol)),
-                    source="ETF holdings, yfinance",
-                    success_check=lambda payload: payload is not None and int(getattr(payload, "holdings_loaded", 0) or 0) > 0,
-                    failure_reason=f"{self._p17_etf_label(etf_symbol)} heatmap data could not be loaded.",
-                )
-                result = task_result.attach()
-                if isinstance(result, dict):
-                    raise RuntimeError(task_result.meta.get("failure_reason") or "ETF heatmap data could not be loaded.")
+                result = EtfHeatmapWorker().fetch(self._p17_etf_fetch_symbol(etf_symbol))
+                if result is None or int(getattr(result, "holdings_loaded", 0) or 0) <= 0:
+                    raise RuntimeError(f"{self._p17_etf_label(etf_symbol)} heatmap data could not be loaded.")
                 self._invoke_main.emit(lambda payload=result, requested_symbol=etf_symbol: self._p17_apply_result(payload, requested_symbol))
             except Exception as exc:
                 logger.error("%s heatmap refresh failed: %s", etf_symbol, exc)

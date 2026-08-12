@@ -30,12 +30,19 @@ class OptionsTableRowsMixin:
 
     def _p4_center_option_combo(self, combo: Any) -> None:
         """Center a combo box value when it is embedded in the options table."""
-        combo.setEditable(True)
+        # An editable combo with a read-only line edit only opens from its arrow
+        # on Qt/Windows. Keep the combo non-editable so clicking anywhere on the
+        # displayed expiry opens the date list, and use the item delegate to
+        # preserve the centered table presentation.
+        combo.setEditable(False)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        line_edit = combo.lineEdit()
-        if line_edit is not None:
-            line_edit.setReadOnly(True)
-            line_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for index in range(combo.count()):
+            combo.setItemData(
+                index,
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
+        combo.setLabelDrawingMode(QComboBox.LabelDrawingMode.UseDelegate)
 
     def _ensure_option_row_id(self, pos: Any) -> Any:
         """Ensure a stable row identity exists for each options position."""

@@ -309,6 +309,7 @@ def _select_period_facts(
         return [], []
     annual: dict[str, dict[str, Any]] = {}
     quarterly: dict[str, dict[str, Any]] = {}
+    cumulative_quarterly: dict[str, dict[str, Any]] = {}
     kind = str(spec.get("kind") or "flow")
 
     for tag, _fact, unit_values in definitions:
@@ -322,13 +323,20 @@ def _select_period_facts(
             if value is None or not end:
                 continue
             duration = _duration_days(raw)
+            cumulative_ok = False
             if kind == "flow":
                 annual_ok = form in _ANNUAL_FORMS and str(raw.get("fp") or "").upper() == "FY" and duration is not None and 300 <= duration <= 380
                 quarterly_ok = form in _QUARTERLY_FORMS and str(raw.get("fp") or "").upper() in {"Q1", "Q2", "Q3"} and duration is not None and 70 <= duration <= 110
+                cumulative_ok = (
+                    form in _QUARTERLY_FORMS
+                    and str(raw.get("fp") or "").upper() in {"Q2", "Q3"}
+                    and duration is not None
+                    and 110 < duration < 320
+                )
             else:
                 annual_ok = form in _ANNUAL_FORMS
                 quarterly_ok = form in _QUARTERLY_FORMS
-            if not annual_ok and not quarterly_ok:
+            if not annual_ok and not quarterly_ok and not cumulative_ok:
                 continue
             item = {
                 "value": abs(value) if spec.get("absolute") else value,
@@ -343,12 +351,75 @@ def _select_period_facts(
                 "unit": unit,
                 "derived": False,
             }
-            target = annual if annual_ok else quarterly
+            target = annual if annual_ok else cumulative_quarterly if cumulative_ok else quarterly
             current = target.get(end)
             if current is None or _fact_rank(item) > _fact_rank(current):
                 target[end] = item
 
+    if kind == "flow" and cumulative_quarterly:
+        quarterly.update(
+            _derive_cumulative_quarters(
+                list(quarterly.values()),
+                list(cumulative_quarterly.values()),
+            )
+        )
     return sorted(annual.values(), key=lambda item: item["end"]), sorted(quarterly.values(), key=lambda item: item["end"])
+
+
+def _derive_cumulative_quarters(
+    direct: list[dict[str, Any]],
+    cumulative: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Convert year-to-date Q2/Q3 SEC facts into standalone quarters."""
+    output = _series_by_end(direct)
+    cumulative_by_start_fp: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in cumulative:
+        start = str(item.get("start") or "")
+        fp = str(item.get("fp") or "").upper()
+        if not start or fp not in {"Q2", "Q3"}:
+            continue
+        key = (start, fp)
+        current = cumulative_by_start_fp.get(key)
+        if current is None or _fact_rank(item) > _fact_rank(current):
+            cumulative_by_start_fp[key] = item
+
+    q1_by_start: dict[str, dict[str, Any]] = {}
+    for item in direct:
+        if str(item.get("fp") or "").upper() != "Q1":
+            continue
+        start = str(item.get("start") or "")
+        current = q1_by_start.get(start)
+        if start and (current is None or _fact_rank(item) > _fact_rank(current)):
+            q1_by_start[start] = item
+
+    for start in sorted({key[0] for key in cumulative_by_start_fp}):
+        previous = q1_by_start.get(start)
+        for fp in ("Q2", "Q3"):
+            current = cumulative_by_start_fp.get((start, fp))
+            if current is None or previous is None:
+                previous = current
+                continue
+            end = str(current.get("end") or "")
+            if end and end not in output:
+                previous_end = _parse_date(previous.get("end"))
+                derived_start = (
+                    (previous_end + dt.timedelta(days=1)).isoformat()
+                    if previous_end is not None
+                    else ""
+                )
+                output[end] = {
+                    **current,
+                    "value": float(current["value"]) - float(previous["value"]),
+                    "start": derived_start,
+                    "form": f'{current.get("form", "10-Q")} derived {fp}',
+                    "derived": True,
+                    "derived_from": [
+                        str(previous.get("accession") or ""),
+                        str(current.get("accession") or ""),
+                    ],
+                }
+            previous = current
+    return output
 
 
 def _derive_q4(annual: list[dict[str, Any]], quarterly: list[dict[str, Any]]) -> list[dict[str, Any]]:

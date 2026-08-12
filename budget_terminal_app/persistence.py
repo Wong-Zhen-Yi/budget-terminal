@@ -338,6 +338,11 @@ def _normalize_cash_balance(value: Any) -> float:
     return max(amount, 0.0)
 
 
+def _normalize_margin_debt(value: Any) -> float:
+    """Normalize a persisted positive margin-debt amount."""
+    return _normalize_cash_balance(value)
+
+
 def _empty_multi_portfolio_payload(chart_slots: Any=None) -> Any:
     """Create an empty normalized multi-portfolio payload."""
     return {'chart_slots': _normalize_chart_slots(chart_slots), 'portfolios': {portfolio_id: [] for portfolio_id in PORTFOLIO_IDS}}
@@ -409,6 +414,7 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
             'tracker_data': tracker_data,
             'options_data': options_data,
             'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
+            'margin_debt': _normalize_margin_debt(raw_entry.get('margin_debt')),
             'include_cash_in_weight': raw_entry.get('include_cash_in_weight') is not False,
         }
     return {
@@ -434,6 +440,7 @@ def _default_portfolio_entry(portfolio_id: Any, chart_slots: Any=None) -> Any:
         'portfolio_tracker': {},
         'options_tracker': [],
         'cash_balance': 0.0,
+        'margin_debt': 0.0,
         'include_cash_in_weight': True,
     }
 
@@ -477,6 +484,7 @@ def build_combined_portfolio_entry(state: Any) -> dict[str, Any]:
     tracker = {}
     options = []
     cash_balance = 0.0
+    margin_debt = 0.0
 
     for portfolio_id in order:
         entry = portfolios.get(portfolio_id, {})
@@ -532,6 +540,7 @@ def build_combined_portfolio_entry(state: Any) -> dict[str, Any]:
                 option['row_id'] = f'{COMBINED_PORTFOLIO_ID}:{portfolio_id}:{source_row_id}'
                 options.append(option)
         cash_balance += _normalize_cash_balance(entry.get('cash_balance'))
+        margin_debt += _normalize_margin_debt(entry.get('margin_debt'))
 
     return {
         'id': COMBINED_PORTFOLIO_ID,
@@ -541,6 +550,7 @@ def build_combined_portfolio_entry(state: Any) -> dict[str, Any]:
         'portfolio_tracker': tracker,
         'options_tracker': options,
         'cash_balance': cash_balance,
+        'margin_debt': margin_debt,
         'include_cash_in_weight': True,
     }
 
@@ -625,6 +635,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'portfolio_tracker': tracker_payload if isinstance(tracker_payload, dict) else {},
             'options_tracker': list(options_payload) if isinstance(options_payload, list) else [],
             'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
+            'margin_debt': _normalize_margin_debt(raw_entry.get('margin_debt')),
             'include_cash_in_weight': raw_entry.get('include_cash_in_weight') is not False,
         }
     if 'portfolio' in payload or 'portfolio_tracker' in payload or 'options_tracker' in payload:
@@ -641,6 +652,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'portfolio_tracker': legacy_tracker if isinstance(legacy_tracker, dict) else {},
             'options_tracker': list(legacy_options) if isinstance(legacy_options, list) else [],
             'cash_balance': _normalize_cash_balance(payload.get('cash_balance')),
+            'margin_debt': _normalize_margin_debt(payload.get('margin_debt')),
             'include_cash_in_weight': payload.get('include_cash_in_weight') is not False,
         }
         normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), normalized['portfolio_order'], DEFAULT_MAIN_PORTFOLIO_ID)
@@ -1055,6 +1067,7 @@ def load_active_portfolio_state(portfolio_id: Any=None) -> Any:
         'portfolio_tracker': dict(active.get('portfolio_tracker', {})),
         'options_tracker': list(active.get('options_tracker', [])),
         'cash_balance': _normalize_cash_balance(active.get('cash_balance')),
+        'margin_debt': _normalize_margin_debt(active.get('margin_debt')),
         'include_cash_in_weight': active.get('include_cash_in_weight') is not False,
     }
 

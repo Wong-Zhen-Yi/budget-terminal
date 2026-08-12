@@ -23,8 +23,8 @@ class DashboardFetchCoordinator:
     def __init__(self, max_workers: int = 3, cache_manager: CacheManager | None = None) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._task_runner = MarketDataTaskRunner(
-            default_timeout_seconds=180.0,
-            default_retries=1,
+            default_timeout_seconds=0.0,
+            default_retries=0,
             max_workers=max(max_workers + 1, 4),
         )
         self._cache_manager = cache_manager or CacheManager()

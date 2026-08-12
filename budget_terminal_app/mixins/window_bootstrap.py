@@ -39,6 +39,7 @@ def _window_bootstrap_default_portfolio_entry(portfolio_id: Any) -> Any:
         'portfolio_tracker': {},
         'options_tracker': [],
         'cash_balance': 0.0,
+        'margin_debt': 0.0,
         'include_cash_in_weight': True,
     }
 
@@ -52,6 +53,11 @@ def _window_bootstrap_normalize_cash_balance(value: Any) -> float:
     if not math.isfinite(amount):
         amount = 0.0
     return max(amount, 0.0)
+
+
+def _window_bootstrap_normalize_margin_debt(value: Any) -> float:
+    """Return a non-negative margin-debt amount."""
+    return _window_bootstrap_normalize_cash_balance(value)
 
 
 def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: Any=None) -> list[str]:
@@ -379,6 +385,7 @@ class WindowBootstrapMixin:
             'portfolio_tracker': {},
             'options_tracker': [],
             'cash_balance': 0.0,
+            'margin_debt': 0.0,
             'include_cash_in_weight': True,
         })
         entry.setdefault('portfolio', [])
@@ -386,6 +393,7 @@ class WindowBootstrapMixin:
         entry.setdefault('portfolio_tracker', {})
         entry.setdefault('options_tracker', [])
         entry['cash_balance'] = _window_bootstrap_normalize_cash_balance(entry.get('cash_balance'))
+        entry['margin_debt'] = _window_bootstrap_normalize_margin_debt(entry.get('margin_debt'))
         entry['include_cash_in_weight'] = entry.get('include_cash_in_weight') is not False
         return entry
 
@@ -414,6 +422,7 @@ class WindowBootstrapMixin:
         self.options_data = entry['options_tracker']
         self.active_options_data = self.options_data
         self.active_cash_balance = entry['cash_balance']
+        self.active_margin_debt = entry['margin_debt']
 
     def _save_active_options_data(self) -> None:
         """Persist page-4 options rows to the selected active portfolio."""

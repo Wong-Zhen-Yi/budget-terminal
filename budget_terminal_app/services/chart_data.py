@@ -19,6 +19,15 @@ CHART_CACHE_PERIOD_DAY_MAP = {
     "y": 365.0,
 }
 
+_CHART_PRICE_FIELD_NAMES = {
+    "open": "Open",
+    "high": "High",
+    "low": "Low",
+    "close": "Close",
+    "adj close": "Adj Close",
+    "volume": "Volume",
+}
+
 
 class ChartDataService:
     """Fetch chart OHLCV frames with cache freshness and stale fallback metadata."""
@@ -89,45 +98,71 @@ class ChartDataService:
         symbol_text = str(symbol or "").upper().strip()
         if not isinstance(frame.columns, pd.MultiIndex):
             return frame
-        level0 = [str(value).upper().strip() for value in frame.columns.get_level_values(0)]
-        level1 = [str(value).upper().strip() for value in frame.columns.get_level_values(1)]
-        if symbol_text and symbol_text in level0:
-            mask = [value == symbol_text for value in level0]
-            frame = frame.loc[:, mask].copy()
-            frame.columns = frame.columns.get_level_values(1)
-            return frame
-        if symbol_text and symbol_text in level1:
-            mask = [value == symbol_text for value in level1]
-            frame = frame.loc[:, mask].copy()
-            frame.columns = frame.columns.get_level_values(0)
-            return frame
-        frame.columns = frame.columns.get_level_values(0)
+        field_scores = []
+        for level in range(frame.columns.nlevels):
+            values = [str(value).strip().casefold() for value in frame.columns.get_level_values(level)]
+            recognized = [value for value in values if value in _CHART_PRICE_FIELD_NAMES]
+            field_scores.append((len(set(recognized)), len(recognized)))
+        field_level = max(range(len(field_scores)), key=field_scores.__getitem__)
+        if field_scores[field_level][0] <= 0:
+            logger.warning("Chart data for %s has no recognizable OHLCV MultiIndex level: %s", symbol_text, list(frame.columns))
+            return pd.DataFrame()
+
+        symbol_level = None
+        for level in range(frame.columns.nlevels):
+            if level == field_level:
+                continue
+            values = [str(value).upper().strip() for value in frame.columns.get_level_values(level)]
+            if symbol_text and symbol_text in values:
+                symbol_level = level
+                break
+        if symbol_level is not None:
+            values = [str(value).upper().strip() for value in frame.columns.get_level_values(symbol_level)]
+            frame = frame.loc[:, [value == symbol_text for value in values]].copy()
+        elif any(
+            len({str(value).upper().strip() for value in frame.columns.get_level_values(level)}) > 1
+            for level in range(frame.columns.nlevels)
+            if level != field_level
+        ):
+            logger.warning("Chart data for %s contains multiple symbols but no exact symbol match.", symbol_text)
+            return pd.DataFrame()
+        frame.columns = frame.columns.get_level_values(field_level)
         return frame
+
+    def _coalesce_price_column(self, frame: Any, canonical_name: str) -> Any:
+        matches = [
+            index
+            for index, column in enumerate(frame.columns)
+            if str(column).strip().casefold() == canonical_name.casefold()
+        ]
+        if not matches:
+            return None
+        series = pd.to_numeric(frame.iloc[:, matches[0]], errors="coerce")
+        for index in matches[1:]:
+            candidate = pd.to_numeric(frame.iloc[:, index], errors="coerce")
+            overlap = series.notna() & candidate.notna()
+            if bool(overlap.any()) and not series.loc[overlap].equals(candidate.loc[overlap]):
+                logger.warning("Chart data contains conflicting duplicate %s columns; preserving the first usable value.", canonical_name)
+            series = series.combine_first(candidate)
+        return series
 
     def normalize_frame(self, symbol: Any, df: Any) -> Any:
         frame = self.extract_symbol_frame(symbol, df)
         if frame is None or getattr(frame, "empty", True):
             return pd.DataFrame()
-        rename_map = {}
-        for column in list(frame.columns):
-            text = str(column).strip().lower()
-            if text == "open":
-                rename_map[column] = "Open"
-            elif text == "high":
-                rename_map[column] = "High"
-            elif text == "low":
-                rename_map[column] = "Low"
-            elif text == "close":
-                rename_map[column] = "Close"
-            elif text == "volume":
-                rename_map[column] = "Volume"
-        if rename_map:
-            frame = frame.rename(columns=rename_map)
-        if not {"Open", "High", "Low", "Close"}.issubset(frame.columns):
+        normalized_columns = {}
+        for source_name, canonical_name in _CHART_PRICE_FIELD_NAMES.items():
+            series = self._coalesce_price_column(frame, source_name)
+            if series is not None:
+                normalized_columns[canonical_name] = series
+        if not {"Open", "High", "Low", "Close"}.issubset(normalized_columns):
             return pd.DataFrame()
-        if "Volume" not in frame.columns:
-            frame["Volume"] = 0.0
-        frame = frame.loc[:, [column for column in ("Open", "High", "Low", "Close", "Volume") if column in frame.columns]].copy()
+        if "Volume" not in normalized_columns:
+            normalized_columns["Volume"] = pd.Series(0.0, index=frame.index, dtype=float)
+        frame = pd.DataFrame(
+            {column: normalized_columns[column] for column in ("Open", "High", "Low", "Close", "Volume")},
+            index=frame.index,
+        )
         frame.index = self.normalize_datetime_index(frame.index)
         frame = frame[~frame.index.duplicated(keep="last")].sort_index()
         return frame.dropna(subset=["Open", "High", "Low", "Close"]).copy()

@@ -3,11 +3,12 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import re
 import threading
 
 from typing import Any
 
-from .dependencies import QApplication, QIcon, QMessageBox, QTimer, logger, pg, sys
+from .dependencies import QApplication, QIcon, QMessageBox, QTimer, logger, pg, sys, yf
 from .data_service import EmbeddedDataServiceRuntime
 from .dpi import configure_qt_high_dpi_policy
 from .error_logging import error_log_path
@@ -17,6 +18,26 @@ from .startup_profile import StartupProfiler
 
 
 APP_USER_MODEL_ID = 'BudgetTerminal.Desktop'
+MINIMUM_YFINANCE_VERSION = (1, 5, 2)
+
+
+def _version_tuple(value: Any) -> tuple[int, int, int]:
+    """Return a comparable three-part numeric version tuple."""
+    parts = [int(part) for part in re.findall(r'\d+', str(value or ''))[:3]]
+    return tuple((parts + [0, 0, 0])[:3])
+
+
+def _validate_market_data_runtime() -> str:
+    """Fail clearly when the active runtime cannot satisfy the supported Yahoo contract."""
+    active_version = str(getattr(yf, '__version__', '') or '').strip()
+    if _version_tuple(active_version) < MINIMUM_YFINANCE_VERSION:
+        required = '.'.join(str(part) for part in MINIMUM_YFINANCE_VERSION)
+        raise RuntimeError(
+            f'Budget Terminal requires yfinance {required} or newer; found {active_version or "unknown"}. '
+            'Launch with .\\.venv\\Scripts\\python.exe budget_terminal.py after installing requirements.txt.'
+        )
+    logger.info('Validated yfinance runtime version %s.', active_version)
+    return active_version
 
 
 def _configure_windows_app_identity() -> None:
@@ -222,6 +243,7 @@ def main() -> int:
 
     data_service: EmbeddedDataServiceRuntime | None = None
     try:
+        _validate_market_data_runtime()
         data_service = EmbeddedDataServiceRuntime()
         return _run_primary_application(app, profiler, data_service)
     except Exception as exc:

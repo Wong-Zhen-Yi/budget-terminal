@@ -193,6 +193,40 @@ class SimpleChartsMixin:
                     pass
             return (vals, labels, valid_cols) if vals else None
 
+        if period == 'quarterly':
+            candidates = []
+            seen_rows = set()
+            ordered_cols = self._p2_ordered_statement_cols(df)
+            recent_cols = ordered_cols[-16:]
+            for key_index, key in enumerate(keys):
+                key_text = str(key or '').strip().lower()
+                exact_row = idx_lower.get(key_text)
+                if exact_row is not None and exact_row not in seen_rows:
+                    candidates.append((exact_row, True, key_index))
+                    seen_rows.add(exact_row)
+                for low, orig in idx_lower.items():
+                    if key_text and key_text in low and orig not in seen_rows:
+                        candidates.append((orig, False, key_index))
+                        seen_rows.add(orig)
+
+            def _coverage(candidate: Any) -> tuple[int, int, int, int]:
+                row, exact, key_index = candidate
+                valid_positions = []
+                for position, column in enumerate(recent_cols):
+                    try:
+                        if not pd.isna(float(df.at[row, column])):
+                            valid_positions.append(position)
+                    except Exception:
+                        continue
+                latest_position = valid_positions[-1] if valid_positions else -1
+                return (len(valid_positions), latest_position, int(exact), -key_index)
+
+            for row, _exact, _key_index in sorted(candidates, key=_coverage, reverse=True):
+                result = _extract(row)
+                if result:
+                    return result
+            return ([], [], [])
+
         for key in keys:
             key_text = str(key or '').strip().lower()
             if key_text in idx_lower:
@@ -334,9 +368,11 @@ class SimpleChartsMixin:
         bar_layout = legend_bar.layout()
         if bar_layout is None:
             return
-        for index in reversed(range(bar_layout.count())):
-            widget = bar_layout.itemAt(index).widget()
+        while bar_layout.count():
+            item = bar_layout.takeAt(0)
+            widget = item.widget() if item is not None else None
             if widget:
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _p2_solid_bars(self, x_values: Any, heights: Any, color: Any, width: float=0.7) -> Any:
@@ -459,6 +495,14 @@ class SimpleChartsMixin:
             ordered_columns = sorted(all_columns)
         except TypeError:
             ordered_columns = all_columns
+        if period == 'quarterly' and len(ordered_columns) > 12:
+            ordered_columns = ordered_columns[-12:]
+            visible_columns = set(ordered_columns)
+            for series in normalized_specs:
+                series['points'] = [
+                    point for point in series['points']
+                    if point['column'] in visible_columns
+                ]
         column_positions = {column: index for index, column in enumerate(ordered_columns)}
         for series_index, series in enumerate(normalized_specs):
             for point in series['points']:
@@ -505,13 +549,24 @@ class SimpleChartsMixin:
             widest_label = max((len(str(label)) for label in labels), default=0)
             target_width = max(26.0, widest_label * 5.5)
             tick_stride = max(1, int(math.ceil(target_width / slot_width)))
-        ticks = [
-            (index, label)
-            for index, label in enumerate(labels)
-            if index % tick_stride == 0 or index == count - 1
-        ]
+        tick_indices = self._p2_tick_indices(count, tick_stride)
+        ticks = [(index, labels[index]) for index in tick_indices]
         pw.getAxis('bottom').setTicks([ticks])
         pw.getAxis('bottom').setStyle(tickFont=pg.QtGui.QFont('Arial', 7))
+
+    def _p2_tick_indices(self, count: int, stride: int) -> list[int]:
+        """Return spaced tick indices while keeping the newest period visible."""
+        if count <= 0:
+            return []
+        safe_stride = max(1, int(stride))
+        indices = list(range(0, count, safe_stride))
+        last_index = count - 1
+        if last_index not in indices:
+            if indices and last_index - indices[-1] < safe_stride:
+                indices[-1] = last_index
+            else:
+                indices.append(last_index)
+        return indices
 
     def _p2_set_plot_x_range(self, pw: Any, count: int, *, annotation_profile: str | None='compact') -> None:
         """Apply a fixed X-range for one bar chart."""

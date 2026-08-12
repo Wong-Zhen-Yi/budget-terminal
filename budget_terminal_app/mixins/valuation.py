@@ -97,11 +97,13 @@ class ValuationMixin:
         layout.addWidget(header)
 
         verdict = QFrame()
+        self.valuation_verdict_frame = verdict
         self.set_theme_role(verdict, 'panel')
         verdict_layout = QGridLayout(verdict)
-        verdict_layout.setContentsMargins(10, 8, 10, 8)
-        verdict_layout.setHorizontalSpacing(16)
-        verdict_layout.setVerticalSpacing(4)
+        self.valuation_verdict_layout = verdict_layout
+        verdict_layout.setContentsMargins(10, 4, 10, 4)
+        verdict_layout.setHorizontalSpacing(10)
+        verdict_layout.setVerticalSpacing(2)
         verdict_items = (
             ('Verdict', 'valuation_verdict_value'),
             ('Estimated Fair Value', 'valuation_fair_value_label'),
@@ -110,17 +112,22 @@ class ValuationMixin:
             ('Model Quality', 'valuation_confidence_label'),
             ('Buy Below / Upper Scenario', 'valuation_band_label'),
         )
-        for index, (title, attr_name) in enumerate(verdict_items):
-            column = index % 3
-            row = (index // 3) * 2
+        for column, (title, attr_name) in enumerate(verdict_items):
             title_label = QLabel(title)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_label.setWordWrap(True)
+            title_label.setMinimumWidth(0)
+            title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            title_label.setToolTip(title)
             self.set_theme_role(title_label, 'muted')
             value_label = QLabel('--')
             value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            value_label.setMinimumHeight(26)
+            value_label.setMinimumWidth(0)
+            value_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            value_label.setMinimumHeight(22)
             setattr(self, attr_name, value_label)
-            verdict_layout.addWidget(title_label, row, column)
-            verdict_layout.addWidget(value_label, row + 1, column)
+            verdict_layout.addWidget(title_label, 0, column)
+            verdict_layout.addWidget(value_label, 1, column)
             verdict_layout.setColumnStretch(column, 1)
         layout.addWidget(verdict)
 
@@ -177,11 +184,13 @@ class ValuationMixin:
         left_layout.addWidget(metrics_frame)
 
         model_frame = QFrame()
+        self.valuation_model_frame = model_frame
         self.set_theme_role(model_frame, 'panel')
         model_layout = QVBoxLayout(model_frame)
         model_layout.setContentsMargins(10, 8, 10, 8)
         model_layout.setSpacing(6)
         model_header = QWidget()
+        model_header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         model_header_layout = QHBoxLayout(model_header)
         model_header_layout.setContentsMargins(0, 0, 0, 2)
         model_header_layout.setSpacing(8)
@@ -196,6 +205,7 @@ class ValuationMixin:
         model_layout.addWidget(model_header)
         self.valuation_assumption_state_label = QLabel('Manual assumptions')
         self.valuation_assumption_state_label.setWordWrap(True)
+        self.valuation_assumption_state_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.set_theme_role(self.valuation_assumption_state_label, 'muted')
         model_layout.addWidget(self.valuation_assumption_state_label)
         self.valuation_basis_type_combo = QComboBox()
@@ -246,8 +256,36 @@ class ValuationMixin:
         self.valuation_terminal_form.addRow(self.valuation_terminal_growth_label, self.valuation_terminal_growth_spin)
         self.valuation_terminal_form.addRow(self.valuation_exit_multiple_label, self.valuation_exit_multiple_spin)
         self.valuation_terminal_form.addRow('Margin of safety', self.valuation_margin_spin)
-        for form in (self.valuation_starting_form, self.valuation_forecast_form, self.valuation_terminal_form):
-            model_layout.addWidget(form._valuation_group_frame)
+        assumption_groups = QWidget(model_frame)
+        assumption_groups_layout = QGridLayout(assumption_groups)
+        self.valuation_assumption_groups_layout = assumption_groups_layout
+        assumption_groups_layout.setContentsMargins(0, 0, 0, 0)
+        assumption_groups_layout.setHorizontalSpacing(6)
+        assumption_groups_layout.setVerticalSpacing(6)
+        assumption_groups_layout.addWidget(
+            self.valuation_starting_form._valuation_group_frame,
+            0,
+            0,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        assumption_groups_layout.addWidget(
+            self.valuation_forecast_form._valuation_group_frame,
+            1,
+            0,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        assumption_groups_layout.addWidget(
+            self.valuation_terminal_form._valuation_group_frame,
+            0,
+            1,
+            2,
+            1,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        assumption_groups_layout.setColumnStretch(0, 1)
+        assumption_groups_layout.setColumnStretch(1, 1)
+        assumption_groups_layout.setRowStretch(2, 1)
+        model_layout.addWidget(assumption_groups)
         self.valuation_validation_label = QLabel('')
         self.valuation_validation_label.setWordWrap(True)
         self.set_theme_role(self.valuation_validation_label, 'status_warning')
@@ -322,15 +360,15 @@ class ValuationMixin:
         frame = QFrame()
         self.set_theme_role(frame, 'panel')
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
         title_label = QLabel(title)
         self.set_theme_role(title_label, 'section_title')
         form_host = QWidget(frame)
         form = QFormLayout(form_host)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(4)
+        form.setVerticalSpacing(2)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         layout.addWidget(title_label)
         layout.addWidget(form_host)

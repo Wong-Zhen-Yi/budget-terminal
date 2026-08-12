@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,6 +54,10 @@ class EtfHeatmapWorker:
     INTERVALS: tuple[str, ...] = ("live", "1d", "1w", "1m", "3m", "ytd", "1y")
     _SP500_SECTOR_CACHE: tuple[float, dict[str, str]] | None = None
     _SP500_SECTOR_TTL_SECONDS = 24 * 60 * 60.0
+    _QUOTE_CACHE_TTL_SECONDS = 120.0
+    _QUOTE_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
+    _QUOTE_CACHE_LOCK = threading.Lock()
+    _QUOTE_FALLBACK_LIMIT = 12
 
     def __init__(self, holdings_service: EtfHoldingsService | None = None) -> None:
         self._holdings_service = holdings_service or EtfHoldingsService()
@@ -169,11 +174,20 @@ class EtfHeatmapWorker:
         if not symbol_pairs:
             return {}
         quotes: dict[str, dict[str, float]] = {}
-        yahoo_symbols = sorted({yahoo_symbol for _symbol, yahoo_symbol in symbol_pairs})
+        now = time.time()
+        with self._QUOTE_CACHE_LOCK:
+            for original, _yahoo_symbol in symbol_pairs:
+                cached = self._QUOTE_CACHE.get(original)
+                if cached and now - float(cached[0]) <= self._QUOTE_CACHE_TTL_SECONDS:
+                    quotes[original] = dict(cached[1])
+        uncached_pairs = [(original, yahoo_symbol) for original, yahoo_symbol in symbol_pairs if original not in quotes]
+        yahoo_symbols = sorted({yahoo_symbol for _symbol, yahoo_symbol in uncached_pairs})
         yahoo_to_originals: dict[str, list[str]] = {}
-        for original, yahoo_symbol in symbol_pairs:
+        for original, yahoo_symbol in uncached_pairs:
             yahoo_to_originals.setdefault(yahoo_symbol, []).append(original)
         try:
+            if not yahoo_symbols:
+                return quotes
             with YF_LOCK:
                 batch = yf.download(
                     yahoo_symbols,
@@ -183,6 +197,7 @@ class EtfHeatmapWorker:
                     progress=False,
                     auto_adjust=False,
                     threads=True,
+                    timeout=20,
                 )
             yahoo_quotes = self._quotes_from_batch(batch, yahoo_symbols)
             for yahoo_symbol, payload in yahoo_quotes.items():
@@ -190,12 +205,18 @@ class EtfHeatmapWorker:
                     quotes[original] = payload
         except Exception as exc:
             logger.info("ETF heatmap batch quote fetch failed for %s symbols: %s", len(yahoo_symbols), exc)
-        missing = [(original, yahoo_symbol) for original, yahoo_symbol in symbol_pairs if original not in quotes]
+        missing = [(original, yahoo_symbol) for original, yahoo_symbol in uncached_pairs if original not in quotes]
         if missing:
-            with ThreadPoolExecutor(max_workers=min(10, max(1, len(missing)))) as executor:
-                for symbol, payload in executor.map(lambda pair: self._fetch_quote_fallback(pair[0], pair[1]), missing):
+            bounded_missing = missing[: self._QUOTE_FALLBACK_LIMIT]
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                for symbol, payload in executor.map(lambda pair: self._fetch_quote_fallback(pair[0], pair[1]), bounded_missing):
                     if payload:
                         quotes[symbol] = payload
+        if quotes:
+            cached_at = time.time()
+            with self._QUOTE_CACHE_LOCK:
+                for symbol, payload in quotes.items():
+                    self._QUOTE_CACHE[symbol] = (cached_at, dict(payload))
         return quotes
 
     def _quotes_from_batch(self, batch: Any, symbols: list[str]) -> dict[str, dict[str, float]]:
@@ -222,7 +243,7 @@ class EtfHeatmapWorker:
     def _fetch_quote_fallback(self, symbol: str, yahoo_symbol: str) -> tuple[str, dict[str, float] | None]:
         try:
             with YF_LOCK:
-                history = yf.Ticker(yahoo_symbol).history(period="2y", interval="1d")
+                history = yf.Ticker(yahoo_symbol).history(period="2y", interval="1d", timeout=10)
             close = history.get("Close") if history is not None else None
             payload = self._quote_from_close(close.dropna() if close is not None else None)
             if payload:

@@ -1,5 +1,0 @@
-# Development-only quality tooling.
-ruff==0.16.0
-pyinstaller==6.21.0
-setuptools==83.0.0
-pip-audit==2.10.1

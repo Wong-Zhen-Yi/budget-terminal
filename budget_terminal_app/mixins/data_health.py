@@ -95,6 +95,8 @@ class DataHealthMixin:
             'symbols': cleaned_symbols,
             'errors': normalized_errors[:5],
             'error_count': len(normalized_errors),
+            'active': True,
+            'resolved_at': None,
         }
         fingerprint = (
             event['severity'],
@@ -115,7 +117,7 @@ class DataHealthMixin:
                 tuple(existing.get('symbols') or []),
                 tuple(existing.get('errors') or []),
             )
-            if existing_fingerprint != fingerprint:
+            if existing_fingerprint != fingerprint or not bool(existing.get('active', True)):
                 continue
             existing_ts = existing.get('timestamp')
             try:
@@ -142,6 +144,27 @@ class DataHealthMixin:
             event['reason'],
         )
         self._refresh_data_health_views()
+
+    def _resolve_data_health_events(self, subsystem: Any, *, symbols: Any = None) -> int:
+        """Resolve active events covered by one fresh subsystem result."""
+        subsystem_text = str(subsystem or 'Market data').strip()
+        symbol_items = list(symbols) if isinstance(symbols, (list, tuple, set)) else ([] if symbols is None else [symbols])
+        success_symbols = {str(symbol or '').upper().strip() for symbol in symbol_items if str(symbol or '').strip()}
+        resolved_at = self._data_health_now()
+        resolved_count = 0
+        for event in list(getattr(self, '_data_health_events', []) or []):
+            if not bool(event.get('active', True)) or str(event.get('subsystem') or '').strip() != subsystem_text:
+                continue
+            event_symbols = {str(symbol or '').upper().strip() for symbol in list(event.get('symbols') or []) if str(symbol or '').strip()}
+            if success_symbols and event_symbols and not event_symbols.issubset(success_symbols):
+                continue
+            event['active'] = False
+            event['resolved_at'] = resolved_at
+            resolved_count += 1
+        if resolved_count:
+            logger.info('Resolved %s data health event(s) for %s.', resolved_count, subsystem_text)
+            self._refresh_data_health_views()
+        return resolved_count
 
     def _record_data_health_payload(
         self,
@@ -170,6 +193,8 @@ class DataHealthMixin:
                 symbols=symbols,
                 errors=errors,
             )
+        if freshness == 'fresh':
+            self._resolve_data_health_events(subsystem, symbols=symbols)
         self._record_data_health_missing_prices(subsystem, payload, expected_symbols=expected_symbols)
 
     def _record_data_health_missing_prices(self, subsystem: Any, payload: Any, *, expected_symbols: Any = None) -> None:
@@ -203,6 +228,7 @@ class DataHealthMixin:
             if set(self._data_health_missing_tickers) != before_recovery:
                 self._refresh_data_health_views()
         if not missing:
+            self._resolve_data_health_events(subsystem, symbols=expected)
             return
         if not hasattr(self, '_data_health_missing_tickers'):
             self._data_health_missing_tickers = set()
@@ -243,7 +269,7 @@ class DataHealthMixin:
 
     def _data_health_counts(self) -> tuple[int, int]:
         """Return issue and warning counts for the current session."""
-        events = list(getattr(self, '_data_health_events', []) or [])
+        events = [event for event in list(getattr(self, '_data_health_events', []) or []) if bool(event.get('active', True))]
         issue_count = sum(1 for event in events if event.get('severity') == 'issue')
         warning_count = max(len(events) - issue_count, 0)
         return issue_count, warning_count
@@ -303,8 +329,11 @@ class DataHealthMixin:
             symbols = ', '.join(event.get('symbols') or [])
             source = str(event.get('source') or 'unknown')
             freshness = str(event.get('freshness') or 'n/a')
+            active = bool(event.get('active', True))
+            state = 'ACTIVE' if active else f'RESOLVED {self._data_health_timestamp_text(event.get("resolved_at"))}'
             line = (
                 f'- [{self._data_health_timestamp_text(event.get("timestamp"))}] '
+                f'{state} | '
                 f'{str(event.get("severity") or "warning").upper()} | '
                 f'{event.get("subsystem") or "Market data"} | '
                 f'{freshness} | {source} | {event.get("reason") or ""}'

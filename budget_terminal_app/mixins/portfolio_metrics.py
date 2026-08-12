@@ -1031,8 +1031,40 @@ class PortfolioMetricsMixin:
         if hasattr(self, '_p6_populate_tables'):
             self._p6_populate_tables(force_progress_rebuild=True)
 
+    def _p4_active_margin_debt(self, portfolio_id: Any = None) -> float:
+        """Return the selected portfolio's display-only margin debt."""
+        if portfolio_id is None or str(portfolio_id) == str(getattr(self, 'active_portfolio_id', '')):
+            value = getattr(self, 'active_margin_debt', None)
+            if value is None:
+                value = self._get_portfolio_entry(getattr(self, 'active_portfolio_id', None)).get('margin_debt', 0.0)
+        else:
+            value = self._get_portfolio_entry(portfolio_id).get('margin_debt', 0.0)
+        try:
+            amount = float(value or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if not math.isfinite(amount):
+            amount = 0.0
+        return max(amount, 0.0)
+
+    def _p4_set_active_margin_debt(self, value: Any) -> None:
+        """Persist display-only margin debt without refreshing calculated views."""
+        if getattr(self, '_p4_active_portfolio_is_combined', lambda: False)():
+            return
+        try:
+            amount = float(value or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if not math.isfinite(amount):
+            amount = 0.0
+        amount = max(amount, 0.0)
+        self.active_margin_debt = amount
+        entry = self._get_portfolio_entry(self.active_portfolio_id)
+        entry['margin_debt'] = amount
+        self._persist_all_portfolios()
+
     def _p4_sync_cash_input(self) -> None:
-        """Reflect the active portfolio cash value and inclusion state into the summary editor."""
+        """Reflect active cash and margin values into the summary editors."""
         control = getattr(self, 'p4_cash_input', None)
         if control is not None:
             control.blockSignals(True)
@@ -1043,10 +1075,19 @@ class PortfolioMetricsMixin:
             checkbox.blockSignals(True)
             checkbox.setChecked(self._p4_cash_included_in_weight())
             checkbox.blockSignals(False)
+        margin_control = getattr(self, 'p4_margin_input', None)
+        if margin_control is not None:
+            margin_control.blockSignals(True)
+            margin_control.setValue(self._p4_active_margin_debt())
+            margin_control.blockSignals(False)
 
     def _p4_on_cash_balance_changed(self, value: float) -> None:
         """Handle user edits to brokerage cash."""
         self._p4_set_active_cash_balance(value)
+
+    def _p4_on_margin_debt_changed(self, value: float) -> None:
+        """Handle user edits to the display-only margin debt."""
+        self._p4_set_active_margin_debt(value)
 
     def _p4_on_cash_weight_inclusion_changed(self, included: bool) -> None:
         """Persist the Cash checkbox and refresh only its filtered views."""

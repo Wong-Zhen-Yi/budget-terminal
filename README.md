@@ -1,125 +1,37 @@
 # Budget Terminal
 
-Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio data, market context, options chains, news, ETF analysis, charts, and related research workflows. The top-level `budget_terminal.py` launcher remains the stable entry point, while the live application code is organized under `budget_terminal_app/`.
+Budget Terminal is a Windows-focused PyQt6 desktop application for portfolio tracking, market research, options, news, fundamentals, valuation, charts, and related investing workflows.
 
-## Features
+## Requirements
 
-- Portfolio dashboard, net worth tracking, holdings metrics, and sector views
-- Options-chain fetching, table rendering, and related Yahoo Finance smoke tests
-- News hub with deterministic headline briefings, politics, calendar, pre-market, and YouTube helpers
-- Fundamentals and valuation
-- Earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
-- Default theme support through reusable theme tokens and shared styling helpers
-- In-process market-data coordination by default, with HTTP compatibility mode and direct-worker fallback
-
-## Project Layout
-
-- `budget_terminal.py`: top-level launcher; auto-runs through `.venv` when available
-- `budget_terminal_app/main.py`: Qt application setup, startup loading screen, app icon, and embedded data-service startup
-- `budget_terminal_app/app.py`: composed `BudgetTerminalApp` main-window class
-- `budget_terminal_app/mixins/`: page, window, and feature behavior
-- `budget_terminal_app/workers/`: background data fetchers and signal-driven tasks
-- `budget_terminal_app/widgets/`: custom charts, pie/bar charts, and heatmap widgets
-- `budget_terminal_app/themes/`: default theme tokens and stylesheet helpers
-- `budget_terminal_app/data_service/`: shared coordinator plus in-process and compatible FastAPI/HTTP clients
-- `budget_terminal_app/services/`: reusable market-data, analytics, and presentation-independent calculations
-- `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
-- `scripts/`: smoke tests, with reusable manual probes under `scripts/diagnostics/`
-- `packaging/`: PyInstaller specs and build scripts
-- `build/`, `dist/`, `release/`: generated build outputs
+- Windows 10 or Windows 11
+- Python 3.11 or newer
+- Internet access for live market and research data
 
 ## Setup
 
-Create a virtual environment and install dependencies:
+Open PowerShell in the repository folder and create a local virtual environment:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
-.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-For linting and packaging work, also install `requirements-dev.txt`.
-
-Run the app:
+## Run
 
 ```powershell
-python budget_terminal.py
+.\.venv\Scripts\python.exe budget_terminal.py
 ```
 
-When `.venv` exists, the launcher re-executes itself with `.\.venv\Scripts\python.exe` unless `BUDGET_TERMINAL_SKIP_LOCAL_VENV=1` is set.
+Run the same command again whenever you want another independent Budget Terminal window.
 
-## Open Multiple Windows
+## Repository Contents
 
-Run the launch command again whenever you want another Budget Terminal window:
-
-```powershell
-python budget_terminal.py
-```
-
-Each launch starts an independent app process. The windows share the same saved portfolios, settings, caches, and paper-trading database. Avoid changing the same saved setting in two windows at exactly the same time; for JSON-backed settings, the most recent save wins.
-
-## Development
-
-Use the checks that match the code you touched. Common commands:
-
-```powershell
-.\.venv\Scripts\python.exe -m ruff check budget_terminal.py budget_terminal_app scripts
-.\.venv\Scripts\python.exe -m compileall -q budget_terminal.py budget_terminal_app
-.\.venv\Scripts\python.exe scripts\test_data_service_transport.py
-.\.venv\Scripts\python.exe scripts\test_startup_profile.py --offscreen
-```
-
-Helpful diagnostics include:
-
-- `.\.venv\Scripts\python.exe scripts\diagnostics\yahoo_data.py AAPL MSFT --include-info`
-- `.\.venv\Scripts\python.exe scripts\diagnostics\inspect_cache.py`
-
-There is no formal `pytest` suite in this checkout, so UI and data-fetching changes should be verified with focused smoke tests and, when relevant, a manual app launch.
-
-## Runtime Flow
-
-`budget_terminal_app/main.py` creates the Qt application, applies the Fusion style, configures pyqtgraph, shows the startup loading screen, imports `BudgetTerminalApp`, and prepares the main window before first show. After the first usable view is visible, the shared data coordinator starts in-process. If it is unavailable, the app logs the issue and continues with direct worker behavior.
-
-Set `BUDGET_TERMINAL_DATA_TRANSPORT=http` to run the compatible private FastAPI/Uvicorn localhost transport for diagnostics. The default `inprocess` transport uses the same coordinator contract without JSON serialization or a loopback socket.
-
-Long-running fetches live in worker objects and report results back through Qt signals so the UI stays responsive. Writable user data is resolved through `budget_terminal_app/paths.py` instead of being stored beside the packaged executable.
-
-## News Briefing
-
-The News Hub briefing is generated inside the app and does not use an LLM.
-
-- Briefings are generated from headline text, ticker, source, time, and category
-- Full briefings auto-refresh when news updates load
-- Clicking a headline row produces a single-item summary
-- `Generate Briefing` reruns the deterministic digest manually
-- Output includes overall tone, theme counts, portfolio names, macro drivers, latest headlines, notable headlines, and headline-only cautions
-
-## Windows Executable Build
-
-This is a PyQt6 desktop GUI app, so the standard packaging target is a windowed PyInstaller build from `budget_terminal.py`.
-
-Install build prerequisites:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
-```
-
-Build the executable package:
-
-```powershell
-.\packaging\build_exe.bat
-```
-
-The build script:
-
-- activates `.venv`
-- upgrades the packaging tools and installs the pinned runtime and development requirements
-- removes old `build/` output and only the current-version `dist/` target
-- builds from `packaging\budget_terminal.spec`
-- creates `release\BudgetTerminal-v*-windows.zip`
-
-See `packaging\PACKAGING.md` for the one-dir build flow, release outputs, and troubleshooting notes.
+- `budget_terminal.py`: application launcher
+- `budget_terminal_app/`: application code and runtime assets
+- `requirements.txt`: pinned runtime dependencies
 
 ## User Data Safety
 
-Do not commit personal portfolio data, API keys, generated cache databases, or machine-specific runtime files. Packaged builds store writable app data under `%LOCALAPPDATA%\BudgetTerminal`, with user-facing document data under `Documents\Budget Terminal User Data` when needed.
+Writable application data is stored outside the repository under `%LOCALAPPDATA%\BudgetTerminal` and the user-facing Budget Terminal documents folder. Do not commit portfolio data, API keys, caches, logs, backups, or other machine-specific runtime files.
