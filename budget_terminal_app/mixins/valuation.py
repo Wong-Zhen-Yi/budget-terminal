@@ -1226,15 +1226,24 @@ class ValuationMixin:
         if not labels:
             return
         x_values = list(range(len(labels)))
-        revenue = [self._valuation_float(value / 1_000_000_000.0 if value is not None else None) for value in list(trends.get('revenue', []) or [])]
-        fcf = [self._valuation_float(value / 1_000_000_000.0 if value is not None else None) for value in list(trends.get('fcf', []) or [])]
-        eps = [self._valuation_float(value) for value in list(trends.get('eps', []) or [])]
-        if revenue:
-            plot.plot(x_values[:len(revenue)], revenue, pen=self.theme_pen('accent_positive', width=2.0), name='Revenue B')
-        if fcf:
-            plot.plot(x_values[:len(fcf)], fcf, pen=self.theme_pen('warning', width=2.0), name='FCF B')
-        if eps:
-            plot.plot(x_values[:len(eps)], eps, pen=self.theme_pen('info', width=2.0), name='EPS')
+        for values, scale, token, name in (
+            (trends.get('revenue', []), 1_000_000_000.0, 'accent_positive', 'Revenue B'),
+            (trends.get('fcf', []), 1_000_000_000.0, 'warning', 'FCF B'),
+            (trends.get('eps', []), 1.0, 'info', 'EPS'),
+        ):
+            raw_values = list(values or [])[:len(x_values)]
+            numeric_values = []
+            for value in raw_values:
+                numeric = self._valuation_float(value)
+                numeric_values.append(numeric / scale if numeric is not None else float('nan'))
+            if numeric_values and any(math.isfinite(value) for value in numeric_values):
+                plot.plot(
+                    x_values[:len(numeric_values)],
+                    numeric_values,
+                    pen=self.theme_pen(token, width=2.0),
+                    name=name,
+                    connect='finite',
+                )
         plot.enableAutoRange()
 
     def _valuation_render_peer_table(self, payload: dict[str, Any]) -> None:
