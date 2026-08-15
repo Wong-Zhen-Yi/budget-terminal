@@ -219,7 +219,7 @@ class NetWorthMixin:
     _P6_GOAL_ANIMATION_DURATION_MS = 900
 
     def _p6_portfolio_breakdown(self) -> Any:
-        """Return per-portfolio stock, cash, and options values using saved portfolio names."""
+        """Return per-portfolio asset values and margin debt using saved names."""
         portfolio_quotes = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
         breakdown = []
         all_state = getattr(self, 'all_portfolios_state', {})
@@ -241,6 +241,13 @@ class NetWorthMixin:
             if not math.isfinite(cash_balance):
                 cash_balance = 0.0
             cash_balance = max(cash_balance, 0.0)
+            try:
+                margin_debt = float(entry.get('margin_debt', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                margin_debt = 0.0
+            if not math.isfinite(margin_debt):
+                margin_debt = 0.0
+            margin_debt = max(margin_debt, 0.0)
             options_equity = 0.0
             for pos in options_data:
                 strategy = pos.get('strategy', 'Calls')
@@ -252,7 +259,14 @@ class NetWorthMixin:
                     options_equity += (premium - current) * qty * 100
                 else:
                     options_equity += current * qty * 100
-            breakdown.append({'id': portfolio_id, 'name': name, 'stocks': stock_mv, 'cash': cash_balance, 'options': options_equity})
+            breakdown.append({
+                'id': portfolio_id,
+                'name': name,
+                'stocks': stock_mv,
+                'cash': cash_balance,
+                'options': options_equity,
+                'margin_debt': margin_debt,
+            })
         return breakdown
 
     ASSET_COLORS = ['#66bb6a', '#81c784', '#a5d6a7', '#c8e6c9', '#4caf50', '#43a047']
@@ -662,7 +676,23 @@ class NetWorthMixin:
             label = getattr(self, label_name, None)
             if label is None:
                 continue
-            label.setText(f'{title}: S${self._p6_category_total(category):,.2f}')
+            category_total = self._p6_category_total(category)
+            if category != 'debt':
+                label.setText(f'{title}: S${category_total:,.2f}')
+                continue
+            margin_total = sum(
+                max(float(item.get('margin_debt', 0.0) or 0.0), 0.0)
+                for item in self._p6_portfolio_breakdown()
+            )
+            if margin_total <= 0.0:
+                label.setText(f'{title}: S${category_total:,.2f}')
+                continue
+            rate = self._p6_valid_usd_sgd_rate()
+            if rate is None:
+                label.setText(f'{title}: S${category_total:,.2f} + US${margin_total:,.2f} margin')
+            else:
+                combined_sgd = category_total + self._p6_convert_amount(margin_total, 'USD', 'SGD')
+                label.setText(f'{title}: S${combined_sgd:,.2f} (incl. US${margin_total:,.2f} margin)')
 
     def _p6_normalize_goal_data(self, payload: Any) -> dict[str, Any]:
         goal = payload if isinstance(payload, dict) else {}
@@ -923,19 +953,28 @@ class NetWorthMixin:
         if cash_total > 0:
             series.append({'label': 'Cash', 'kind': 'asset', 'value': self._p6_convert_amount(cash_total, 'SGD'), 'color': self.CASH_LINE_COLOR})
         for index, item in enumerate(self._p6_portfolio_breakdown()):
-            total_value = (
+            gross_value = (
                 float(item.get('stocks', 0.0) or 0.0)
                 + float(item.get('cash', 0.0) or 0.0)
                 + float(item.get('options', 0.0) or 0.0)
             )
-            if total_value == 0:
-                continue
-            series.append({
-                'label': str(item.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}'),
-                'kind': 'asset',
-                'value': self._p6_convert_amount(total_value, 'USD'),
-                'color': self.PORTFOLIO_LINE_COLORS[index % len(self.PORTFOLIO_LINE_COLORS)],
-            })
+            margin_debt = max(float(item.get('margin_debt', 0.0) or 0.0), 0.0)
+            net_value = gross_value - margin_debt
+            if net_value > 0:
+                series.append({
+                    'label': str(item.get('name', f'Portfolio {index + 1}') or f'Portfolio {index + 1}'),
+                    'kind': 'asset',
+                    'value': self._p6_convert_amount(net_value, 'USD'),
+                    'color': self.PORTFOLIO_LINE_COLORS[index % len(self.PORTFOLIO_LINE_COLORS)],
+                })
+            if margin_debt > 0:
+                series.append({
+                    'label': f'{item["name"]} Margin',
+                    'kind': 'debt',
+                    'value': self._p6_convert_amount(margin_debt, 'USD'),
+                    'color': self.DEBT_COLORS[index % len(self.DEBT_COLORS)],
+                    'included_in_portfolio_net': True,
+                })
         debt_total = sum(max(float(item.get('amount', 0.0) or 0.0), 0.0) for item in self.networth_data.get('debt', []))
         if debt_total > 0:
             series.append({'label': 'Debt', 'kind': 'debt', 'value': self._p6_convert_amount(debt_total, 'SGD'), 'color': self.DEBT_LINE_COLOR})
@@ -947,14 +986,16 @@ class NetWorthMixin:
         cash_total = sum(max(float(item.get('amount', 0.0) or 0.0), 0.0) for item in self.networth_data.get('cash', []))
         debt_total = sum(max(float(item.get('amount', 0.0) or 0.0), 0.0) for item in self.networth_data.get('debt', []))
         portfolio_total = 0.0
+        margin_total = 0.0
         for item in self._p6_portfolio_breakdown():
             portfolio_total += (
                 float(item.get('stocks', 0.0) or 0.0)
                 + float(item.get('cash', 0.0) or 0.0)
                 + float(item.get('options', 0.0) or 0.0)
             )
+            margin_total += max(float(item.get('margin_debt', 0.0) or 0.0), 0.0)
         requires_fx = (
-            (display_currency == 'SGD' and abs(portfolio_total) > 0.0001)
+            (display_currency == 'SGD' and (abs(portfolio_total) > 0.0001 or margin_total > 0.0001))
             or (display_currency == 'USD' and (cash_total > 0.0001 or debt_total > 0.0001))
         )
         if requires_fx and self._p6_valid_usd_sgd_rate() is None:
@@ -962,6 +1003,7 @@ class NetWorthMixin:
         current = (
             self._p6_convert_amount(cash_total, 'SGD', display_currency)
             + self._p6_convert_amount(portfolio_total, 'USD', display_currency)
+            - self._p6_convert_amount(margin_total, 'USD', display_currency)
             - self._p6_convert_amount(debt_total, 'SGD', display_currency)
         )
         return current, True
@@ -1082,7 +1124,8 @@ class NetWorthMixin:
             label = base_label if label_counts[base_label] == 1 else f'{base_label} {label_counts[base_label]}'
             weights[label] = value
             slice_colors.append(str(entry.get('color', self.theme_color('accent')) or self.theme_color('accent')))
-            full_total += -value if entry.get('kind') == 'debt' else value
+            if not entry.get('included_in_portfolio_net'):
+                full_total += -value if entry.get('kind') == 'debt' else value
         self.p6_progress_plot.set_theme(slice_colors or PieChartWidget.COLORS, self.theme_color('text_primary'))
         self.p6_progress_plot.set_data(weights)
         self.p6_progress_plot.set_animation_progress(current_progress if weights else 1.0)
@@ -1245,6 +1288,7 @@ class NetWorthMixin:
             self.p6_silo_bar.set_value_prefix(self._p6_currency_prefix())
         bar_data = []
         asset_idx = 0
+        debt_idx = 0
         for ci in self.networth_data.get('cash', []):
             amt = ci.get('amount', 0.0)
             if amt > 0:
@@ -1254,21 +1298,29 @@ class NetWorthMixin:
             stock_value = float(item.get('stocks', 0.0) or 0.0)
             brokerage_cash = float(item.get('cash', 0.0) or 0.0)
             options_value = float(item.get('options', 0.0) or 0.0)
-            if stock_value > 0 or brokerage_cash > 0 or options_value > 0:
+            margin_debt = max(float(item.get('margin_debt', 0.0) or 0.0), 0.0)
+            positive_stock = max(stock_value, 0.0)
+            positive_cash = max(brokerage_cash, 0.0)
+            positive_options = max(options_value, 0.0)
+            gross_assets = positive_stock + positive_cash + positive_options
+            net_assets = max(gross_assets - margin_debt, 0.0)
+            if net_assets > 0 and gross_assets > 0:
                 stock_color = self.ASSET_COLORS[asset_idx % len(self.ASSET_COLORS)]
+                net_scale = net_assets / gross_assets
                 segments = []
-                if stock_value > 0:
-                    segments.append({'value': self._p6_convert_amount(stock_value, 'USD', display_currency), 'color': stock_color})
-                if brokerage_cash > 0:
-                    segments.append({'value': self._p6_convert_amount(brokerage_cash, 'USD', display_currency), 'color': self.BROKERAGE_CASH_BAR_COLOR})
-                if options_value > 0:
-                    segments.append({'value': self._p6_convert_amount(options_value, 'USD', display_currency), 'color': self.BROKERAGE_OPTIONS_BAR_COLOR})
+                if positive_stock > 0:
+                    segments.append({'value': self._p6_convert_amount(positive_stock * net_scale, 'USD', display_currency), 'color': stock_color})
+                if positive_cash > 0:
+                    segments.append({'value': self._p6_convert_amount(positive_cash * net_scale, 'USD', display_currency), 'color': self.BROKERAGE_CASH_BAR_COLOR})
+                if positive_options > 0:
+                    segments.append({'value': self._p6_convert_amount(positive_options * net_scale, 'USD', display_currency), 'color': self.BROKERAGE_OPTIONS_BAR_COLOR})
                 bar_data.append({'label': str(item.get('name', 'Portfolio') or 'Portfolio'), 'segments': segments})
                 asset_idx += 1
             if options_value < 0:
                 bar_data.append((f"{item['name']} Options", self._p6_convert_amount(abs(options_value), 'USD', display_currency), self.DEBT_COLORS[0]))
-                asset_idx += 1
-        debt_idx = 0
+            if margin_debt > 0:
+                bar_data.append((f"{item['name']} Margin", self._p6_convert_amount(margin_debt, 'USD', display_currency), self.DEBT_COLORS[debt_idx % len(self.DEBT_COLORS)]))
+                debt_idx += 1
         for di in self.networth_data.get('debt', []):
             amt = di.get('amount', 0.0)
             if amt > 0:

@@ -263,6 +263,7 @@ class PortfolioSetupMixin:
                 'cash': sum(float(summary['cash']) for summary in summaries),
                 'stock_value': sum(float(summary['stock_value']) for summary in summaries),
                 'options_value': sum(float(summary['options_value']) for summary in summaries),
+                'margin_debt': sum(float(summary['margin_debt']) for summary in summaries),
                 'held_count': sum(int(summary['held_count']) for summary in summaries),
                 'priced_count': sum(int(summary['priced_count']) for summary in summaries),
             }
@@ -317,6 +318,7 @@ class PortfolioSetupMixin:
             'cash': max(self._p4_manager_number(entry.get('cash_balance')), 0.0),
             'stock_value': stock_value,
             'options_value': options_value,
+            'margin_debt': max(self._p4_manager_number(entry.get('margin_debt')), 0.0),
             'held_count': held_count,
             'priced_count': priced_count,
         }
@@ -330,6 +332,7 @@ class PortfolioSetupMixin:
             self._p4_manager_number(summary.get(key))
             for key in ('stock_value', 'cash', 'options_value')
         )
+        total -= max(self._p4_manager_number(summary.get('margin_debt')), 0.0)
         if held_count > 0 and priced_count == 0:
             return f'Value unavailable  ·  0/{held_count} priced'
         if priced_count < held_count:
@@ -1705,7 +1708,7 @@ class PortfolioSetupMixin:
         margin_chip_layout.setContentsMargins(10, 4, 8, 4)
         margin_chip_layout.setSpacing(8)
         self.p4_margin_label = QLabel('MARGIN')
-        self.p4_margin_label.setToolTip('Margin debt (display only)')
+        self.p4_margin_label.setToolTip('Margin debt deducted from portfolio total and personal net worth')
         self.set_theme_role(self.p4_margin_label, 'summary_chip_label')
         self.p4_margin_input = QDoubleSpinBox()
         self.p4_margin_input.setRange(0.0, 999999999999.99)
@@ -1720,7 +1723,7 @@ class PortfolioSetupMixin:
         self.p4_margin_input.setMaximumWidth(150)
         self.p4_margin_input.setMinimumHeight(24)
         self.p4_margin_input.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.p4_margin_input.setToolTip('Margin debt (display only; excluded from portfolio calculations)')
+        self.p4_margin_input.setToolTip('Margin debt deducted from portfolio total and counted as debt in Personal Finance')
         self.set_theme_role(self.p4_margin_input, 'cash_input')
         self.p4_margin_input.valueChanged.connect(self._p4_on_margin_debt_changed)
         margin_chip_layout.addWidget(self.p4_margin_label)

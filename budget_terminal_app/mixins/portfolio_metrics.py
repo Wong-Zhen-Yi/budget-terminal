@@ -890,8 +890,13 @@ class PortfolioMetricsMixin:
         return filtered_weights(metrics_map, self._p4_weight_included_tickers(), self._p4_weight_included_cash_balance())
 
     def _p4_filtered_summary_values(self, metrics_map: Any) -> dict[str, float]:
-        """Return top-summary values for checked stock and cash positions."""
-        return filtered_summary(metrics_map, self._p4_weight_included_tickers(), self._p4_weight_included_cash_balance())
+        """Return net top-summary values for checked assets after margin debt."""
+        return filtered_summary(
+            metrics_map,
+            self._p4_weight_included_tickers(),
+            self._p4_weight_included_cash_balance(),
+            self._p4_active_margin_debt(),
+        )
 
     def _p4_signed_currency_text(self, value: Any) -> str:
         """Format a signed currency value with the sign before the dollar symbol."""
@@ -922,13 +927,13 @@ class PortfolioMetricsMixin:
 
     def _p4_pie_chart_data(self, metrics_map: Any) -> tuple[dict[str, float], float]:
         """Return descending positive slices and total for the Pie Chart sub-tab."""
-        weights, filtered_total = self._p4_filtered_weight_map(metrics_map)
+        weights, _gross_filtered_total = self._p4_filtered_weight_map(metrics_map)
         slices = {
             str(ticker): float(weight)
             for ticker, weight in sorted(weights.items(), key=lambda item: item[1], reverse=True)
             if float(weight or 0.0) > 0.0
         }
-        return slices, filtered_total
+        return slices, self._p4_filtered_summary_values(metrics_map)['filtered_total']
 
     def _p4_refresh_pie_chart(self, metrics_map: Any = None) -> None:
         """Refresh the checked-position pie chart and its filtered total."""
@@ -1032,13 +1037,17 @@ class PortfolioMetricsMixin:
             self._p6_populate_tables(force_progress_rebuild=True)
 
     def _p4_active_margin_debt(self, portfolio_id: Any = None) -> float:
-        """Return the selected portfolio's display-only margin debt."""
+        """Return the selected portfolio's margin debt."""
         if portfolio_id is None or str(portfolio_id) == str(getattr(self, 'active_portfolio_id', '')):
             value = getattr(self, 'active_margin_debt', None)
             if value is None:
-                value = self._get_portfolio_entry(getattr(self, 'active_portfolio_id', None)).get('margin_debt', 0.0)
+                getter = getattr(self, '_get_portfolio_entry', None)
+                entry = getter(getattr(self, 'active_portfolio_id', None)) if callable(getter) else {}
+                value = entry.get('margin_debt', 0.0) if isinstance(entry, dict) else 0.0
         else:
-            value = self._get_portfolio_entry(portfolio_id).get('margin_debt', 0.0)
+            getter = getattr(self, '_get_portfolio_entry', None)
+            entry = getter(portfolio_id) if callable(getter) else {}
+            value = entry.get('margin_debt', 0.0) if isinstance(entry, dict) else 0.0
         try:
             amount = float(value or 0.0)
         except (TypeError, ValueError):
@@ -1048,7 +1057,7 @@ class PortfolioMetricsMixin:
         return max(amount, 0.0)
 
     def _p4_set_active_margin_debt(self, value: Any) -> None:
-        """Persist display-only margin debt without refreshing calculated views."""
+        """Persist margin debt and refresh net totals and Personal Finance."""
         if getattr(self, '_p4_active_portfolio_is_combined', lambda: False)():
             return
         try:
@@ -1062,6 +1071,7 @@ class PortfolioMetricsMixin:
         entry = self._get_portfolio_entry(self.active_portfolio_id)
         entry['margin_debt'] = amount
         self._persist_all_portfolios()
+        self._p4_update_margin_dependent_views()
 
     def _p4_sync_cash_input(self) -> None:
         """Reflect active cash and margin values into the summary editors."""
@@ -1086,8 +1096,17 @@ class PortfolioMetricsMixin:
         self._p4_set_active_cash_balance(value)
 
     def _p4_on_margin_debt_changed(self, value: float) -> None:
-        """Handle user edits to the display-only margin debt."""
+        """Handle user edits to margin debt."""
         self._p4_set_active_margin_debt(value)
+
+    def _p4_update_margin_dependent_views(self) -> None:
+        """Refresh displays whose net values include margin debt."""
+        portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
+        metrics_map, _net_total = self._p4_build_tracker_metrics_map(portfolio)
+        self._p4_update_filtered_summary_labels(metrics_map)
+        self._p4_refresh_pie_chart(metrics_map)
+        if hasattr(self, '_p6_populate_tables'):
+            self._p6_populate_tables(force_progress_rebuild=True)
 
     def _p4_on_cash_weight_inclusion_changed(self, included: bool) -> None:
         """Persist the Cash checkbox and refresh only its filtered views."""
@@ -1797,6 +1816,7 @@ class PortfolioMetricsMixin:
         options_data = getattr(self, 'active_options_data', getattr(self, 'options_data', []))
         cash_balance = self._p4_active_cash_balance()
         metrics_map, total_mv = self._p4_build_tracker_metrics_map(portfolio)
+        margin_debt = self._p4_active_margin_debt()
         active_index = self._p4_get_active_portfolio_index()
         portfolio_name = self._p4_portfolio_name(active_index)
         lines = []
@@ -1833,6 +1853,8 @@ class PortfolioMetricsMixin:
         lines.append('--- BROKERAGE CASH ---')
         lines.append('')
         lines.append(f'Cash Balance: ${cash_balance:,.2f}')
+        if margin_debt > 0.0:
+            lines.append(f'Margin Debt: ${margin_debt:,.2f}')
         lines.append(f'Total Portfolio Value: ${total_mv:,.2f}')
         lines.append('')
         lines.append('--- OPTIONS POSITIONS ---')
@@ -2015,13 +2037,14 @@ class PortfolioMetricsMixin:
             }
             stock_market_value += market_value
         cash_balance = self._p4_active_cash_balance()
-        total_market_value = stock_market_value + cash_balance
+        gross_market_value = stock_market_value + cash_balance
+        margin_debt = self._p4_active_margin_debt()
         for item in metrics_map.values():
             cost = item['cost']
             market_value = item['market_value']
-            item['weight'] = market_value / total_market_value * 100 if total_market_value else 0
+            item['weight'] = market_value / gross_market_value * 100 if gross_market_value else 0
             item['growth'] = item['dollar_gain'] / cost * 100 if cost else 0
-        return metrics_map, total_market_value
+        return metrics_map, gross_market_value - margin_debt
 
     def _recalc_tracker_row(self, row: Any, ticker: Any, portfolio: Any) -> None:
         """Handle recalc tracker row."""

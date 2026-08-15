@@ -40,6 +40,7 @@ def filtered_summary(
     metrics_map: Any,
     included_tickers: Iterable[Any],
     cash_balance: Any,
+    margin_debt: Any = 0.0,
 ) -> dict[str, float]:
     metrics = metrics_map if isinstance(metrics_map, dict) else {}
     stock_value = 0.0
@@ -54,9 +55,16 @@ def filtered_summary(
             stock_pnl += float(row.get("dollar_gain", 0.0) or 0.0)
         except (TypeError, ValueError):
             pass
-    cash = float(cash_balance or 0.0)
+    try:
+        cash = max(float(cash_balance or 0.0), 0.0)
+    except (TypeError, ValueError):
+        cash = 0.0
+    try:
+        margin = max(float(margin_debt or 0.0), 0.0)
+    except (TypeError, ValueError):
+        margin = 0.0
     return {
         "checked_stock_value": stock_value,
         "checked_stock_pnl": stock_pnl,
-        "filtered_total": stock_value + cash,
+        "filtered_total": stock_value + cash - margin,
     }
