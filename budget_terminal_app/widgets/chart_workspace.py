@@ -41,6 +41,8 @@ class NativeChartDrawingController:
         self.items: dict[str, dict[str, Any]] = {}
         self.active_tool = 'cursor'
         self.pending_anchor: dict[str, Any] | None = None
+        self._preview_endpoint: dict[str, Any] | None = None
+        self._preview_items: list[Any] = []
         self.selected_id: str | None = None
         self._undo: list[list[dict[str, Any]]] = []
         self._redo: list[list[dict[str, Any]]] = []
@@ -54,6 +56,7 @@ class NativeChartDrawingController:
         clean = str(tool or 'cursor').strip().lower()
         if clean not in DRAWING_TOOLS:
             clean = 'cursor'
+        self._clear_preview()
         self.active_tool = clean
         self.pending_anchor = None
         if self._tool_changed is not None:
@@ -65,9 +68,9 @@ class NativeChartDrawingController:
         return had_pending
 
     def set_records(self, records: Any) -> None:
+        self.set_tool('cursor')
         self.records = copy.deepcopy(list(records or []))
         self.selected_id = None
-        self.pending_anchor = None
         self._undo.clear()
         self._redo.clear()
         self.render()
@@ -153,8 +156,21 @@ class NativeChartDrawingController:
             return True
         if self.pending_anchor is None:
             self.pending_anchor = anchor
+            self._preview_endpoint = copy.deepcopy(anchor)
+            self._render_preview()
             return True
         self._create_record(tool, [self.pending_anchor, anchor])
+        return True
+
+    def update_preview(self, x_value: Any, price: Any) -> bool:
+        """Update a two-click drawing preview using the saved-anchor snapping rules."""
+        if self.active_tool not in {'trend_line', 'rectangle', 'fib'} or self.pending_anchor is None:
+            return False
+        endpoint = self._anchor_from_point(x_value, price)
+        if endpoint is None:
+            return False
+        self._preview_endpoint = endpoint
+        self._render_preview()
         return True
 
     def render(self) -> None:
@@ -166,6 +182,7 @@ class NativeChartDrawingController:
 
     def apply_theme(self) -> None:
         self.render()
+        self._render_preview()
 
     def _create_record(self, drawing_type: str, anchors: list[dict[str, Any]], *, text: str = '') -> None:
         record = {
@@ -178,6 +195,7 @@ class NativeChartDrawingController:
         self._push_history()
         self.records.append(record)
         self.selected_id = record['id']
+        self._clear_preview()
         self.pending_anchor = None
         self.active_tool = 'cursor'
         if self._tool_changed is not None:
@@ -224,6 +242,57 @@ class NativeChartDrawingController:
                     except Exception:
                         pass
         self.items = {}
+
+    def _clear_preview(self) -> None:
+        for item in self._preview_items:
+            try:
+                self.plot.removeItem(item)
+            except Exception:
+                pass
+        self._preview_items = []
+        self._preview_endpoint = None
+
+    def _render_preview(self) -> None:
+        endpoint = self._preview_endpoint
+        start = self._point_from_anchor(self.pending_anchor or {})
+        end = self._point_from_anchor(endpoint or {})
+        self._clear_preview()
+        if self.active_tool not in {'trend_line', 'rectangle', 'fib'} or start is None or end is None:
+            return
+        self._preview_endpoint = copy.deepcopy(endpoint)
+        color = self._theme_color('warning')
+        pen = pg.mkPen(color, width=1.5)
+        anchor_item = pg.TargetItem(
+            pos=start,
+            size=8,
+            symbol='o',
+            pen=pen,
+            brush=color,
+            movable=False,
+        )
+        self.plot.addItem(anchor_item)
+        self._preview_items.append(anchor_item)
+        x1, y1 = start
+        x2, y2 = end
+        if self.active_tool == 'trend_line':
+            self._preview_items.append(self.plot.plot([x1, x2], [y1, y2], pen=pen, antialias=True))
+        elif self.active_tool == 'rectangle':
+            self._preview_items.append(
+                self.plot.plot(
+                    [x1, x2, x2, x1, x1],
+                    [y1, y1, y2, y2, y1],
+                    pen=pen,
+                    antialias=True,
+                )
+            )
+        else:
+            self._preview_items.append(self.plot.plot([x1, x2], [y1, y2], pen=pen, antialias=True))
+            self._preview_items.extend(self._fib_lines(start, end, pen))
+        for item in self._preview_items:
+            try:
+                item.setZValue(100)
+            except Exception:
+                pass
 
     def _render_record(self, record: dict[str, Any]) -> None:
         drawing_id = str(record.get('id') or '')

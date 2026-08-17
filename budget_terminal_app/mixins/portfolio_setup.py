@@ -13,6 +13,7 @@ _P4_STOCK_SECTION_MIN_HEIGHT = 260
 _P4_OPTIONS_SECTION_MIN_HEIGHT = 180
 _P4_TABLE_FIXED_ACTION_WIDTH = 36
 _P4_TABLE_RESIZE_DEBOUNCE_MS = 120
+_P4_HIGHLIGHT_TIMEOUT_MS = 30_000
 P4_OPTIONS_COLUMNS = (
     'Ticker',
     'Type',
@@ -79,7 +80,194 @@ class _PortfolioNameEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _PortfolioHighlightMouseFilter(QObject):
+    """Forward app-wide mouse presses to the Portfolio highlight controller."""
+
+    def __init__(self, window: Any, app: QApplication) -> None:
+        super().__init__(window)
+        self._window = window
+        self._app = app
+        window.destroyed.connect(self.detach)
+
+    def detach(self, *_: Any) -> None:
+        """Remove this filter when its owning window is destroyed."""
+        app = self._app
+        self._app = None
+        self._window = None
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        """Observe mouse presses without consuming or changing their normal behavior."""
+        window = self._window
+        if window is not None and event.type() == QEvent.Type.MouseButtonPress:
+            window._p4_handle_highlight_mouse_press(obj, event)
+        return False
+
+
 class PortfolioSetupMixin:
+
+    @staticmethod
+    def _p4_table_has_visual_selection(table: Any) -> bool:
+        """Return whether a table currently paints any selected cells."""
+        if table is None:
+            return False
+        selection_model = table.selectionModel()
+        return bool(selection_model is not None and selection_model.hasSelection())
+
+    def _p4_arm_stock_highlight_timer(self, *, restart: bool=False) -> None:
+        """Start the stock highlight deadline, optionally restarting it for a user click."""
+        timer = getattr(self, '_p4_stock_highlight_timer', None)
+        if timer is not None and (restart or not timer.isActive()):
+            timer.start()
+
+    def _p4_stop_stock_highlight_timer(self) -> None:
+        """Stop the stock highlight deadline without changing table state."""
+        timer = getattr(self, '_p4_stock_highlight_timer', None)
+        if timer is not None:
+            timer.stop()
+
+    def _p4_clear_stock_highlight(self) -> None:
+        """Clear only the stock table's visual selection."""
+        self._p4_stop_stock_highlight_timer()
+        table = getattr(self, 'p4_table', None)
+        if table is not None:
+            table.clearSelection()
+
+    def _p4_arm_options_highlight_timer(self, *, restart: bool=False) -> None:
+        """Start the options highlight deadline, optionally restarting it for a user click."""
+        timer = getattr(self, '_p4_options_highlight_timer', None)
+        if timer is not None and (restart or not timer.isActive()):
+            timer.start()
+
+    def _p4_stop_options_highlight_timer(self) -> None:
+        """Stop the options highlight deadline without changing table state."""
+        timer = getattr(self, '_p4_options_highlight_timer', None)
+        if timer is not None:
+            timer.stop()
+
+    def _p4_clear_options_highlight(self) -> None:
+        """Clear only the options table's visual selection."""
+        self._p4_stop_options_highlight_timer()
+        table = getattr(self, 'p4_opt_table', None)
+        if table is not None:
+            table.clearSelection()
+
+    def _p4_on_stock_highlight_selection_changed(self) -> None:
+        """Give a programmatic stock selection one deadline without extending an active one."""
+        if self._p4_table_has_visual_selection(getattr(self, 'p4_table', None)):
+            self._p4_arm_stock_highlight_timer()
+        else:
+            self._p4_stop_stock_highlight_timer()
+
+    def _p4_on_options_highlight_selection_changed(self) -> None:
+        """Give a programmatic options selection one deadline without extending an active one."""
+        if self._p4_table_has_visual_selection(getattr(self, 'p4_opt_table', None)):
+            self._p4_arm_options_highlight_timer()
+        else:
+            self._p4_stop_options_highlight_timer()
+
+    @staticmethod
+    def _p4_event_global_position(event: Any) -> QPoint | None:
+        """Return a mouse event's integer global position across supported Qt APIs."""
+        try:
+            return event.globalPosition().toPoint()
+        except AttributeError:
+            try:
+                return event.globalPos()
+            except AttributeError:
+                return None
+
+    @staticmethod
+    def _p4_widget_is_within(widget: Any, parent: Any) -> bool:
+        """Return whether a mouse receiver is a widget or one of its descendants."""
+        return bool(
+            isinstance(widget, QWidget)
+            and isinstance(parent, QWidget)
+            and (widget is parent or parent.isAncestorOf(widget))
+        )
+
+    def _p4_table_row_at_mouse_press(self, table: Any, widget: Any, global_position: QPoint | None) -> int:
+        """Resolve a press inside a table viewport to a valid model row."""
+        if table is None or global_position is None or not self._p4_widget_is_within(widget, table):
+            return -1
+        viewport = table.viewport()
+        viewport_position = viewport.mapFromGlobal(global_position)
+        if not viewport.rect().contains(viewport_position):
+            return -1
+        index = table.indexAt(viewport_position)
+        return int(index.row()) if index.isValid() and 0 <= index.row() < table.rowCount() else -1
+
+    def _p4_option_control_row_at_mouse_press(self, widget: Any, global_position: QPoint | None) -> int:
+        """Resolve embedded option combos and their visible popup entries to an owning row."""
+        table = getattr(self, 'p4_opt_table', None)
+        if table is None:
+            return -1
+        for row in range(table.rowCount()):
+            for column in (1, 2):
+                combo = table.cellWidget(row, column)
+                if not isinstance(combo, QComboBox):
+                    continue
+                if self._p4_widget_is_within(widget, combo):
+                    return row
+                try:
+                    view = combo.view()
+                    if self._p4_widget_is_within(widget, view):
+                        return row
+                    if global_position is None or not view.isVisible():
+                        continue
+                    viewport = view.viewport()
+                    popup_position = viewport.mapFromGlobal(global_position)
+                    if viewport.rect().contains(popup_position) and view.indexAt(popup_position).isValid():
+                        return row
+                except RuntimeError:
+                    continue
+        return -1
+
+    def _p4_handle_highlight_mouse_press(self, widget: Any, event: Any) -> None:
+        """Apply Portfolio highlight lifetime rules for one app-wide mouse press."""
+        global_position = self._p4_event_global_position(event)
+        option_control_row = self._p4_option_control_row_at_mouse_press(widget, global_position)
+        option_row = self._p4_table_row_at_mouse_press(
+            getattr(self, 'p4_opt_table', None),
+            widget,
+            global_position,
+        )
+        if option_control_row >= 0 or option_row >= 0:
+            self._p4_clear_stock_highlight()
+            self._p4_arm_options_highlight_timer(restart=True)
+            return
+        stock_row = self._p4_table_row_at_mouse_press(
+            getattr(self, 'p4_table', None),
+            widget,
+            global_position,
+        )
+        if stock_row >= 0:
+            self._p4_clear_options_highlight()
+            self._p4_arm_stock_highlight_timer(restart=True)
+            return
+        self._p4_clear_stock_highlight()
+        self._p4_clear_options_highlight()
+
+    def _p4_initialize_position_highlight_behavior(self) -> None:
+        """Install independent highlight timers and the Portfolio mouse observer."""
+        self._p4_stock_highlight_timer = QTimer(self)
+        self._p4_stock_highlight_timer.setInterval(_P4_HIGHLIGHT_TIMEOUT_MS)
+        self._p4_stock_highlight_timer.setSingleShot(True)
+        self._p4_stock_highlight_timer.timeout.connect(self._p4_clear_stock_highlight)
+        self._p4_options_highlight_timer = QTimer(self)
+        self._p4_options_highlight_timer.setInterval(_P4_HIGHLIGHT_TIMEOUT_MS)
+        self._p4_options_highlight_timer.setSingleShot(True)
+        self._p4_options_highlight_timer.timeout.connect(self._p4_clear_options_highlight)
+        self.p4_table.itemSelectionChanged.connect(self._p4_on_stock_highlight_selection_changed)
+        self.p4_opt_table.itemSelectionChanged.connect(self._p4_on_options_highlight_selection_changed)
+        app = QApplication.instance()
+        if app is not None:
+            self._p4_highlight_mouse_filter = _PortfolioHighlightMouseFilter(self, app)
+            app.installEventFilter(self._p4_highlight_mouse_filter)
 
     def _p4_submit_background_task(self, fn: Any) -> None:
         """Run one Portfolio background task through the bounded page executor."""
@@ -1952,6 +2140,7 @@ class PortfolioSetupMixin:
         self.p4_content_tabs.addTab(self.p4_momentum_page, 'Momentum Tracker')
         self.p4_content_tabs.addTab(self.p4_metrics_page, 'Portfolio Metrics')
         layout.addWidget(self.p4_content_tabs, 1)
+        self._p4_initialize_position_highlight_behavior()
         QTimer.singleShot(0, self._p4_apply_portfolio_table_widths)
         self._p4_sync_cash_input()
         self._p4_refresh_portfolio_selector()

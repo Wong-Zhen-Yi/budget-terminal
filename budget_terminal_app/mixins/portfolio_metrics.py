@@ -2890,7 +2890,12 @@ class PortfolioMetricsMixin:
         """Render large holdings tables in short, navigation-safe GUI slices."""
         normalized_rows = list(rows or [])
         selected_symbol = ''
-        if hasattr(self, '_p4_selected_stock_ticker'):
+        selection_model = self.p4_table.selectionModel()
+        if (
+            selection_model is not None
+            and selection_model.hasSelection()
+            and hasattr(self, '_p4_selected_stock_ticker')
+        ):
             selected_symbol = self._p4_selected_stock_ticker()
         if len(normalized_rows) <= 50:
             render_table_rows(self.p4_table, normalized_rows)

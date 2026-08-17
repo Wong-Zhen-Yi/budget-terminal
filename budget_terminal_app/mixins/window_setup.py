@@ -96,6 +96,7 @@ class WindowSetupMixin:
         29: 'Price',
         33: 'News',
         37: 'Dictionary',
+        39: 'Signals',
     }
 
     @staticmethod
@@ -210,6 +211,8 @@ class WindowSetupMixin:
         self.btn_page11.setCheckable(True)
         self.btn_page12 = QPushButton('Stocks')
         self.btn_page12.setCheckable(True)
+        self.btn_page40 = QPushButton('Signals')
+        self.btn_page40.setCheckable(True)
         self.btn_page23 = QPushButton('Valuation')
         self.btn_page23.setCheckable(True)
         self.btn_page18 = QPushButton('Roll')
@@ -225,6 +228,7 @@ class WindowSetupMixin:
             self.btn_page14,
             self.btn_page27,
             self.btn_page20,
+            self.btn_page40,
             self.btn_page30,
             self.btn_page17,
             self.btn_page8,
@@ -981,6 +985,8 @@ class WindowSetupMixin:
             {'index': 35, 'page_attr': '_retired_page35', 'placeholder_only': True},
             {'index': 36, 'page_attr': '_retired_page36', 'placeholder_only': True},
             {'index': 37, 'page_attr': 'page38', 'init_method': 'init_page38', 'theme_hook': '_apply_dictionary_theme'},
+            {'index': 38, 'page_attr': '_retired_page38', 'placeholder_only': True},
+            {'index': 39, 'page_attr': 'page40', 'init_method': 'init_page40', 'theme_hook': '_apply_signal_scanner2_theme'},
         )
 
     def _startup_page_labels(self) -> tuple[tuple[int, str], ...]:

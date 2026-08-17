@@ -862,6 +862,7 @@ class WindowBootstrapMixin:
             self._p17_fetch_futures = {}
             self._p25_executor = None
             self._cache_manager = CacheManager()
+            self._p40_initialize_controller()
             self.last_data = None
             self.p2_current_data = None
             self.valuation_current_data = None

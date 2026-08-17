@@ -34,10 +34,11 @@ REFRESH_ROUTE_ARCHITECTURE = {
     29: 'background-single-flight',
     33: 'background-single-flight',
     37: 'local-only',
+    39: 'background-single-flight',
 }
 
 _MIGRATED_REFRESH_ROUTES = {
-    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33,
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33, 39,
 }
 REFRESH_ROUTE_CLASSIFICATION = {
     page_index: (
@@ -121,6 +122,7 @@ class WindowLifecycleMixin:
             on_show=self._p20_on_show,
             on_hide=self._p20_on_hide if hasattr(self, '_p20_on_hide') else None,
         )
+        self._register_page(39, self.btn_page40, on_show=self._p40_on_show)
         self._register_page(29, self.btn_page30, on_show=self._p30_on_show if hasattr(self, '_p30_on_show') else None)
         self._register_page(26, self.btn_page27, on_show=self._p27_on_show if hasattr(self, '_p27_on_show') else None)
         self._register_page(33, self.btn_page34, on_show=self._p34_on_show if hasattr(self, '_p34_on_show') else None)
@@ -1191,6 +1193,7 @@ class WindowLifecycleMixin:
             26: (
                 {'tab_widget_attr': 'p27_tabs', 'tab_text': 'Portfolio', 'aliases': ('Portfolio Up Down', 'Portfolio Up/Down')},
                 {'tab_widget_attr': 'p27_tabs', 'tab_text': 'SPY Holdings', 'aliases': ('SPY Up Down', 'SPY Up/Down')},
+                {'tab_widget_attr': 'p27_tabs', 'tab_text': 'QQQ Holdings', 'aliases': ('QQQ Up Down', 'QQQ Up/Down')},
                 {'tab_widget_attr': 'p27_tabs', 'tab_text': 'Custom', 'aliases': ('Custom Up Down', 'Custom Up/Down')},
             ),
             22: (
@@ -1603,6 +1606,10 @@ class WindowLifecycleMixin:
             if hasattr(self, '_stocks_load_from_input'):
                 self._stocks_load_from_input(include_global_status=True, update_collection_info=True)
             return
+        if current_index == 39:
+            if hasattr(self, '_p40_manual_refresh'):
+                self._p40_manual_refresh()
+            return
         if current_index == 22:
             if hasattr(self, 'load_valuation_data'):
                 self.load_valuation_data(update_collection_info=True)
@@ -1820,6 +1827,7 @@ class WindowLifecycleMixin:
     def closeEvent(self, event: Any) -> None:
         """Closeevent."""
         self._refresh_shutdown = True
+        self._p40_stop_controller()
         coordinator = getattr(self, '_refresh_coordinator', None)
         if coordinator is not None:
             coordinator.clear()
@@ -1927,6 +1935,11 @@ class WindowLifecycleMixin:
         up_down_executor = getattr(self, '_p27_executor', None)
         if up_down_executor is not None:
             up_down_executor.shutdown(wait=False, cancel_futures=True)
+        self._p27_closed = True
+        self._p27_active_request = int(getattr(self, '_p27_active_request', 0)) + 1
+        up_down_target_executor = getattr(self, '_p27_target_executor', None)
+        if up_down_target_executor is not None:
+            up_down_target_executor.shutdown(wait=False, cancel_futures=True)
         charts_options_executor = getattr(self, '_p28_fetch_executor', None)
         if charts_options_executor is not None:
             charts_options_executor.shutdown(wait=False, cancel_futures=True)

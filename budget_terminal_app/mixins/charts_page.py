@@ -99,6 +99,16 @@ P10_RANGE_PERIOD_MAP = {
     '5Y': '5y',
     'Max': 'max',
 }
+P10_RANGE_CALENDAR_DAYS = {
+    '5D': 5,
+    '1M': 31,
+    '3M': 93,
+    '6M': 186,
+    '1Y': 366,
+    '5Y': 1827,
+}
+P10_RANGE_COVERAGE_RATIO = 0.85
+P10_RANGE_MARKET_CALENDAR_ALLOWANCE_DAYS = 4
 P10_RANGE_OPTIONS_BY_INTERVAL = {
     '1 Minute': ('1D', '5D'),
     '5 Minutes': ('1D', '5D', '1M'),
@@ -147,7 +157,16 @@ P10_MIN_REUSABLE_SPAN = 10.0
 P10_AVG_PRICE_LABEL = 'Avg Price'
 P10_SUPPORT_RESISTANCE_LABEL = 'Support/Resistance'
 P10_FIB_RETRACEMENT_LABEL = 'Fib Retracement'
-P10_INDICATOR_ORDER = ('Volume', 'RSI', '200 MA', P10_AVG_PRICE_LABEL, P10_SUPPORT_RESISTANCE_LABEL, P10_FIB_RETRACEMENT_LABEL)
+P10_CURSOR_LABEL = 'Cursor'
+P10_INDICATOR_ORDER = (
+    'Volume',
+    'RSI',
+    '200 MA',
+    P10_AVG_PRICE_LABEL,
+    P10_SUPPORT_RESISTANCE_LABEL,
+    P10_FIB_RETRACEMENT_LABEL,
+    P10_CURSOR_LABEL,
+)
 P10_SR_PIVOT_WINDOW = 3
 P10_SR_LEVEL_TOLERANCE_PCT = 0.006
 P10_FIB_DEFAULT_LOOKBACK = 120
@@ -256,7 +275,7 @@ class ChartsPageMixin:
         self.p10_interval_label = str(state.get('interval_label', state.get('timeframe_label', '1 Day')) or '1 Day')
         self.p10_timeframe_label = self.p10_interval_label
         self.p10_range_label = str(state.get('range_label', '5Y') or '5Y')
-        self.p10_chart_type = str(state.get('chart_type', 'candles') or 'candles').strip().lower()
+        self.p10_chart_type = 'candles'
         self.p10_poll_interval_seconds = int(state.get('poll_interval_seconds', 0) or 0)
         self.p10_sidebar_visible = bool(state.get('sidebar_visible', True))
         self.p10_splitter_sizes = list(state.get('splitter_sizes', [5, 2]) or [5, 2])
@@ -336,6 +355,7 @@ class ChartsPageMixin:
         self._p10_last_market_meta = {}
         self._p10_request_seq = 0
         self._p10_active_request = 0
+        self._p10_selected_range_request_ids = set()
         self._p10_compare_request_seq = 0
         self._p10_compare_active_request = 0
         self._p10_relationship_request_seq = 0
@@ -752,8 +772,12 @@ class ChartsPageMixin:
         drawing_rail = QVBoxLayout(self.p10_drawing_rail_widget)
         drawing_rail.setContentsMargins(0, 0, 4, 0)
         drawing_rail.setSpacing(4)
+        self.p10_drawing_tools_label = QLabel('Drawing Tools')
+        self.p10_drawing_tools_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.p10_drawing_tools_label.setWordWrap(True)
+        self.set_theme_role(self.p10_drawing_tools_label, 'muted')
+        drawing_rail.addWidget(self.p10_drawing_tools_label)
         for tool, label in (
-            ('cursor', 'Cursor'),
             ('trend_line', 'Trend'),
             ('horizontal_line', 'H Line'),
             ('horizontal_ray', 'H Ray'),
@@ -1251,11 +1275,19 @@ class ChartsPageMixin:
         changed = clean != self.p10_range_label
         self.p10_range_label = clean
         self._p10_update_range_buttons()
-        if not changed:
-            return
         self._p10_pause_playback()
         self._p10_force_selected_range = True
+        applied = self._p10_apply_selected_range()
+        if applied and not self.p10_auto_follow:
+            self._p10_manual_x_range = self._p10_get_current_x_range()
         self._p10_save_state()
+        if not changed:
+            if applied:
+                self._p10_force_selected_range = False
+            return
+        if self._p10_loaded_data_covers_range(clean):
+            self._p10_force_selected_range = False
+            return
         self._p10_refresh_chart(force_refresh=clean == 'Max')
 
     def _p10_update_range_buttons(self) -> None:
@@ -1394,7 +1426,8 @@ class ChartsPageMixin:
         controller = getattr(self, 'p10_drawing_controller', None)
         if controller is None:
             return
-        controller.set_tool(tool)
+        clean = str(tool or '').strip().lower()
+        controller.set_tool('cursor' if clean == controller.active_tool else clean)
 
     def _p10_on_drawing_tool_changed(self, tool: str) -> None:
         for name, button in getattr(self, '_p10_drawing_tool_buttons', {}).items():
@@ -1525,27 +1558,60 @@ class ChartsPageMixin:
         if self._p10_chart_rows:
             self._p10_show_row_details(len(self._p10_chart_rows) - 1)
 
-    def _p10_apply_selected_range(self) -> None:
+    def _p10_range_cutoff(self, label: Any, latest: Any) -> pd.Timestamp | None:
+        """Return the shared calendar cutoff for viewport and coverage checks."""
+        clean = str(label or '').strip()
+        latest_timestamp = pd.Timestamp(latest)
+        if clean == 'Max':
+            return None
+        if clean == '1D':
+            return latest_timestamp.normalize()
+        if clean == 'YTD':
+            return latest_timestamp.normalize().replace(month=1, day=1)
+        days = P10_RANGE_CALENDAR_DAYS.get(clean)
+        if days is None:
+            return None
+        return latest_timestamp - pd.Timedelta(days=days)
+
+    def _p10_loaded_data_covers_range(self, label: Any) -> bool:
+        """Return whether loaded rows adequately cover the selected range."""
+        if not self._p10_chart_rows or not isinstance(self.p10_chart_df, pd.DataFrame) or self.p10_chart_df.empty:
+            return False
+        clean = str(label or '').strip()
+        if clean == 'Max':
+            return False
+        dates = pd.DatetimeIndex(pd.to_datetime(self.p10_chart_df.index)).sort_values()
+        latest = dates[-1]
+        if clean == '1D':
+            return bool((dates.normalize() == latest.normalize()).any())
+        cutoff = self._p10_range_cutoff(clean, latest)
+        if cutoff is None:
+            return False
+        requested_span = latest - cutoff
+        tolerance = max(
+            pd.Timedelta(days=P10_RANGE_MARKET_CALENDAR_ALLOWANCE_DAYS),
+            requested_span * (1.0 - P10_RANGE_COVERAGE_RATIO),
+        )
+        return bool(dates[0] <= cutoff + tolerance)
+
+    def _p10_apply_selected_range(self) -> bool:
         """Fit the viewport to the selected history range."""
-        if not self._p10_chart_rows or not isinstance(self.p10_chart_df, pd.DataFrame):
-            return
+        if not self._p10_chart_rows or not isinstance(self.p10_chart_df, pd.DataFrame) or self.p10_chart_df.empty:
+            return False
         dates = pd.DatetimeIndex(pd.to_datetime(self.p10_chart_df.index))
         latest = dates[-1]
-        label = self.p10_range_label
-        if label == 'Max':
+        cutoff = self._p10_range_cutoff(self.p10_range_label, latest)
+        if cutoff is None:
             left_index = 0
-        elif label == 'YTD':
-            cutoff = pd.Timestamp(year=latest.year, month=1, day=1)
-            left_index = int(dates.searchsorted(cutoff, side='left'))
         else:
-            days = {'1D': 1, '5D': 5, '1M': 31, '3M': 93, '6M': 186, '1Y': 366, '5Y': 1827}.get(label, 93)
-            left_index = int(dates.searchsorted(latest - pd.Timedelta(days=days), side='left'))
+            left_index = int(dates.searchsorted(cutoff, side='left'))
         latest_index = float(len(self._p10_chart_rows) - 1)
         span = max(P10_MIN_REUSABLE_SPAN, latest_index - float(left_index) + 1.0)
         right_padding = max(1.0, span * (1.0 - P10_AUTO_ANCHOR))
         active_range = (float(left_index) - 0.5, latest_index + right_padding)
         self._p10_set_x_range(active_range)
         self._p10_apply_auto_y_range(active_range)
+        return True
 
     def _p10_refresh_active_subtab(self, *, force: bool=False) -> None:
         """Refresh the currently visible Charts subtab."""
@@ -4089,6 +4155,8 @@ class ChartsPageMixin:
         self.p10_active_indicators = [indicator for indicator in P10_INDICATOR_ORDER if indicator in self.p10_active_indicators]
         self._p10_update_indicator_button_styles()
         self._p10_update_fib_controls()
+        if name == P10_CURSOR_LABEL and not checked:
+            self._p10_hide_crosshair()
         self._p10_save_state()
         if self._p10_chart_rows:
             if self._p10_playback_running or self._p10_playback_index < len(self._p10_chart_rows) - 1:
@@ -4266,6 +4334,10 @@ class ChartsPageMixin:
         self._p10_request_seq += 1
         request_id = self._p10_request_seq
         self._p10_active_request = request_id
+        if self._p10_force_selected_range:
+            self._p10_selected_range_request_ids.add(request_id)
+        requested_interval_label = self.p10_interval_label
+        requested_range_label = self.p10_range_label
         self.p10_load_btn.setEnabled(False)
         self.p10_refresh_btn.setEnabled(False)
         self._p10_set_status(f'Loading {symbol} {self.p10_interval_label} · {self.p10_range_label}...', 'info')
@@ -4273,7 +4345,12 @@ class ChartsPageMixin:
         def _run() -> None:
             """Fetch chart data in the background."""
             try:
-                data = self._p10_fetch_chart_payload(symbol, self.p10_interval_label, force_refresh=bool(force_refresh))
+                data = self._p10_fetch_chart_payload(
+                    symbol,
+                    requested_interval_label,
+                    range_label=requested_range_label,
+                    force_refresh=bool(force_refresh),
+                )
                 self._invoke_main.emit(lambda payload=data, req=request_id: self._p10_apply_chart_payload(req, payload))
             except Exception as exc:
                 self._invoke_main.emit(lambda err=str(exc), req=request_id: self._p10_handle_chart_error(req, err))
@@ -4681,13 +4758,21 @@ class ChartsPageMixin:
             errors=market_data_errors(base_payload),
         )
 
-    def _p10_fetch_chart_payload(self, symbol: Any, timeframe_label: Any, *, force_refresh: bool=False) -> Any:
+    def _p10_fetch_chart_payload(
+        self,
+        symbol: Any,
+        timeframe_label: Any,
+        *,
+        range_label: Any=None,
+        force_refresh: bool=False,
+    ) -> Any:
         """Fetch a single chart dataset plus summary stats."""
         interval_label = str(timeframe_label or self.p10_interval_label)
         interval = self._p10_interval_map.get(interval_label, '1d')
         allowed = P10_RANGE_OPTIONS_BY_INTERVAL.get(interval_label, P10_RANGE_OPTIONS_BY_INTERVAL['1 Day'])
-        range_label = self.p10_range_label if self.p10_range_label in allowed else allowed[-1]
-        period = P10_RANGE_PERIOD_MAP.get(range_label, '5y')
+        requested_range = str(range_label or self.p10_range_label)
+        requested_range = requested_range if requested_range in allowed else allowed[-1]
+        period = P10_RANGE_PERIOD_MAP.get(requested_range, '5y')
         return self._chart_fetch_payload(
             symbol,
             period=period,
@@ -4807,6 +4892,8 @@ class ChartsPageMixin:
 
     def _p10_apply_chart_payload(self, request_id: Any, payload: Any) -> None:
         """Render fetched chart payload if it is the latest request."""
+        fit_selected_range = request_id in self._p10_selected_range_request_ids
+        self._p10_selected_range_request_ids.discard(request_id)
         if request_id != self._p10_active_request:
             return
         self._p10_pause_playback()
@@ -4840,7 +4927,8 @@ class ChartsPageMixin:
         self._p10_render_main_chart(stats, interval, payload.get('rsi'), payload.get('rsi_ma'), payload.get('ma200'))
         self._p10_migrate_legacy_fib_drawing()
         self._p10_restore_context_drawings()
-        if self._p10_force_selected_range:
+        fit_selected_range = fit_selected_range or self._p10_force_selected_range
+        if fit_selected_range:
             self._p10_apply_selected_range()
         elif self.p10_auto_follow:
             self._p10_apply_auto_x_range(self._p10_pending_x_range)
@@ -5068,6 +5156,7 @@ class ChartsPageMixin:
 
     def _p10_handle_chart_error(self, request_id: Any, message: Any) -> None:
         """Show a chart fetch error if it belongs to the latest request."""
+        self._p10_selected_range_request_ids.discard(request_id)
         if request_id != self._p10_active_request:
             return
         if hasattr(self, '_record_data_health_exception'):
@@ -5506,6 +5595,11 @@ class ChartsPageMixin:
             self._p10_hide_crosshair()
             return
         mouse_point = source_plot.getPlotItem().vb.mapSceneToView(pos)
+        controller = getattr(self, 'p10_drawing_controller', None)
+        if source_plot is self.p10_main_plot and controller is not None and controller.is_creating:
+            controller.update_preview(mouse_point.x(), mouse_point.y())
+        if P10_CURSOR_LABEL not in self.p10_active_indicators:
+            return
         index = max(0, min(int(round(mouse_point.x())), len(self._p10_chart_rows) - 1))
         row = self._p10_chart_rows[index]
         price = float(mouse_point.y()) if source_plot is self.p10_main_plot else float(getattr(row, 'Close'))

@@ -10,6 +10,7 @@ from budget_terminal_app.services.up_down import (
     normalize_up_down_symbols,
     sort_up_down_rows,
 )
+from budget_terminal_app.mixins.portfolio_presenters import analyst_target_cell_text_and_sort
 from budget_terminal_app.widgets.batched_render import cancel_batched, run_batched
 
 
@@ -17,8 +18,10 @@ P27_MAX_WORKERS = 1
 P27_SOURCES: tuple[tuple[str, str], ...] = (
     ("portfolio", "Portfolio"),
     ("spy", "SPY Holdings"),
+    ("qqq", "QQQ Holdings"),
     ("custom", "Custom"),
 )
+P27_HOLDINGS_ETFS = {"spy": "SPY", "qqq": "QQQ"}
 P27_TABLE_COLUMNS = (
     "#",
     "Ticker",
@@ -28,6 +31,7 @@ P27_TABLE_COLUMNS = (
     "Trading Days",
     "Days Up",
     "Days Down",
+    "Price Targets",
 )
 P27_NUMERIC_ROLE = Qt.ItemDataRole.UserRole
 P27_SOURCE_LABELS = {key: label for key, label in P27_SOURCES}
@@ -60,7 +64,9 @@ class UpDownPageMixin:
     def _get_up_down_data_service(self) -> UpDownDataService:
         service = getattr(self, "_up_down_data_service", None)
         if service is None:
-            service = UpDownDataService()
+            cache_manager_factory = getattr(self, "_get_cache_manager", None)
+            cache_manager = cache_manager_factory() if callable(cache_manager_factory) else None
+            service = UpDownDataService(cache_manager=cache_manager)
             self._up_down_data_service = service
         return service
 
@@ -78,7 +84,13 @@ class UpDownPageMixin:
         self._p27_request_seq = 0
         self._p27_active_request = 0
         self._p27_fetching = False
+        self._p27_target_fetching = False
         self._p27_render_generation = 0
+        self._p27_cache_metadata: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._p27_inflight_keys: set[tuple[Any, ...]] = set()
+        self._p27_target_request_tokens: dict[tuple[Any, ...], int] = {}
+        self._p27_request_tokens: dict[tuple[Any, ...], int] = {}
+        self._p27_closed = False
         self._p27_interval_buttons: dict[str, QPushButton] = {}
         self._p27_tables: dict[str, QTableWidget] = {}
 
@@ -124,7 +136,7 @@ class UpDownPageMixin:
         self._p27_update_interval_buttons()
         self._p27_select_source_tab(self.p27_active_source)
         self.p27_tabs.currentChanged.connect(self._p27_on_tab_changed)
-        self._p27_render_or_refresh(force=False)
+        self._p27_hydrate_cached_payload(self.p27_active_source, self.p27_interval_key)
 
     def _p27_build_source_tab(self, source_key: str) -> QWidget:
         tab = QWidget()
@@ -248,47 +260,118 @@ class UpDownPageMixin:
         })
 
     def _p27_render_or_refresh(self, *, force: bool) -> None:
+        self._p27_update_refresh_button()
         cache_key = self._p27_cache_key()
+        if not force and cache_key not in self._p27_payload_cache:
+            self._p27_hydrate_cached_payload(self.p27_active_source, self.p27_interval_key)
         payload = self._p27_payload_cache.get(cache_key)
         if payload is not None and not force:
             self._p27_render_payload(self.p27_active_source, payload)
+            rows = list(payload.get("rows", [])) if isinstance(payload, dict) else []
+            if not rows:
+                label = P27_SOURCE_LABELS.get(self.p27_active_source, self.p27_active_source).lower()
+                self._p27_set_status(f"No {label} tickers to load.", "warning")
+                return
+            metadata = self._p27_cache_metadata.get(cache_key, {"fresh": True, "cache_age_seconds": 0.0})
+            if not bool(metadata.get("fresh", True)):
+                age_text = self._p27_format_cache_age(metadata.get("cache_age_seconds"))
+                label = P27_SOURCE_LABELS.get(self.p27_active_source, self.p27_active_source)
+                self._p27_set_status(f"Showing cached {label} data ({age_text} old); refreshing...", "warning")
+                self._p27_request_refresh(force=False)
+                return
+            unresolved = [row for row in rows if isinstance(row, dict) and "price_target_mean" not in row]
+            if unresolved:
+                request_id = self._p27_new_request_token(cache_key)
+                label = P27_SOURCE_LABELS.get(self.p27_active_source, self.p27_active_source)
+                age_text = self._p27_format_cache_age(metadata.get("cache_age_seconds"))
+                self._p27_set_status(f"Loaded cached {label} data ({age_text} old); loading price targets...", "warning")
+                self._p27_request_price_targets(request_id, self.p27_active_source, self.p27_interval_key, payload)
+            else:
+                available = sum(row.get("price_target_mean") is not None for row in rows if isinstance(row, dict))
+                age_text = self._p27_format_cache_age(metadata.get("cache_age_seconds"))
+                label = P27_SOURCE_LABELS.get(self.p27_active_source, self.p27_active_source)
+                self._p27_set_status(
+                    f"Loaded {len(rows)} cached {label} ticker(s) ({age_text} old); price targets available for {available}/{len(rows)}.",
+                    "positive",
+                )
             return
         self._p27_request_refresh(force=force)
+
+    def _p27_hydrate_cached_payload(self, source_key: str, interval_key: str) -> bool:
+        if source_key not in P27_HOLDINGS_ETFS:
+            return False
+        cached = self._get_up_down_data_service().load_cached_payload(source_key, interval_key)
+        if cached is None:
+            return False
+        payload, metadata = cached
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        self._p27_payload_cache[cache_key] = payload
+        self._p27_cache_metadata[cache_key] = metadata
+        return True
+
+    def _p27_new_request_token(self, cache_key: tuple[Any, ...]) -> int:
+        self._p27_request_seq += 1
+        request_id = self._p27_request_seq
+        self._p27_active_request = request_id
+        self._p27_request_tokens[cache_key] = request_id
+        return request_id
+
+    def _p27_request_is_current(self, request_id: Any, source_key: str, interval_key: str) -> bool:
+        if getattr(self, "_p27_closed", False):
+            return False
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        return int(request_id) == int(self._p27_request_tokens.get(cache_key, -1))
+
+    def _p27_update_refresh_button(self) -> None:
+        if not hasattr(self, "p27_refresh_btn"):
+            return
+        active_key = self._p27_cache_key()
+        self.p27_refresh_btn.setEnabled(active_key not in getattr(self, "_p27_inflight_keys", set()))
 
     def _p27_request_refresh(self, *, force: bool = False, source: Any = None) -> bool:
         source_key = str(source or getattr(self, "p27_active_source", "portfolio") or "portfolio").strip().lower()
         if source_key not in P27_SOURCE_LABELS:
             source_key = "portfolio"
         interval_key = str(getattr(self, "p27_interval_key", "1d") or "1d").strip().lower()
-        if getattr(self, "_p27_fetching", False) and not force:
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        if cache_key in getattr(self, "_p27_inflight_keys", set()):
             return False
         symbols, names = self._p27_source_symbols(source_key)
-        if source_key != "spy" and not symbols:
+        request_id = self._p27_new_request_token(cache_key)
+        if source_key not in P27_HOLDINGS_ETFS and not symbols:
             payload = {"rows": [], "missing": [], "source": "Yahoo Finance", "as_of": ""}
-            self._p27_payload_cache[self._p27_cache_key(source_key, interval_key, symbols)] = payload
+            self._p27_payload_cache[cache_key] = payload
+            self._p27_cache_metadata[cache_key] = {"fresh": True, "cache_age_seconds": 0.0}
             self._p27_render_payload(source_key, payload)
             self._p27_set_status(f"No {P27_SOURCE_LABELS[source_key].lower()} tickers to load.", "warning")
             return False
-        self._p27_request_seq += 1
-        request_id = self._p27_request_seq
-        self._p27_active_request = request_id
+        self._p27_inflight_keys.add(cache_key)
         self._p27_fetching = True
-        if hasattr(self, "p27_refresh_btn"):
-            self.p27_refresh_btn.setEnabled(False)
-        self._p27_set_status(f"Loading {P27_SOURCE_LABELS[source_key]} {UP_DOWN_INTERVAL_LABELS.get(interval_key, interval_key.upper())} up/down counts...", "warning")
+        self._p27_target_fetching = False
+        self._p27_update_refresh_button()
+        if not force and cache_key in self._p27_payload_cache:
+            metadata = self._p27_cache_metadata.get(cache_key, {})
+            age_text = self._p27_format_cache_age(metadata.get("cache_age_seconds"))
+            self._p27_set_status(
+                f"Showing cached {P27_SOURCE_LABELS[source_key]} data ({age_text} old); refreshing in the background...",
+                "warning",
+            )
+        else:
+            self._p27_set_status(f"Loading {P27_SOURCE_LABELS[source_key]} {UP_DOWN_INTERVAL_LABELS.get(interval_key, interval_key.upper())} up/down counts...", "warning")
 
         def _run() -> None:
             try:
                 fetch_symbols = symbols
                 fetch_names = names
-                if source_key == "spy":
-                    fetch_symbols, fetch_names = self._p27_load_spy_holdings_symbols()
+                holdings_symbol = P27_HOLDINGS_ETFS.get(source_key)
+                if holdings_symbol:
+                    fetch_symbols, fetch_names = self._p27_load_etf_holdings_symbols(holdings_symbol, force_refresh=force)
                 payload = self._get_up_down_data_service().fetch(fetch_symbols, interval_key, names=fetch_names)
                 payload["source_key"] = source_key
                 payload["symbols"] = list(fetch_symbols)
-                self._invoke_main.emit(lambda result=payload, req=request_id, src=source_key, interval=interval_key: self._p27_apply_result(req, src, interval, result))
+                self._invoke_main.emit(lambda result=payload, req=request_id, src=source_key, interval=interval_key, forced=force: self._p27_apply_result(req, src, interval, result, force_refresh=forced))
             except Exception as exc:
-                self._invoke_main.emit(lambda message=str(exc), req=request_id, src=source_key: self._p27_handle_error(req, src, message))
+                self._invoke_main.emit(lambda message=str(exc), req=request_id, src=source_key, interval=interval_key: self._p27_handle_error(req, src, interval, message))
 
         executor = getattr(self, "_p27_executor", None)
         if executor is None:
@@ -297,31 +380,46 @@ class UpDownPageMixin:
         executor.submit(_run)
         return True
 
-    def _p27_apply_result(self, request_id: Any, source_key: str, interval_key: str, payload: Any) -> None:
-        if int(request_id) != int(getattr(self, "_p27_active_request", 0)):
+    def _p27_apply_result(self, request_id: Any, source_key: str, interval_key: str, payload: Any, *, force_refresh: bool = False) -> None:
+        if not self._p27_request_is_current(request_id, source_key, interval_key):
             return
-        self._p27_fetching = False
-        if hasattr(self, "p27_refresh_btn"):
-            self.p27_refresh_btn.setEnabled(True)
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        self._p27_inflight_keys.discard(cache_key)
+        self._p27_fetching = bool(self._p27_inflight_keys)
+        self._p27_update_refresh_button()
         clean_payload = payload if isinstance(payload, dict) else {}
         symbols = clean_payload.get("symbols", self._p27_source_symbols(source_key)[0])
-        self._p27_payload_cache[self._p27_cache_key(source_key, interval_key, symbols)] = clean_payload
+        cache_key = self._p27_cache_key(source_key, interval_key, symbols)
+        self._p27_payload_cache[cache_key] = clean_payload
+        self._p27_cache_metadata[cache_key] = {"fresh": True, "cache_age_seconds": 0.0}
+        if source_key in P27_HOLDINGS_ETFS:
+            self._get_up_down_data_service().save_cached_payload(source_key, interval_key, clean_payload)
         self._p27_render_payload(source_key, clean_payload)
         rows = clean_payload.get("rows", []) if isinstance(clean_payload, dict) else []
         missing = clean_payload.get("missing", []) if isinstance(clean_payload, dict) else []
         label = P27_SOURCE_LABELS.get(source_key, source_key)
-        if missing:
-            self._p27_set_status(f"Loaded {len(rows)} {label} ticker(s); {len(missing)} missing.", "warning")
+        if rows:
+            suffix = f"; {len(missing)} missing" if missing else ""
+            if source_key == self.p27_active_source and interval_key == self.p27_interval_key:
+                self._p27_set_status(f"Loaded {len(rows)} {label} ticker(s){suffix}; loading price targets...", "warning")
+            self._p27_request_price_targets(request_id, source_key, interval_key, clean_payload, force_refresh=force_refresh)
+        elif missing:
+            if source_key == self.p27_active_source and interval_key == self.p27_interval_key:
+                self._p27_set_status(f"Loaded 0 {label} ticker(s); {len(missing)} missing.", "warning")
         else:
-            self._p27_set_status(f"Loaded {len(rows)} {label} ticker(s).", "positive")
+            if source_key == self.p27_active_source and interval_key == self.p27_interval_key:
+                self._p27_set_status(f"Loaded 0 {label} ticker(s).", "positive")
 
-    def _p27_handle_error(self, request_id: Any, source_key: str, message: Any) -> None:
-        if int(request_id) != int(getattr(self, "_p27_active_request", 0)):
+    def _p27_handle_error(self, request_id: Any, source_key: str, interval_key: str, message: Any) -> None:
+        if not self._p27_request_is_current(request_id, source_key, interval_key):
             return
-        self._p27_fetching = False
-        if hasattr(self, "p27_refresh_btn"):
-            self.p27_refresh_btn.setEnabled(True)
-        self._p27_set_status(f"Up/Down load failed for {P27_SOURCE_LABELS.get(source_key, source_key)}: {message}", "warning")
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        self._p27_inflight_keys.discard(cache_key)
+        self._p27_fetching = bool(self._p27_inflight_keys)
+        self._p27_update_refresh_button()
+        if source_key == self.p27_active_source and interval_key == self.p27_interval_key:
+            prefix = "Cached data retained; " if cache_key in self._p27_payload_cache else ""
+            self._p27_set_status(f"{prefix}Up/Down load failed for {P27_SOURCE_LABELS.get(source_key, source_key)}: {message}", "warning")
 
     def _p27_render_payload(self, source_key: str, payload: Any) -> None:
         table = self._p27_tables.get(source_key)
@@ -354,6 +452,10 @@ class UpDownPageMixin:
             table.setRowCount(len(rows))
 
         def _apply(row_index: int, row: dict[str, Any]) -> None:
+            target_text, target_upside = self._p27_price_target_display(
+                row.get("last_close"),
+                row.get("price_target_mean"),
+            )
             values = (
                 row_index + 1,
                 str(row.get("ticker") or ""),
@@ -363,6 +465,7 @@ class UpDownPageMixin:
                 row.get("trading_days"),
                 row.get("days_up"),
                 row.get("days_down"),
+                target_text,
             )
             numerics = {
                 0: row_index + 1,
@@ -371,12 +474,16 @@ class UpDownPageMixin:
                 5: row.get("trading_days"),
                 6: row.get("days_up"),
                 7: row.get("days_down"),
+                8: target_upside,
             }
             for column, value in enumerate(values):
                 item = _P27NumericItem(str(value if value is not None else "N/A")) if column in numerics else QTableWidgetItem(str(value))
                 if column in numerics:
                     item.setData(P27_NUMERIC_ROLE, self._p27_sort_value(numerics.get(column)))
-                if column in {0, 3, 4, 5, 6, 7}:
+                if column == 8:
+                    color_token = "text_muted" if target_upside is None else ("accent_positive" if target_upside >= 0 else "accent_negative")
+                    item.setForeground(self.theme_qcolor(color_token))
+                if column in {0, 3, 4, 5, 6, 7, 8}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row_index, column, item)
 
@@ -428,6 +535,152 @@ class UpDownPageMixin:
             is_visible=lambda: self._p27_page_is_visible() and source_key == self.p27_active_source,
         )
 
+    def _p27_request_price_targets(
+        self,
+        request_id: int,
+        source_key: str,
+        interval_key: str,
+        payload: dict[str, Any],
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        if self._p27_target_request_tokens.get(cache_key) == int(request_id):
+            return
+        symbols = [
+            str(row.get("ticker") or "")
+            for row in list(payload.get("rows", []))
+            if isinstance(row, dict) and (force_refresh or "price_target_mean" not in row)
+        ]
+        if not symbols:
+            return
+        self._p27_target_request_tokens[cache_key] = int(request_id)
+        self._p27_target_fetching = True
+
+        def _run() -> None:
+            available = 0
+            resolved = 0
+            service = self._get_up_down_data_service()
+            try:
+                for batch in service.iter_price_target_batches(
+                    symbols,
+                    cancel_check=lambda: not self._p27_request_is_current(request_id, source_key, interval_key),
+                    force_refresh=force_refresh,
+                ):
+                    resolved += len(batch)
+                    available += sum(target is not None for target in batch.values())
+                    self._invoke_main.emit(
+                        lambda values=dict(batch), req=request_id, src=source_key, interval=interval_key:
+                        self._p27_apply_target_batch(req, src, interval, values)
+                    )
+            except Exception as exc:
+                logger.info("Up/Down price target stage failed: %s", exc)
+            self._invoke_main.emit(
+                lambda req=request_id, src=source_key, interval=interval_key, count=available, total=resolved:
+                self._p27_finish_price_targets(req, src, interval, count, total)
+            )
+
+        executor = getattr(self, "_p27_target_executor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            self._p27_target_executor = executor
+        executor.submit(_run)
+
+    def _p27_apply_target_batch(
+        self,
+        request_id: Any,
+        source_key: str,
+        interval_key: str,
+        targets: dict[str, float | None],
+    ) -> None:
+        if not self._p27_request_is_current(request_id, source_key, interval_key):
+            return
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        payload = self._p27_payload_cache.get(cache_key)
+        if not isinstance(payload, dict):
+            return
+        display: dict[str, tuple[str, float | None]] = {}
+        for row in list(payload.get("rows", [])):
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("ticker") or "").upper().strip()
+            if symbol not in targets:
+                continue
+            row["price_target_mean"] = targets[symbol]
+            text, upside = self._p27_price_target_display(row.get("last_close"), targets[symbol])
+            row["price_target_upside_pct"] = upside
+            display[symbol] = (text, upside)
+        self._p27_update_target_cells(source_key, display)
+
+    def _p27_update_target_cells(self, source_key: str, display: dict[str, tuple[str, float | None]]) -> None:
+        table = self._p27_tables.get(source_key)
+        if table is None or not display or not self._p27_page_is_visible() or source_key != self.p27_active_source:
+            return
+        sorting_enabled = bool(table.isSortingEnabled())
+        sort_column = int(table.horizontalHeader().sortIndicatorSection())
+        sort_order = table.horizontalHeader().sortIndicatorOrder()
+        selected_ticker = ""
+        if table.currentRow() >= 0 and table.item(table.currentRow(), 1) is not None:
+            selected_ticker = table.item(table.currentRow(), 1).text()
+        previous_signals = table.blockSignals(True)
+        table.setSortingEnabled(False)
+        try:
+            for row_index in range(table.rowCount()):
+                ticker_item = table.item(row_index, 1)
+                symbol = str(ticker_item.text() if ticker_item else "").upper().strip()
+                if symbol not in display:
+                    continue
+                text, upside = display[symbol]
+                item = _P27NumericItem(text)
+                item.setData(P27_NUMERIC_ROLE, self._p27_sort_value(upside))
+                color_token = "text_muted" if upside is None else ("accent_positive" if upside >= 0 else "accent_negative")
+                item.setForeground(self.theme_qcolor(color_token))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, 8, item)
+        finally:
+            if sorting_enabled:
+                table.setSortingEnabled(True)
+                if sort_column >= 0:
+                    table.sortItems(sort_column, sort_order)
+            table.blockSignals(previous_signals)
+        if selected_ticker:
+            for row_index in range(table.rowCount()):
+                ticker_item = table.item(row_index, 1)
+                if ticker_item is not None and ticker_item.text() == selected_ticker:
+                    table.selectRow(row_index)
+                    break
+
+    def _p27_finish_price_targets(
+        self,
+        request_id: Any,
+        source_key: str,
+        interval_key: str,
+        available: int,
+        resolved: int,
+    ) -> None:
+        cache_key = self._p27_cache_key(source_key, interval_key)
+        if int(request_id) != int(self._p27_target_request_tokens.get(cache_key, -1)):
+            return
+        self._p27_target_request_tokens.pop(cache_key, None)
+        self._p27_target_fetching = bool(self._p27_target_request_tokens)
+        if not self._p27_request_is_current(request_id, source_key, interval_key):
+            return
+        label = P27_SOURCE_LABELS.get(source_key, source_key)
+        payload = self._p27_payload_cache.get(cache_key) or {}
+        if isinstance(payload, dict):
+            payload["price_targets_as_of"] = datetime.datetime.now().isoformat(timespec="seconds")
+            if source_key in P27_HOLDINGS_ETFS:
+                self._get_up_down_data_service().save_cached_payload(source_key, interval_key, payload)
+        row_count = len(payload.get("rows", [])) if isinstance(payload, dict) else 0
+        missing_count = len(payload.get("missing", [])) if isinstance(payload, dict) else 0
+        suffix = f"; {missing_count} missing" if missing_count else ""
+        status = "positive" if available > 0 or resolved == 0 else "warning"
+        if source_key == self.p27_active_source and interval_key == self.p27_interval_key:
+            self._p27_set_status(
+                f"Loaded {row_count} {label} ticker(s){suffix}; price targets available for {available}/{resolved}.",
+                status,
+            )
+
     def _p27_source_symbols(self, source_key: str) -> tuple[list[str], dict[str, str]]:
         if source_key == "portfolio":
             if hasattr(self, "_p4_heatmap_stock_symbols"):
@@ -441,10 +694,35 @@ class UpDownPageMixin:
             return list(getattr(self, "p27_custom_symbols", [])), {}
         return [], {}
 
-    def _p27_load_spy_holdings_symbols(self) -> tuple[list[str], dict[str, str]]:
+    def _p27_load_etf_holdings_symbols(self, etf_symbol: Any, *, force_refresh: bool = False) -> tuple[list[str], dict[str, str]]:
         from budget_terminal_app.etf_holdings import EtfHoldingsService
 
-        result = EtfHoldingsService().load("SPY")
+        symbol_key = str(etf_symbol or "").upper().strip()
+        service = self._get_up_down_data_service()
+        if not force_refresh:
+            cached = service.load_cached_holdings(symbol_key, fresh_only=True)
+            if cached is not None:
+                payload, _metadata = cached
+                return normalize_up_down_symbols(payload.get("symbols", [])), {
+                    str(key).upper().strip(): str(value or "").strip()
+                    for key, value in dict(payload.get("names", {}) or {}).items()
+                }
+        try:
+            result = EtfHoldingsService().load(symbol_key, enrich=False)
+        except Exception:
+            stale = service.load_cached_holdings(symbol_key, fresh_only=False)
+            if stale is None:
+                raise
+            payload, metadata = stale
+            logger.info(
+                "Using stale Up/Down %s holdings cache after live load failure (age %.0fs).",
+                symbol_key,
+                float(metadata.get("cache_age_seconds", 0.0) or 0.0),
+            )
+            return normalize_up_down_symbols(payload.get("symbols", [])), {
+                str(key).upper().strip(): str(value or "").strip()
+                for key, value in dict(payload.get("names", {}) or {}).items()
+            }
         symbols: list[str] = []
         names: dict[str, str] = {}
         for holding in list(getattr(result, "holdings", []) or []):
@@ -456,13 +734,15 @@ class UpDownPageMixin:
             name = str(getattr(holding, "name", "") or "").strip()
             if name:
                 names[symbol] = name
+        service.save_cached_holdings(symbol_key, symbols, names)
         return symbols, names
 
     def _p27_cache_key(self, source_key: Any = None, interval_key: Any = None, symbols: Any = None) -> tuple[Any, ...]:
         source = str(source_key or getattr(self, "p27_active_source", "portfolio") or "portfolio").strip().lower()
         interval = str(interval_key or getattr(self, "p27_interval_key", "1d") or "1d").strip().lower()
-        if source == "spy":
-            symbol_key: tuple[str, ...] = ("SPY_HOLDINGS",)
+        holdings_symbol = P27_HOLDINGS_ETFS.get(source)
+        if holdings_symbol:
+            symbol_key: tuple[str, ...] = (f"{holdings_symbol}_HOLDINGS",)
         elif symbols is None:
             symbol_key = tuple(self._p27_source_symbols(source)[0])
         else:
@@ -475,6 +755,24 @@ class UpDownPageMixin:
             key: value for key, value in getattr(self, "_p27_payload_cache", {}).items()
             if not (isinstance(key, tuple) and key and key[0] == source)
         }
+        self._p27_cache_metadata = {
+            key: value for key, value in getattr(self, "_p27_cache_metadata", {}).items()
+            if not (isinstance(key, tuple) and key and key[0] == source)
+        }
+
+    @staticmethod
+    def _p27_format_cache_age(value: Any) -> str:
+        try:
+            seconds = max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return "recently"
+        if seconds < 60:
+            return "under a minute"
+        if seconds < 3600:
+            return f"{max(1, int(seconds // 60))}m"
+        if seconds < 86400:
+            return f"{max(1, int(seconds // 3600))}h"
+        return f"{max(1, int(seconds // 86400))}d"
 
     @staticmethod
     def _p27_sort_value(value: Any) -> float:
@@ -503,3 +801,10 @@ class UpDownPageMixin:
         if not math.isfinite(numeric):
             return "N/A"
         return f"{numeric:+.2f}%"
+
+    @staticmethod
+    def _p27_price_target_display(current_price: Any, target: Any) -> tuple[str, float | None]:
+        text, upside = analyst_target_cell_text_and_sort(current_price, target)
+        if text in {"--", "N/A"} or not math.isfinite(float(upside)):
+            return "N/A", None
+        return text, float(upside)

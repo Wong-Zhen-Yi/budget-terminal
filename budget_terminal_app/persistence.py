@@ -114,7 +114,7 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
@@ -783,7 +783,7 @@ def _normalize_up_down_page_settings(settings: Any) -> dict[str, Any]:
     """Normalize persisted Up/Down page settings."""
     saved = settings if isinstance(settings, dict) else {}
     active_source = str(saved.get('active_source', DEFAULT_UP_DOWN_PAGE_SETTINGS['active_source']) or '').strip().lower()
-    if active_source not in {'portfolio', 'spy', 'custom'}:
+    if active_source not in {'portfolio', 'spy', 'qqq', 'custom'}:
         active_source = DEFAULT_UP_DOWN_PAGE_SETTINGS['active_source']
     interval_key = str(saved.get('interval_key', DEFAULT_UP_DOWN_PAGE_SETTINGS['interval_key']) or '').strip().lower()
     if interval_key not in {'1d', '5d', '30d', 'ytd', '1y'}:
@@ -801,6 +801,7 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
     valid_indexes = set(DEFAULT_NAVIGATION_PAGE_ORDER)
     order = []
     raw_order = saved.get('page_order', DEFAULT_NAVIGATION_PAGE_ORDER)
+    had_retired_signal_scanner = isinstance(raw_order, list) and (38 in raw_order or '38' in raw_order)
     if isinstance(raw_order, list):
         for value in raw_order:
             try:
@@ -809,6 +810,9 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 continue
             if page_index in valid_indexes and page_index not in order:
                 order.append(page_index)
+    if had_retired_signal_scanner and 19 in order and 39 in order:
+        order.remove(39)
+        order.insert(order.index(19) + 1, 39)
     for page_index in DEFAULT_NAVIGATION_PAGE_ORDER:
         if page_index not in order:
             if page_index == 25 and 0 in order:
@@ -818,9 +822,12 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
             elif page_index == 27 and 9 in order:
                 order.insert(order.index(9) + 1, page_index)
             elif page_index == 29 and 19 in order:
-                order.insert(order.index(19) + 1, page_index)
+                anchor = 39 if 39 in order else 19
+                order.insert(order.index(anchor) + 1, page_index)
             elif page_index == 33 and 5 in order:
                 order.insert(order.index(5) + 1, page_index)
+            elif page_index == 39 and 19 in order:
+                order.insert(order.index(19) + 1, page_index)
             elif page_index == 37 and SETTINGS_PAGE_INDEX in order:
                 order.insert(order.index(SETTINGS_PAGE_INDEX), page_index)
             else:
@@ -1477,6 +1484,8 @@ def _normalize_indicator_list(
             text = 'Support/Resistance'
         elif normalized in ('FIB', 'FIBONACCI', 'FIBONACCIRETRACEMENT', 'AUTOFIBONACCI', 'FIBRETRACEMENT'):
             text = 'Fib Retracement'
+        elif normalized in ('CURSOR', 'CROSSHAIR'):
+            text = 'Cursor'
         else:
             text = ''
         if text and text not in indicators:
@@ -1484,7 +1493,7 @@ def _normalize_indicator_list(
     if ensure_ma200 and '200 MA' not in indicators:
         indicators.append('200 MA')
     ordered = []
-    for indicator in ('Volume', 'RSI', '200 MA', 'Avg Price', 'Support/Resistance', 'Fib Retracement'):
+    for indicator in ('Volume', 'RSI', '200 MA', 'Avg Price', 'Support/Resistance', 'Fib Retracement', 'Cursor'):
         if indicator in indicators and indicator not in ordered:
             ordered.append(indicator)
     return ordered or list(default_indicators)

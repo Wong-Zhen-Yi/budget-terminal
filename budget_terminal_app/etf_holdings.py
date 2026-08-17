@@ -817,7 +817,7 @@ class EtfHoldingsService:
             return f"{number / 1_000:.2f}K"
         return f"{number:.2f}"
 
-    def load(self, ticker: str) -> EtfHoldingsResult:
+    def load(self, ticker: str, *, enrich: bool = True) -> EtfHoldingsResult:
         symbol = str(ticker or "").upper().strip()
         if not symbol:
             raise EtfHoldingsError("Ticker is required.")
@@ -832,7 +832,8 @@ class EtfHoldingsService:
                 errors.append(f"{provider.issuer}: {exc}")
                 continue
             if result is not None:
-                result = self._enrich_with_yfinance(result)
+                if enrich:
+                    result = self._enrich_with_yfinance(result)
                 result.holdings.sort(key=lambda row: row.weight if row.weight is not None else -1.0, reverse=True)
                 return result
         fallback = self._load_yfinance_fallback(symbol)
