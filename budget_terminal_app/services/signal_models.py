@@ -20,6 +20,10 @@ class TradeStatus(str, Enum):
     WATCH = "WATCH"
     VALID_LONG = "VALID_LONG"
     TOO_EXTENDED = "TOO_EXTENDED"
+    #: The feed answered correctly but the symbol is too young to score — a recent listing cannot
+    #: have a 200-bar average. Kept apart from DATA_ERROR so a healthy fetch is never reported as
+    #: a failure.
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
     DATA_ERROR = "DATA_ERROR"
 
 
@@ -46,6 +50,11 @@ class SignalConfig:
     relative_volume_threshold: float = 1.5
     breakout_lookback: int = 20
     max_vwap_extension_pct: float = 3.0
+    #: Score the context timeframes on the last closed bar. The volume and breakout rules compare
+    #: the scored bar against averages built from completed bars, so including a partially formed
+    #: bar makes those comparisons meaningless and the score flicker within a single bar. The entry
+    #: role deliberately keeps the live bar because it supplies the current price and VWAP distance.
+    score_on_completed_bars: bool = True
     price_above_ema_fast_weight: float = 1.0
     ema_alignment_weight: float = 1.0
     price_above_ema_long_weight: float = 1.0
@@ -129,6 +138,9 @@ class SignalResult:
     warnings: list[str] = field(default_factory=list)
     indicators: dict[str, float | str | None] = field(default_factory=dict)
     timeframe_status: dict[str, str] = field(default_factory=dict)
+    #: Per-role bar provenance: ``{"as_of": iso_string|None, "partial": bool, "dropped": bool}``.
+    #: ``dropped`` records that a still-forming bar was excluded from scoring.
+    timeframe_bars: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: str = ""
 
     @property

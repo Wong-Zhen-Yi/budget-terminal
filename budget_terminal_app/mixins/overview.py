@@ -874,6 +874,7 @@ class OverviewMixin:
         return_key = _P20_DOT_RETURN_FIELDS.get(metric_key, 'one_day_price_return_pct')
         plot.clear()
         self._p20_dot_scatter_item = None
+        self._p20_dot_regression_line = None
         self._p20_dot_label_items = []
         plot.setLabel('left', 'Market Cap')
         plot.setLabel('bottom', axis_label)
@@ -941,6 +942,15 @@ class OverviewMixin:
             label.setPos(x_value, y_value)
             plot.addItem(label)
             self._p20_dot_label_items.append(label)
+        reg = self._p20_regression_line_data(xs, ys)
+        if reg is not None:
+            line_xs, line_ys = reg
+            reg_pen = (
+                self.theme_pen('chart_ma', width=1.5, style=Qt.PenStyle.DashLine)
+                if hasattr(self, 'theme_pen')
+                else pg.mkPen('#f3b54a', width=1.5, style=Qt.PenStyle.DashLine)
+            )
+            self._p20_dot_regression_line = plot.plot(line_xs, line_ys, pen=reg_pen)
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
         x_padding = max((max_x - min_x) * 0.08, 0.08)
@@ -1180,6 +1190,8 @@ class OverviewMixin:
         spot_pen = self.theme_pen('chart_reference', width=0.6) if hasattr(self, 'theme_pen') else pg.mkPen('#9aa4b2', width=0.6)
         spots: list[dict[str, Any]] = []
         frame_points: list[tuple[float, float, str]] = []
+        frame_xs: list[float] = []
+        frame_ys: list[float] = []
         for entry_index, entry in enumerate(entries):
             values = entry['aligned_values']
             left_value = values[left_index]
@@ -1201,9 +1213,18 @@ class OverviewMixin:
                 'data': tooltip_payload,
             })
             frame_points.append((entry['volume_value'], market_cap, entry['ticker']))
+            frame_xs.append(entry['x_log'])
+            frame_ys.append(log_market_cap)
             if entry_index < len(self._p20_dot_label_items):
                 self._p20_dot_label_items[entry_index].setPos(entry['x_log'], log_market_cap)
         scatter.setData(spots=spots)
+        reg_line = getattr(self, '_p20_dot_regression_line', None)
+        if reg_line is not None:
+            reg = self._p20_regression_line_data(frame_xs, frame_ys)
+            if reg is not None:
+                reg_line.setData(reg[0], reg[1])
+            else:
+                reg_line.setData([], [])
         self._p20_market_cap_animation_frame_points = frame_points
         label = getattr(self, 'p20_market_cap_animation_lbl', None)
         if label is not None:
@@ -1246,6 +1267,26 @@ class OverviewMixin:
             'neutral': '#9aa4b2',
         }.get(state, '#9aa4b2')
         return pg.mkBrush(fallback)
+
+    def _p20_regression_line_data(
+        self, xs: list[float], ys: list[float],
+    ) -> tuple[list[float], list[float]] | None:
+        """Return ([x_min, x_max], [y_min, y_max]) for a least-squares fit, or *None*."""
+        n = len(xs)
+        if n < 2 or len(ys) < 2:
+            return None
+        x_mean = sum(xs) / n
+        y_mean = sum(ys) / n
+        centered_x = [x - x_mean for x in xs]
+        denominator = sum(cx * cx for cx in centered_x)
+        if not math.isfinite(denominator) or denominator <= 0.0:
+            return None
+        beta = sum(cx * (y - y_mean) for cx, y in zip(centered_x, ys)) / denominator
+        alpha = y_mean - beta * x_mean
+        if not math.isfinite(beta) or not math.isfinite(alpha):
+            return None
+        x_min, x_max = min(xs), max(xs)
+        return [x_min, x_max], [alpha + beta * x_min, alpha + beta * x_max]
 
     def _p20_is_loggable_value(self, value: Any) -> bool:
         try:

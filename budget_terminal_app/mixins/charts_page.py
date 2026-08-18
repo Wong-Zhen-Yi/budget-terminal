@@ -14,6 +14,7 @@ from ..compat import (
     QFrame,
     QGraphicsItem,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QKeySequence,
     QLabel,
@@ -29,6 +30,7 @@ from ..compat import (
     QSpinBox,
     QSplitter,
     QShortcut,
+    QTableWidget,
     QTabWidget,
     QTimer,
     QToolButton,
@@ -51,7 +53,12 @@ from budget_terminal_app.data_service.results import (
     market_data_errors,
     market_data_meta,
 )
+from budget_terminal_app.mixins.compare_presenters import build_correlation_headers, build_correlation_rows
 from budget_terminal_app.services.chart_data import ChartDataService
+from budget_terminal_app.services.compare_analysis import (
+    COMPARE_CORRELATION_MIN_OBSERVATIONS,
+    build_compare_correlation_matrix,
+)
 from budget_terminal_app.services.relationship_analysis import (
     RELATIONSHIP_MIN_OBSERVATIONS,
     build_relationship_analysis,
@@ -64,6 +71,7 @@ from budget_terminal_app.services.technical_analysis import (
     calculate_rsi_average,
 )
 from budget_terminal_app.widgets.chart_workspace import NativeChartDrawingController
+from budget_terminal_app.widgets.table_render import render_table_rows
 from budget_terminal_app.widgets.chart_pattern_cheat_sheet import ChartPatternCheatSheet
 from budget_terminal_app.widgets.relationship_lab import RelationshipLabWidget
 
@@ -130,6 +138,9 @@ P10_POLL_OPTIONS = {
     '30s': 30,
     '60s': 60,
 }
+P10_COMPARE_CORRELATION_ROW_HEIGHT = 24
+P10_COMPARE_CORRELATION_MAX_VISIBLE_ROWS = 4
+P10_COMPARE_CORRELATION_MIN_COLUMN_WIDTH = 56
 P10_COMPARE_INTERVAL_OPTIONS = [
     ('1 Day', '1d'),
     ('1 Week', '1wk'),
@@ -283,6 +294,7 @@ class ChartsPageMixin:
         self.p10_compare_interval_label = str(state.get('compare_interval_label', '1 Day') or '1 Day')
         self.p10_compare_range_label = str(state.get('compare_range_label', '5Y') or '5Y')
         self.p10_compare_interval_labels_enabled = bool(state.get('compare_interval_labels_enabled', True))
+        self.p10_compare_correlation_visible = bool(state.get('compare_correlation_visible', True))
         self.p10_custom_watchlist = list(state.get('watchlist', []))
         self.p10_compare_symbols = list(state.get('compare_symbols', []))
         self.p10_compare_presets = list(state.get('compare_presets', []))
@@ -386,6 +398,7 @@ class ChartsPageMixin:
         self._p10_compare_interval_label_items = {}
         self._p10_compare_zero_line = None
         self._p10_compare_render_signature = None
+        self._p10_compare_separators = []
         self._p10_compare_executor = ThreadPoolExecutor(max_workers=P10_COMPARE_MAX_WORKERS)
         self._p10_multi_interval_executor = ThreadPoolExecutor(max_workers=P10_MULTI_INTERVAL_MAX_WORKERS)
         self._p10_multi_interval_request_token = 0
@@ -952,84 +965,130 @@ class ChartsPageMixin:
         self.p10_multi_interval_panel_widgets = {}
         layout.addWidget(self.p10_multi_interval_scroll, 1)
 
+    def _p10_compare_toolbar_separator(self) -> Any:
+        """Create one themed vertical separator for the Compare toolbar rows."""
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFrameShadow(QFrame.Shadow.Plain)
+        separator.setFixedWidth(1)
+        self._p10_compare_separators.append(separator)
+        return separator
+
+    def _p10_apply_compare_separator_theme(self) -> None:
+        """Repaint the Compare toolbar separators after a theme change."""
+        border = self.theme_color('panel_border')
+        for separator in list(getattr(self, '_p10_compare_separators', [])):
+            try:
+                separator.setStyleSheet(f'color: {border}; background: {border}; border: none;')
+            except RuntimeError:
+                continue
+
     def _p10_build_compare_tab(self) -> None:
         """Build the multi-symbol comparison subtab."""
         layout = QVBoxLayout(self.p10_compare_tab)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        toolbar = QHBoxLayout()
+        toolbar = QVBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
+
+        symbol_row = QHBoxLayout()
+        symbol_row.setSpacing(6)
         title = QLabel('<b>Compare</b>')
         self.set_theme_role(title, 'page_title')
+        symbol_row.addWidget(title)
+        symbol_row.addWidget(self._p10_compare_toolbar_separator())
         self.p10_compare_input = QLineEdit()
         self.p10_compare_input.setPlaceholderText('Ticker')
-        self.p10_compare_input.setFixedWidth(120)
+        self.p10_compare_input.setMinimumWidth(110)
+        self.p10_compare_input.setMaximumWidth(180)
+        self.p10_compare_input.setToolTip('Type a ticker and press Enter to add it to the comparison.')
         self.p10_compare_input.returnPressed.connect(self._p10_add_compare_symbol)
         self.p10_compare_add_btn = QPushButton('Add')
+        self.p10_compare_add_btn.setToolTip('Add the typed ticker to the comparison.')
         self.set_theme_variant(self.p10_compare_add_btn, 'accent')
         self.p10_compare_add_btn.clicked.connect(self._p10_add_compare_symbol)
         self.p10_compare_remove_btn = QPushButton('Remove')
+        self.p10_compare_remove_btn.setToolTip('Remove the ticker selected in the Symbols list.')
         self.set_theme_variant(self.p10_compare_remove_btn, 'danger')
         self.p10_compare_remove_btn.clicked.connect(self._p10_remove_compare_symbol)
-        toolbar.addWidget(title)
-        toolbar.addSpacing(10)
-        toolbar.addWidget(self.p10_compare_input)
-        toolbar.addWidget(self.p10_compare_add_btn)
-        toolbar.addWidget(self.p10_compare_remove_btn)
-        toolbar.addSpacing(16)
+        symbol_row.addWidget(self.p10_compare_input)
+        symbol_row.addWidget(self.p10_compare_add_btn)
+        symbol_row.addWidget(self.p10_compare_remove_btn)
+        symbol_row.addStretch()
+        self.p10_compare_status_label = QLabel('Add symbols to compare.')
+        self.set_theme_role(self.p10_compare_status_label, 'status_muted')
+        self.p10_compare_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        symbol_row.addWidget(self.p10_compare_status_label)
+        toolbar.addLayout(symbol_row)
+
+        view_row = QHBoxLayout()
+        view_row.setSpacing(6)
         interval_label = QLabel('Interval')
         self.set_theme_role(interval_label, 'muted')
-        toolbar.addWidget(interval_label)
+        view_row.addWidget(interval_label)
         for label, _ in P10_COMPARE_INTERVAL_OPTIONS:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setMinimumHeight(26)
+            btn.setToolTip(f'Sample every compare line at {label.lower()} closes.')
             btn.clicked.connect(partial(self._p10_set_compare_interval, label))
             self._p10_compare_timeframe_group.addButton(btn)
             self._p10_compare_timeframe_buttons[label] = btn
-            toolbar.addWidget(btn)
+            view_row.addWidget(btn)
+        view_row.addWidget(self._p10_compare_toolbar_separator())
+        range_label = QLabel('Range')
+        self.set_theme_role(range_label, 'muted')
+        view_row.addWidget(range_label)
+        self.p10_compare_range_combo = QComboBox()
+        self.p10_compare_range_combo.setMinimumWidth(96)
+        self.p10_compare_range_combo.setToolTip('Lookback window. Every line is rebased to 0% at the start of this range.')
+        for label, period in P10_COMPARE_RANGE_OPTIONS:
+            self.p10_compare_range_combo.addItem(label, period)
+        self.p10_compare_range_combo.currentTextChanged.connect(self._p10_set_compare_range)
+        view_row.addWidget(self.p10_compare_range_combo)
+        view_row.addWidget(self._p10_compare_toolbar_separator())
         self.p10_compare_interval_labels_btn = QPushButton('Interval %')
         self.p10_compare_interval_labels_btn.setCheckable(True)
         self.p10_compare_interval_labels_btn.setMinimumHeight(26)
         self.p10_compare_interval_labels_btn.setToolTip('Show each ticker\'s close-to-close change at every interval point.')
         self.p10_compare_interval_labels_btn.clicked.connect(self._p10_toggle_compare_interval_labels)
-        toolbar.addWidget(self.p10_compare_interval_labels_btn)
+        view_row.addWidget(self.p10_compare_interval_labels_btn)
         self._p10_update_compare_interval_labels_button_style()
-        toolbar.addSpacing(10)
-        range_label = QLabel('Range')
-        self.set_theme_role(range_label, 'muted')
-        toolbar.addWidget(range_label)
-        self.p10_compare_range_combo = QComboBox()
-        self.p10_compare_range_combo.setMinimumWidth(96)
-        for label, period in P10_COMPARE_RANGE_OPTIONS:
-            self.p10_compare_range_combo.addItem(label, period)
-        self.p10_compare_range_combo.currentTextChanged.connect(self._p10_set_compare_range)
-        toolbar.addWidget(self.p10_compare_range_combo)
-        toolbar.addSpacing(10)
+        self.p10_compare_correlation_btn = QPushButton('Correlation')
+        self.p10_compare_correlation_btn.setCheckable(True)
+        self.p10_compare_correlation_btn.setMinimumHeight(26)
+        self.p10_compare_correlation_btn.setToolTip('Show the pairwise correlation matrix above the chart.')
+        self.p10_compare_correlation_btn.clicked.connect(self._p10_toggle_compare_correlation)
+        view_row.addWidget(self.p10_compare_correlation_btn)
+        view_row.addStretch()
+        view_row.addWidget(self._p10_compare_toolbar_separator())
         preset_label = QLabel('Presets')
         self.set_theme_role(preset_label, 'muted')
-        toolbar.addWidget(preset_label)
+        view_row.addWidget(preset_label)
         self.p10_compare_preset_combo = QComboBox()
-        self.p10_compare_preset_combo.setMinimumWidth(170)
+        self.p10_compare_preset_combo.setMinimumWidth(150)
         self.p10_compare_preset_combo.setPlaceholderText('Select preset')
+        self.p10_compare_preset_combo.setToolTip('Load a saved basket of tickers, interval and range.')
         self.p10_compare_preset_combo.currentIndexChanged.connect(self._p10_on_compare_preset_selected)
-        toolbar.addWidget(self.p10_compare_preset_combo)
+        view_row.addWidget(self.p10_compare_preset_combo)
         self.p10_compare_save_preset_btn = QPushButton('New Preset')
+        self.p10_compare_save_preset_btn.setToolTip('Save the current tickers, interval and range as a new preset.')
         self.set_theme_variant(self.p10_compare_save_preset_btn, 'accent')
         self.p10_compare_save_preset_btn.clicked.connect(self._p10_save_compare_preset)
-        toolbar.addWidget(self.p10_compare_save_preset_btn)
+        view_row.addWidget(self.p10_compare_save_preset_btn)
         self.p10_compare_update_preset_btn = QPushButton('Update')
+        self.p10_compare_update_preset_btn.setToolTip('Overwrite the selected preset with the current setup.')
         self.set_theme_variant(self.p10_compare_update_preset_btn, 'accent')
         self.p10_compare_update_preset_btn.clicked.connect(self._p10_update_compare_preset)
-        toolbar.addWidget(self.p10_compare_update_preset_btn)
+        view_row.addWidget(self.p10_compare_update_preset_btn)
         self.p10_compare_delete_preset_btn = QPushButton('Delete')
+        self.p10_compare_delete_preset_btn.setToolTip('Delete the selected preset.')
         self.set_theme_variant(self.p10_compare_delete_preset_btn, 'danger')
         self.p10_compare_delete_preset_btn.clicked.connect(self._p10_delete_compare_preset)
-        toolbar.addWidget(self.p10_compare_delete_preset_btn)
-        toolbar.addStretch()
-        self.p10_compare_status_label = QLabel('Add symbols to compare.')
-        self.set_theme_role(self.p10_compare_status_label, 'status_muted')
-        toolbar.addWidget(self.p10_compare_status_label)
+        view_row.addWidget(self.p10_compare_delete_preset_btn)
+        toolbar.addLayout(view_row)
         layout.addLayout(toolbar)
 
         body_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1044,6 +1103,7 @@ class ChartsPageMixin:
         compare_help.setWordWrap(True)
         self.p10_compare_list = QListWidget()
         self.p10_compare_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.p10_compare_list.setToolTip('Select a ticker, then use Remove to drop it from the comparison.')
         sidebar_layout.addWidget(compare_title)
         sidebar_layout.addWidget(compare_help)
         sidebar_layout.addWidget(self.p10_compare_list, 1)
@@ -1053,6 +1113,7 @@ class ChartsPageMixin:
         chart_layout = QVBoxLayout(chart_container)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.setSpacing(6)
+        self._p10_build_compare_correlation_panel(chart_layout)
         self.p10_compare_empty_label = QLabel('Add one or more tickers to compare normalized performance.')
         self.set_theme_role(self.p10_compare_empty_label, 'muted')
         self.p10_compare_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1085,6 +1146,40 @@ class ChartsPageMixin:
         )
         self.p10_compare_plot.addItem(self._p10_compare_zero_line)
         self._p10_compare_zero_line.hide()
+        self._p10_apply_compare_separator_theme()
+        self._p10_update_compare_correlation_button_style()
+        self._p10_update_compare_correlation(None)
+
+    def _p10_build_compare_correlation_panel(self, chart_layout: Any) -> None:
+        """Build the correlation matrix panel that sits above the compare chart."""
+        self.p10_compare_corr_panel = QFrame()
+        self.set_theme_role(self.p10_compare_corr_panel, 'panel')
+        self.p10_compare_corr_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        panel_layout = QVBoxLayout(self.p10_compare_corr_panel)
+        panel_layout.setContentsMargins(10, 8, 10, 8)
+        panel_layout.setSpacing(4)
+        corr_title = QLabel('Correlation')
+        self.set_theme_role(corr_title, 'card_title')
+        self.p10_compare_corr_panel.setToolTip('Pairwise correlation of interval returns over the selected compare range.')
+        self.p10_compare_corr_message = QLabel('Add at least two tickers to see correlations.')
+        self.set_theme_role(self.p10_compare_corr_message, 'muted')
+        self.p10_compare_corr_message.setWordWrap(True)
+        self.p10_compare_corr_table = QTableWidget(0, 0)
+        self.p10_compare_corr_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.p10_compare_corr_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.p10_compare_corr_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.p10_compare_corr_table.setAlternatingRowColors(False)
+        self.p10_compare_corr_table.setSortingEnabled(False)
+        self.p10_compare_corr_table.setShowGrid(False)
+        self.p10_compare_corr_table.verticalHeader().setVisible(False)
+        self.p10_compare_corr_table.verticalHeader().setDefaultSectionSize(P10_COMPARE_CORRELATION_ROW_HEIGHT)
+        self.p10_compare_corr_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.p10_compare_corr_table.horizontalHeader().setHighlightSections(False)
+        self.p10_compare_corr_table.horizontalHeader().setMinimumSectionSize(P10_COMPARE_CORRELATION_MIN_COLUMN_WIDTH)
+        panel_layout.addWidget(corr_title)
+        panel_layout.addWidget(self.p10_compare_corr_message)
+        panel_layout.addWidget(self.p10_compare_corr_table)
+        chart_layout.addWidget(self.p10_compare_corr_panel)
 
     def _p10_set_status(self, text: Any, status: Any='muted') -> None:
         """Set charts page status text."""
@@ -1129,6 +1224,88 @@ class ChartsPageMixin:
             self._p10_render_compare_chart(self.p10_compare_df, self.p10_compare_interval, force=True)
             return
         self._p10_clear_compare_interval_label_items()
+
+    def _p10_update_compare_correlation_button_style(self) -> None:
+        """Keep the Compare correlation toggle state and theme in sync."""
+        button = getattr(self, 'p10_compare_correlation_btn', None)
+        if button is None:
+            return
+        enabled = bool(getattr(self, 'p10_compare_correlation_visible', True))
+        button.blockSignals(True)
+        button.setChecked(enabled)
+        button.blockSignals(False)
+        self.set_theme_variant(button, 'accent' if enabled else None)
+        button.setProperty('bt_checked', 'true' if enabled else 'false')
+        self._repolish_widget(button)
+
+    def _p10_toggle_compare_correlation(self, checked: Any=False) -> None:
+        """Show or hide the Compare correlation matrix without refetching data."""
+        self.p10_compare_correlation_visible = bool(checked)
+        self._p10_update_compare_correlation_button_style()
+        self._p10_save_state()
+        self._p10_update_compare_correlation(self.p10_compare_df)
+
+    def _p10_compare_correlation_colors(self) -> dict[str, str]:
+        """Return the palette injected into the Qt-free correlation presenters."""
+        return {
+            'positive': self.theme_color('accent_positive'),
+            'negative': self.theme_color('accent_negative'),
+            'neutral': self.theme_color('panel_background'),
+            'header': self.theme_color('table_header_bg'),
+            'text_primary': self.theme_color('text_primary'),
+            'muted': self.theme_color('text_muted'),
+            'contrast_text': self.theme_color('background_primary'),
+        }
+
+    def _p10_compare_correlation_table_height(self) -> int:
+        """Return the constant correlation-table height, sized for the row cap."""
+        table = getattr(self, 'p10_compare_corr_table', None)
+        header_height = P10_COMPARE_CORRELATION_ROW_HEIGHT
+        if table is not None:
+            header_height = max(int(table.horizontalHeader().sizeHint().height()), P10_COMPARE_CORRELATION_ROW_HEIGHT)
+        return header_height + P10_COMPARE_CORRELATION_MAX_VISIBLE_ROWS * P10_COMPARE_CORRELATION_ROW_HEIGHT + 4
+
+    def _p10_compare_correlation_message(self, payload: Any) -> str:
+        """Return the empty-state text for the correlation panel."""
+        message = str(payload.get('message', '') or '') if isinstance(payload, dict) else ''
+        return message or 'Add at least two tickers to see correlations.'
+
+    def _p10_update_compare_correlation(self, frame: Any) -> None:
+        """Rebuild the correlation matrix from the current compare frame."""
+        table = getattr(self, 'p10_compare_corr_table', None)
+        panel = getattr(self, 'p10_compare_corr_panel', None)
+        message_label = getattr(self, 'p10_compare_corr_message', None)
+        if table is None or panel is None or message_label is None:
+            return
+        visible = bool(getattr(self, 'p10_compare_correlation_visible', True))
+        panel.setVisible(visible)
+        if not visible:
+            return
+        payload = build_compare_correlation_matrix(frame, min_observations=COMPARE_CORRELATION_MIN_OBSERVATIONS)
+        symbols = list(payload.get('symbols', []))
+        rows = build_correlation_rows(
+            payload,
+            colors=self._p10_compare_correlation_colors(),
+            series_colors=[self.theme_series_color(index) for index in range(len(symbols))],
+        )
+        if not rows or str(payload.get('message', '') or ''):
+            table.clearContents()
+            table.setRowCount(0)
+            table.setColumnCount(0)
+            table.hide()
+            message_label.setText(self._p10_compare_correlation_message(payload))
+            message_label.show()
+            return
+        message_label.hide()
+        headers = build_correlation_headers(symbols)
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(list(headers))
+        render_table_rows(table, rows)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.setFixedHeight(self._p10_compare_correlation_table_height())
+        table.show()
 
     def _p10_set_multi_interval_status(self, text: Any, status: Any='muted') -> None:
         """Set multi-interval subtab status text."""
@@ -1202,6 +1379,7 @@ class ChartsPageMixin:
             'compare_interval_label': self.p10_compare_interval_label,
             'compare_range_label': self.p10_compare_range_label,
             'compare_interval_labels_enabled': self.p10_compare_interval_labels_enabled,
+            'compare_correlation_visible': self.p10_compare_correlation_visible,
             'watchlist': self.p10_custom_watchlist,
             'compare_symbols': self.p10_compare_symbols,
             'compare_presets': self.p10_compare_presets,
@@ -4572,6 +4750,7 @@ class ChartsPageMixin:
             self._p10_compare_zero_line.setPen(self.theme_pen('chart_reference', width=1, style=Qt.PenStyle.DashLine))
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             self._p10_clear_compare_plot_items()
+            self._p10_update_compare_correlation(None)
             self.p10_compare_empty_label.show()
             return
         render_signature = self._p10_build_compare_render_signature(frame, interval)
@@ -4583,6 +4762,7 @@ class ChartsPageMixin:
         self._p10_compare_render_signature = render_signature
         self.p10_compare_empty_label.hide()
         ordered_frame = frame.sort_index().apply(pd.to_numeric, errors='coerce')
+        self._p10_update_compare_correlation(ordered_frame)
         dates = list(ordered_frame.index)
         x_values = list(range(len(dates)))
         self.p10_compare_axis.set_dates(dates, interval)
@@ -5556,6 +5736,8 @@ class ChartsPageMixin:
             self._repolish_widget(self.p10_playback_btn)
         self._p10_rebuild_watchlists()
         self._p10_refresh_compare_symbol_list()
+        self._p10_apply_compare_separator_theme()
+        self._p10_update_compare_correlation_button_style()
         if self._p10_chart_rows:
             if self._p10_playback_index < len(self._p10_chart_rows) - 1:
                 self._p10_render_playback_frame()

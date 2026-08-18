@@ -42,6 +42,7 @@ DEFAULT_CHART_PAGE_SETTINGS = {
     'compare_interval_label': '1 Day',
     'compare_range_label': '5Y',
     'compare_interval_labels_enabled': True,
+    'compare_correlation_visible': True,
     'watchlist': [],
     'compare_symbols': [],
     'relationship_symbols': [],
@@ -73,6 +74,19 @@ DEFAULT_BACKTEST_PAGE_SETTINGS = {
     'splitter_sizes': [2, 5],
 }
 DEFAULT_GLOBAL_PAGE_SETTINGS = {'interval_label': '1D'}
+DEFAULT_SIGNALS_PAGE_SETTINGS = {'filter': 'all', 'search': ''}
+DEFAULT_QUANT_PAGE_SETTINGS = {
+    'active_tab': 'screener',
+    'screen_filter': 'all',
+    'pair_filter': 'all',
+    'search': '',
+    'pair_left': '',
+    'pair_right': '',
+}
+QUANT_PAGE_TABS = ('screener', 'pairs')
+QUANT_SCREEN_FILTERS = ('all', 'top_quartile', 'momentum', 'oversold', 'overbought', 'low_volatility')
+QUANT_PAIR_FILTERS = ('all', 'stationary', 'stretched', 'fast')
+SIGNALS_PAGE_FILTERS = ('all', 'strong', 'long', 'watch', 'blocked', 'too_new', 'error')
 DEFAULT_UP_DOWN_PAGE_SETTINGS = {'active_source': 'portfolio', 'interval_key': '1d', 'custom_symbols': []}
 DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {'last_ticker': ''}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {
@@ -114,7 +128,7 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 17]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
@@ -828,7 +842,11 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.insert(order.index(5) + 1, page_index)
             elif page_index == 39 and 19 in order:
                 order.insert(order.index(19) + 1, page_index)
-            elif page_index == 37 and SETTINGS_PAGE_INDEX in order:
+            elif page_index == 37 and (40 in order or SETTINGS_PAGE_INDEX in order):
+                # Dictionary sits ahead of Quant, which in turn sits immediately before Settings.
+                # Anchoring both to Settings alone would reverse them whenever only one is missing.
+                order.insert(order.index(40 if 40 in order else SETTINGS_PAGE_INDEX), page_index)
+            elif page_index == 40 and SETTINGS_PAGE_INDEX in order:
                 order.insert(order.index(SETTINGS_PAGE_INDEX), page_index)
             else:
                 order.append(page_index)
@@ -925,6 +943,8 @@ def _default_user_data_document() -> Any:
         'charts_options_top_volume_page': DEFAULT_CHARTS_OPTIONS_TOP_VOLUME_PAGE_SETTINGS.copy(),
         'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
         'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
+        'signals_page': DEFAULT_SIGNALS_PAGE_SETTINGS.copy(),
+        'quant_page': DEFAULT_QUANT_PAGE_SETTINGS.copy(),
         'up_down_page': _normalize_up_down_page_settings(DEFAULT_UP_DOWN_PAGE_SETTINGS),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -973,6 +993,8 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'charts_options_top_volume_page': _normalize_charts_options_top_volume_page_settings(saved.get('charts_options_top_volume_page', default['charts_options_top_volume_page'])),
         'backtest_page': _normalize_backtest_page_settings(saved.get('backtest_page', default['backtest_page'])),
         'global_page': _normalize_global_page_settings(saved.get('global_page', default['global_page'])),
+        'signals_page': _normalize_signals_page_settings(saved.get('signals_page', default['signals_page'])),
+        'quant_page': _normalize_quant_page_settings(saved.get('quant_page', default['quant_page'])),
         'up_down_page': _normalize_up_down_page_settings(saved.get('up_down_page', default['up_down_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(dashboard_chart_payload),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
@@ -1342,6 +1364,8 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'charts_options_top_volume_page': DEFAULT_CHARTS_OPTIONS_TOP_VOLUME_PAGE_SETTINGS.copy(),
         'backtest_page': DEFAULT_BACKTEST_PAGE_SETTINGS.copy(),
         'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
+        'signals_page': DEFAULT_SIGNALS_PAGE_SETTINGS.copy(),
+        'quant_page': DEFAULT_QUANT_PAGE_SETTINGS.copy(),
         'up_down_page': _normalize_up_down_page_settings(DEFAULT_UP_DOWN_PAGE_SETTINGS),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -1375,6 +1399,8 @@ def load_app_config() -> Any:
         'charts_options_top_volume_page': _normalize_charts_options_top_volume_page_settings(document.get('charts_options_top_volume_page', DEFAULT_CHARTS_OPTIONS_TOP_VOLUME_PAGE_SETTINGS)),
         'backtest_page': dict(document.get('backtest_page', DEFAULT_BACKTEST_PAGE_SETTINGS)),
         'global_page': dict(document.get('global_page', DEFAULT_GLOBAL_PAGE_SETTINGS)),
+        'signals_page': _normalize_signals_page_settings(document.get('signals_page', DEFAULT_SIGNALS_PAGE_SETTINGS)),
+        'quant_page': _normalize_quant_page_settings(document.get('quant_page', DEFAULT_QUANT_PAGE_SETTINGS)),
         'up_down_page': _normalize_up_down_page_settings(document.get('up_down_page', DEFAULT_UP_DOWN_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
@@ -1427,6 +1453,10 @@ def save_app_config(data: Any) -> None:
         current['backtest_page'] = _normalize_backtest_page_settings(saved.get('backtest_page'))
     if 'global_page' in saved:
         current['global_page'] = _normalize_global_page_settings(saved.get('global_page'))
+    if 'signals_page' in saved:
+        current['signals_page'] = _normalize_signals_page_settings(saved.get('signals_page'))
+    if 'quant_page' in saved:
+        current['quant_page'] = _normalize_quant_page_settings(saved.get('quant_page'))
     if 'up_down_page' in saved:
         current['up_down_page'] = _normalize_up_down_page_settings(saved.get('up_down_page'))
     if 'dashboard_chart' in saved:
@@ -1741,6 +1771,15 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         if isinstance(compare_interval_labels_value, bool | int)
         else DEFAULT_CHART_PAGE_SETTINGS['compare_interval_labels_enabled']
     )
+    compare_correlation_value = saved.get(
+        'compare_correlation_visible',
+        DEFAULT_CHART_PAGE_SETTINGS['compare_correlation_visible'],
+    )
+    compare_correlation_visible = (
+        bool(compare_correlation_value)
+        if isinstance(compare_correlation_value, bool | int)
+        else DEFAULT_CHART_PAGE_SETTINGS['compare_correlation_visible']
+    )
     raw_watchlist = saved.get('watchlist', [])
     if not isinstance(raw_watchlist, list):
         raw_watchlist = []
@@ -1808,6 +1847,7 @@ def _normalize_chart_page_settings(settings: Any) -> Any:
         'compare_interval_label': compare_interval_label,
         'compare_range_label': compare_range_label,
         'compare_interval_labels_enabled': compare_interval_labels_enabled,
+        'compare_correlation_visible': compare_correlation_visible,
         'watchlist': watchlist,
         'compare_symbols': compare_symbols,
         'relationship_symbols': relationship_symbols,
@@ -1916,6 +1956,41 @@ def _normalize_global_page_settings(settings: Any) -> dict[str, Any]:
     if interval_label not in {'1D', '5D', '30D', 'YTD', '1Y', '5Y'}:
         interval_label = DEFAULT_GLOBAL_PAGE_SETTINGS['interval_label']
     return {'interval_label': interval_label}
+
+
+def _normalize_signals_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the Signals page."""
+    saved = settings if isinstance(settings, dict) else {}
+    selected = str(saved.get('filter', DEFAULT_SIGNALS_PAGE_SETTINGS['filter']) or '').lower().strip()
+    if selected not in SIGNALS_PAGE_FILTERS:
+        selected = DEFAULT_SIGNALS_PAGE_SETTINGS['filter']
+    search = str(saved.get('search', DEFAULT_SIGNALS_PAGE_SETTINGS['search']) or '').upper().strip()[:12]
+    return {'filter': selected, 'search': search}
+
+
+def _normalize_quant_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the Quant page."""
+    saved = settings if isinstance(settings, dict) else {}
+    active_tab = str(saved.get('active_tab', DEFAULT_QUANT_PAGE_SETTINGS['active_tab']) or '').lower().strip()
+    if active_tab not in QUANT_PAGE_TABS:
+        active_tab = DEFAULT_QUANT_PAGE_SETTINGS['active_tab']
+    screen_filter = str(saved.get('screen_filter', DEFAULT_QUANT_PAGE_SETTINGS['screen_filter']) or '').lower().strip()
+    if screen_filter not in QUANT_SCREEN_FILTERS:
+        screen_filter = DEFAULT_QUANT_PAGE_SETTINGS['screen_filter']
+    pair_filter = str(saved.get('pair_filter', DEFAULT_QUANT_PAGE_SETTINGS['pair_filter']) or '').lower().strip()
+    if pair_filter not in QUANT_PAIR_FILTERS:
+        pair_filter = DEFAULT_QUANT_PAGE_SETTINGS['pair_filter']
+    search = str(saved.get('search', DEFAULT_QUANT_PAGE_SETTINGS['search']) or '').upper().strip()[:12]
+    pair_left = str(saved.get('pair_left', DEFAULT_QUANT_PAGE_SETTINGS['pair_left']) or '').upper().strip()[:12]
+    pair_right = str(saved.get('pair_right', DEFAULT_QUANT_PAGE_SETTINGS['pair_right']) or '').upper().strip()[:12]
+    return {
+        'active_tab': active_tab,
+        'screen_filter': screen_filter,
+        'pair_filter': pair_filter,
+        'search': search,
+        'pair_left': pair_left,
+        'pair_right': pair_right,
+    }
 
 
 def _normalize_fundamentals_page_settings(settings: Any) -> dict[str, Any]:
@@ -2341,6 +2416,36 @@ def save_global_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_global_page_settings(settings)
     current['global_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_signals_page_settings() -> Any:
+    """Load persisted state for the Signals page."""
+    config = load_app_config()
+    return _normalize_signals_page_settings(config.get('signals_page', {}))
+
+
+def save_signals_page_settings(settings: Any) -> Any:
+    """Persist state for the Signals page."""
+    current = load_app_config()
+    state = _normalize_signals_page_settings(settings)
+    current['signals_page'] = state
+    save_app_config(current)
+    return state
+
+
+def load_quant_page_settings() -> Any:
+    """Load persisted state for the Quant page."""
+    config = load_app_config()
+    return _normalize_quant_page_settings(config.get('quant_page', {}))
+
+
+def save_quant_page_settings(settings: Any) -> Any:
+    """Persist state for the Quant page."""
+    current = load_app_config()
+    state = _normalize_quant_page_settings(settings)
+    current['quant_page'] = state
     save_app_config(current)
     return state
 

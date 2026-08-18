@@ -35,10 +35,11 @@ REFRESH_ROUTE_ARCHITECTURE = {
     33: 'background-single-flight',
     37: 'local-only',
     39: 'background-single-flight',
+    40: 'background-active-subtab',
 }
 
 _MIGRATED_REFRESH_ROUTES = {
-    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33, 39,
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33, 39, 40,
 }
 REFRESH_ROUTE_CLASSIFICATION = {
     page_index: (
@@ -144,6 +145,7 @@ class WindowLifecycleMixin:
         self._register_page(37, self.btn_page38)
         self._register_page(18, self.btn_page18, on_show=self._p18_on_show if hasattr(self, '_p18_on_show') else None)
         self._register_page(20, self.btn_page21, on_show=self._p21_on_show if hasattr(self, '_p21_on_show') else None)
+        self._register_page(40, self.btn_page41, on_show=self._p41_on_show if hasattr(self, '_p41_on_show') else None)
         self._register_page(17, self.btn_page9)
         self._apply_navigation_settings_to_shell()
         self._startup_progress_complete('navigation', 'Navigation')
@@ -1205,6 +1207,10 @@ class WindowLifecycleMixin:
                 {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Notes'},
                 {'tab_widget_attr': 'valuation_detail_tabs', 'tab_text': 'Sources'},
             ),
+            40: (
+                {'tab_widget_attr': 'p41_tabs', 'tab_text': 'Screener', 'aliases': ('Quant Screener', 'Factors')},
+                {'tab_widget_attr': 'p41_tabs', 'tab_text': 'Pairs', 'aliases': ('Stat Arb', 'Cointegration', 'Spread')},
+            ),
         }
 
     def _make_tab_picker_entry(
@@ -1702,6 +1708,14 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p25_run_backtest'):
                 self._p25_run_backtest()
             return
+        if current_index == 40:
+            active_key = self._p41_active_subtab_key() if hasattr(self, '_p41_active_subtab_key') else 'screener'
+            if active_key == 'pairs' and hasattr(self, '_p41_refresh_pairs'):
+                self._p41_refresh_pairs(force=True)
+                return
+            if hasattr(self, '_p41_refresh_screen'):
+                self._p41_refresh_screen(force=True)
+            return
 
     def _handle_tab_picker_shortcut(self) -> None:
         """Open or refocus the popup tab picker from the global shortcut."""
@@ -1946,6 +1960,9 @@ class WindowLifecycleMixin:
         strategies_executor = getattr(self, '_p29_executor', None)
         if strategies_executor is not None:
             strategies_executor.shutdown(wait=False, cancel_futures=True)
+        quant_stop = getattr(self, '_p41_stop_controller', None)
+        if callable(quant_stop):
+            quant_stop()
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

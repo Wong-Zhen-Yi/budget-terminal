@@ -11,6 +11,7 @@ from ..dependencies import YF_LOCK, logger, pd, yf
 from .signal_models import SignalClass, SignalReason, SignalResult, TradeStatus
 from .signal_scanner import (
     DEFAULT_ROLE_TIMEFRAMES,
+    ScanCancelled,
     SignalMarketDataService,
     SignalScanRequest,
     SignalScannerService,
@@ -71,6 +72,9 @@ class AutomaticSignalScanPayload:
     completed_at: dt.datetime = field(default_factory=dt.datetime.now)
     source_candidate_count: int = 0
     rejected_candidate_count: int = 0
+    #: Candidates that cleared every tradability filter, before the shortlist cut. Reported apart
+    #: from ``rejected_candidate_count`` so the shortlist truncation is not presented as rejection.
+    passed_filter_count: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     universe_from_cache: bool = False
 
@@ -153,7 +157,6 @@ class AutomaticTickerUniverseService:
             AutoTickerCandidate(**{**asdict(candidate), "quality_rank": rank})
             for rank, candidate in enumerate(ranked, start=1)
         ]
-        rejected = max(rejected, len(quotes) - len(ranked))
         sourced_at = self._now().isoformat()
         payload = {
             "candidates": [candidate.to_dict() for candidate in ranked],
@@ -161,7 +164,11 @@ class AutomaticTickerUniverseService:
             "sourced_at": sourced_at,
             "session_date": today,
             "source_candidate_count": len(quotes),
+            # Rejection counts only what failed a filter. Candidates dropped by the shortlist cut
+            # are healthy names that simply ranked below the limit, and reporting them as rejected
+            # made the universe look far more selective than it is.
             "rejected_candidate_count": rejected,
+            "passed_filter_count": len(candidates),
         }
         self.cache_manager.save_json_payload(self._CACHE_NAMESPACE, self._CACHE_KEY, payload)
         return {**payload, "candidates": ranked, "from_cache": False}
@@ -300,8 +307,11 @@ class AutomaticSignalScannerService:
         force_universe_refresh: bool = False,
         force_market_refresh: bool = False,
         progress: Callable[[int, int, str], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
     ) -> AutomaticSignalScanPayload:
         started_at = dt.datetime.now()
+        if cancel is not None and cancel():
+            raise ScanCancelled("Signal scan cancelled")
         universe = self.universe_service.source_candidates(force_refresh=force_universe_refresh)
         candidates = list(universe.get("candidates") or [])
         if not candidates:
@@ -312,7 +322,9 @@ class AutomaticSignalScannerService:
             role_timeframes=DEFAULT_ROLE_TIMEFRAMES,
             force_refresh=force_market_refresh,
         )
-        results, errors = self.scanner_service.scan_tickers_batched(request, progress=progress)
+        results, errors = self.scanner_service.scan_tickers_batched(
+            request, progress=progress, cancel=cancel
+        )
         payload = AutomaticSignalScanPayload(
             candidates=candidates,
             results=results,
@@ -322,6 +334,7 @@ class AutomaticSignalScannerService:
             completed_at=dt.datetime.now(),
             source_candidate_count=int(universe.get("source_candidate_count") or 0),
             rejected_candidate_count=int(universe.get("rejected_candidate_count") or 0),
+            passed_filter_count=int(universe.get("passed_filter_count") or len(candidates)),
             errors=errors,
             universe_from_cache=bool(universe.get("from_cache", False)),
         )
@@ -355,6 +368,7 @@ class AutomaticSignalScannerService:
             "completed_at": payload.completed_at.isoformat(),
             "source_candidate_count": payload.source_candidate_count,
             "rejected_candidate_count": payload.rejected_candidate_count,
+            "passed_filter_count": payload.passed_filter_count,
             "errors": dict(payload.errors),
             "universe_from_cache": payload.universe_from_cache,
         }
@@ -378,6 +392,7 @@ class AutomaticSignalScannerService:
             completed_at=cls._parse_datetime(value.get("completed_at")) or dt.datetime.now(),
             source_candidate_count=int(value.get("source_candidate_count") or 0),
             rejected_candidate_count=int(value.get("rejected_candidate_count") or 0),
+            passed_filter_count=int(value.get("passed_filter_count") or 0),
             errors={str(key): str(item) for key, item in dict(value.get("errors") or {}).items()},
             universe_from_cache=bool(value.get("universe_from_cache", False)),
         )
@@ -404,6 +419,11 @@ class AutomaticSignalScannerService:
             "warnings": list(result.warnings),
             "indicators": dict(result.indicators),
             "timeframe_status": dict(result.timeframe_status),
+            "timeframe_bars": {
+                str(role): dict(entry)
+                for role, entry in dict(result.timeframe_bars).items()
+                if isinstance(entry, Mapping)
+            },
             "error": result.error,
         }
 
@@ -434,6 +454,15 @@ class AutomaticSignalScannerService:
             warnings=[str(item) for item in value.get("warnings", [])],
             indicators=dict(value.get("indicators") or {}),
             timeframe_status={str(key): str(item) for key, item in dict(value.get("timeframe_status") or {}).items()},
+            timeframe_bars={
+                str(key): {
+                    "as_of": (str(item.get("as_of")) if item.get("as_of") else None),
+                    "partial": bool(item.get("partial", False)),
+                    "dropped": bool(item.get("dropped", False)),
+                }
+                for key, item in dict(value.get("timeframe_bars") or {}).items()
+                if isinstance(item, Mapping)
+            },
             error=str(value.get("error") or ""),
         )
 

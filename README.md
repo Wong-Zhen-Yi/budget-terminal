@@ -5,7 +5,7 @@ Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio da
 ## Features
 
 - Portfolio dashboard, net worth tracking, holdings metrics, and sector views
-- Options-chain fetching and table rendering
+- Options-chain fetching, table rendering, and related Yahoo Finance smoke tests
 - News hub with deterministic headline briefings, politics, calendar, pre-market, and YouTube helpers
 - Fundamentals and valuation
 - Earnings matrix, ETF analysis, SPY/ETF heatmaps, random recommendations, and chart pages
@@ -24,6 +24,9 @@ Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio da
 - `budget_terminal_app/data_service/`: shared coordinator plus in-process and compatible FastAPI/HTTP clients
 - `budget_terminal_app/services/`: reusable market-data, analytics, and presentation-independent calculations
 - `budget_terminal_app/cache.py`, `persistence.py`, `paths.py`, `constants.py`, `dependencies.py`: shared infrastructure
+- `scripts/`: smoke tests, with reusable manual probes under `scripts/diagnostics/`
+- `packaging/`: PyInstaller specs and build scripts
+- `build/`, `dist/`, `release/`: generated build outputs
 
 ## Setup
 
@@ -34,6 +37,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
 .\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
 ```
+
+For linting and packaging work, also install `requirements-dev.txt`.
 
 Run the app:
 
@@ -53,6 +58,24 @@ python budget_terminal.py
 
 Each launch starts an independent app process. The windows share the same saved portfolios, settings, caches, and paper-trading database. Avoid changing the same saved setting in two windows at exactly the same time; for JSON-backed settings, the most recent save wins.
 
+## Development
+
+Use the checks that match the code you touched. Common commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check budget_terminal.py budget_terminal_app scripts
+.\.venv\Scripts\python.exe -m compileall -q budget_terminal.py budget_terminal_app
+.\.venv\Scripts\python.exe scripts\test_data_service_transport.py
+.\.venv\Scripts\python.exe scripts\test_startup_profile.py --offscreen
+```
+
+Helpful diagnostics include:
+
+- `.\.venv\Scripts\python.exe scripts\diagnostics\yahoo_data.py AAPL MSFT --include-info`
+- `.\.venv\Scripts\python.exe scripts\diagnostics\inspect_cache.py`
+
+There is no formal `pytest` suite in this checkout, so UI and data-fetching changes should be verified with focused smoke tests and, when relevant, a manual app launch.
+
 ## Runtime Flow
 
 `budget_terminal_app/main.py` creates the Qt application, applies the Fusion style, configures pyqtgraph, shows the startup loading screen, imports `BudgetTerminalApp`, and prepares the main window before first show. After the first usable view is visible, the shared data coordinator starts in-process. If it is unavailable, the app logs the issue and continues with direct worker behavior.
@@ -70,6 +93,32 @@ The News Hub briefing is generated inside the app and does not use an LLM.
 - Clicking a headline row produces a single-item summary
 - `Generate Briefing` reruns the deterministic digest manually
 - Output includes overall tone, theme counts, portfolio names, macro drivers, latest headlines, notable headlines, and headline-only cautions
+
+## Windows Executable Build
+
+This is a PyQt6 desktop GUI app, so the standard packaging target is a windowed PyInstaller build from `budget_terminal.py`.
+
+Install build prerequisites:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
+```
+
+Build the executable package:
+
+```powershell
+.\packaging\build_exe.bat
+```
+
+The build script:
+
+- activates `.venv`
+- upgrades the packaging tools and installs the pinned runtime and development requirements
+- removes old `build/` output and only the current-version `dist/` target
+- builds from `packaging\budget_terminal.spec`
+- creates `release\BudgetTerminal-v*-windows.zip`
+
+See `packaging\PACKAGING.md` for the one-dir build flow, release outputs, and troubleshooting notes.
 
 ## User Data Safety
 

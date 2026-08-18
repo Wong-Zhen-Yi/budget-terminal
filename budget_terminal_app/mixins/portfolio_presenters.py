@@ -107,6 +107,24 @@ def market_cap_color_token(value: Any) -> str:
     return "accent_negative"
 
 
+def margin_health_color_token(percent: Any) -> str:
+    if percent is None:
+        return "text_muted"
+    try:
+        number = float(percent)
+    except (TypeError, ValueError):
+        return "text_muted"
+    if not math.isfinite(number) or number <= 0:
+        return "text_muted"
+    if number < 15:
+        return "accent_positive"
+    if number < 25:
+        return "warning"
+    if number <= 40:
+        return "series_3"
+    return "accent_negative"
+
+
 def analyst_target_value(value: Any) -> float | None:
     if value is None:
         return None

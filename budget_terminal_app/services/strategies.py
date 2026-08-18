@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
-from ..dependencies import YF_LOCK, pd, yf
+from ..cache import CacheManager
+from ..dependencies import YF_LOCK, logger, pd, yf
 from .dashboard_payloads import extract_close_series
 
 
@@ -11,6 +13,66 @@ STRATEGY_INTERVALS = {
     "30d": {"label": "30D", "period": "1mo", "interval": "1d"},
     "1y": {"label": "1Y", "period": "1y", "interval": "1d"},
 }
+
+STRATEGY_CACHE_NAMESPACE = "strategy_performance"
+STRATEGY_CACHE_TTL_SECONDS = {"1d": 300.0, "30d": 1800.0, "1y": 3600.0}
+STRATEGY_CACHE_MAX_AGE_SECONDS = 7.0 * 24.0 * 3600.0
+
+
+def normalize_interval_key(interval_key: Any) -> str:
+    """Return one supported interval key, falling back to the 1Y default."""
+    key = str(interval_key or "1y").strip().lower()
+    return key if key in STRATEGY_INTERVALS else "1y"
+
+
+def unique_upper_symbols(symbols: Any) -> list[str]:
+    """Return uppercase tickers in their original order without duplicates."""
+    ordered: list[str] = []
+    for value in symbols or []:
+        symbol = str(value or "").upper().strip()
+        if symbol and symbol not in ordered:
+            ordered.append(symbol)
+    return ordered
+
+
+def strategy_signature(
+    symbols: Any,
+    interval_key: Any,
+    *,
+    weighting: str = "equal",
+    weights: dict[str, float] | None = None,
+    shares: dict[str, float] | None = None,
+    cash_balance: float = 0.0,
+) -> tuple[Any, ...]:
+    """Build the stable identity of one basket request, shared by the memory and disk caches."""
+    def _pairs(values: Any) -> tuple[Any, ...]:
+        if not isinstance(values, dict):
+            return ()
+        pairs = []
+        for key, value in values.items():
+            try:
+                pairs.append((str(key), round(float(value), 8)))
+            except (TypeError, ValueError):
+                continue
+        return tuple(sorted(pairs))
+
+    try:
+        cash = round(float(cash_balance or 0.0), 8)
+    except (TypeError, ValueError):
+        cash = 0.0
+    return (
+        tuple(sorted(unique_upper_symbols(symbols))),
+        normalize_interval_key(interval_key),
+        str(weighting or "equal").strip().lower(),
+        _pairs(weights),
+        _pairs(shares),
+        cash,
+    )
+
+
+def strategy_cache_key(signature: tuple[Any, ...]) -> str:
+    """Hash one basket signature into a short, stable sqlite cache key."""
+    return hashlib.sha1(repr(signature).encode("utf-8")).hexdigest()
 
 
 def weighted_performance(
@@ -110,7 +172,185 @@ def equal_weight_performance(close_by_symbol: dict[str, Any]) -> dict[str, Any]:
 
 
 class StrategyPerformanceService:
-    """Fetch compact equal-weight performance series for strategy cards."""
+    """Fetch weighted performance series for strategy cards in one batched download per interval."""
+
+    def __init__(self, cache_manager: CacheManager | None = None) -> None:
+        self.cache_manager = cache_manager or CacheManager()
+
+    def _normalize_request(self, request: dict[str, Any], interval_key: str) -> dict[str, Any]:
+        symbols = unique_upper_symbols(request.get("symbols", []))
+        weighting = str(request.get("weighting", "equal") or "equal")
+        weights = dict(request.get("weights", {}) or {})
+        shares = dict(request.get("shares", {}) or {})
+        try:
+            cash_balance = float(request.get("cash_balance", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cash_balance = 0.0
+        signature = strategy_signature(
+            symbols,
+            interval_key,
+            weighting=weighting,
+            weights=weights,
+            shares=shares,
+            cash_balance=cash_balance,
+        )
+        return {
+            "key": request.get("key"),
+            "symbols": symbols,
+            "weighting": weighting,
+            "weights": weights,
+            "shares": shares,
+            "cash_balance": cash_balance,
+            "cache_key": strategy_cache_key(signature),
+        }
+
+    def _read_cache(self, cache_key: str, interval_key: str, *, allow_stale: bool) -> tuple[dict[str, Any] | None, bool]:
+        """Return one cached payload plus whether it is still inside its interval TTL."""
+        manager = self.cache_manager
+        if manager is None:
+            return None, False
+        ttl = STRATEGY_CACHE_TTL_SECONDS.get(interval_key, 3600.0)
+        max_age = STRATEGY_CACHE_MAX_AGE_SECONDS if allow_stale else ttl
+        try:
+            result = manager.get_json_payload(
+                STRATEGY_CACHE_NAMESPACE,
+                cache_key,
+                max_age_seconds=max_age,
+                return_metadata=True,
+            )
+        except Exception as exc:
+            logger.debug("Strategy cache read failed for %s: %s", cache_key, exc)
+            return None, False
+        if not result:
+            return None, False
+        payload, metadata = result
+        if not isinstance(payload, dict):
+            return None, False
+        try:
+            age = float(metadata.get("cache_age_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            age = 0.0
+        return payload, age < ttl
+
+    def _write_cache(self, cache_key: str, payload: dict[str, Any]) -> None:
+        manager = self.cache_manager
+        if manager is None:
+            return
+        try:
+            manager.save_json_payload(STRATEGY_CACHE_NAMESPACE, cache_key, payload)
+        except Exception as exc:
+            logger.debug("Strategy cache write failed for %s: %s", cache_key, exc)
+
+    def cached_payload(
+        self,
+        symbols: list[str],
+        interval_key: Any,
+        *,
+        weighting: str = "equal",
+        weights: dict[str, float] | None = None,
+        shares: dict[str, float] | None = None,
+        cash_balance: float = 0.0,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Return (payload, is_fresh) from disk without touching the network."""
+        key = normalize_interval_key(interval_key)
+        entry = self._normalize_request(
+            {
+                "symbols": symbols,
+                "weighting": weighting,
+                "weights": weights or {},
+                "shares": shares or {},
+                "cash_balance": cash_balance,
+            },
+            key,
+        )
+        if not entry["symbols"]:
+            return None, False
+        return self._read_cache(entry["cache_key"], key, allow_stale=True)
+
+    def _download(self, symbols: list[str], config: dict[str, Any]) -> Any:
+        with YF_LOCK:
+            return yf.download(
+                symbols,
+                period=config["period"],
+                interval=config["interval"],
+                group_by="ticker",
+                progress=False,
+                auto_adjust=False,
+                threads=True,
+            )
+
+    def fetch_many(
+        self,
+        requests: list[dict[str, Any]],
+        interval_key: Any,
+        *,
+        force: bool = False,
+    ) -> dict[Any, dict[str, Any] | Exception]:
+        """Resolve several baskets sharing one interval with a single upstream download.
+
+        Each request carries a caller-supplied ``key`` plus ``symbols`` and the weighting
+        inputs. The result maps every key to one payload or one exception, so a single bad
+        basket never fails its neighbours.
+        """
+        key = normalize_interval_key(interval_key)
+        config = STRATEGY_INTERVALS[key]
+        results: dict[Any, dict[str, Any] | Exception] = {}
+        pending: list[dict[str, Any]] = []
+        for request in requests:
+            entry = self._normalize_request(request, key)
+            if not entry["symbols"]:
+                results[entry["key"]] = ValueError("This basket has no tickers.")
+                continue
+            if not force:
+                cached, is_fresh = self._read_cache(entry["cache_key"], key, allow_stale=False)
+                if cached is not None and is_fresh:
+                    results[entry["key"]] = cached
+                    continue
+            pending.append(entry)
+        if not pending:
+            return results
+
+        union: list[str] = []
+        for entry in pending:
+            for symbol in entry["symbols"]:
+                if symbol not in union:
+                    union.append(symbol)
+        try:
+            frame = self._download(union, config)
+        except Exception as exc:
+            for entry in pending:
+                results[entry["key"]] = exc
+            return results
+
+        close_by_symbol = {}
+        for symbol in union:
+            series = extract_close_series(frame, union, symbol)
+            if series is not None and not getattr(series, "empty", True):
+                close_by_symbol[symbol] = series
+
+        for entry in pending:
+            try:
+                payload = weighted_performance(
+                    {symbol: close_by_symbol[symbol] for symbol in entry["symbols"] if symbol in close_by_symbol},
+                    weighting=entry["weighting"],
+                    weights=entry["weights"],
+                    shares=entry["shares"],
+                    cash_balance=entry["cash_balance"],
+                )
+            except Exception as exc:
+                results[entry["key"]] = exc
+                continue
+            payload.update({
+                "interval_key": key,
+                "requested_symbols": list(entry["symbols"]),
+                "missing_symbols": [
+                    symbol for symbol in entry["symbols"] if symbol not in payload["included_symbols"]
+                ],
+                "source": "Yahoo Finance",
+            })
+            self._write_cache(entry["cache_key"], payload)
+            results[entry["key"]] = payload
+        return results
 
     def fetch(
         self,
@@ -121,42 +361,23 @@ class StrategyPerformanceService:
         weights: dict[str, float] | None = None,
         shares: dict[str, float] | None = None,
         cash_balance: float = 0.0,
+        force: bool = False,
     ) -> dict[str, Any]:
-        unique_symbols = []
-        for value in symbols:
-            symbol = str(value or "").upper().strip()
-            if symbol and symbol not in unique_symbols:
-                unique_symbols.append(symbol)
-        if not unique_symbols:
+        """Resolve one basket through the same batched path used by the page."""
+        outcome = self.fetch_many(
+            [{
+                "key": "single",
+                "symbols": symbols,
+                "weighting": weighting,
+                "weights": weights or {},
+                "shares": shares or {},
+                "cash_balance": cash_balance,
+            }],
+            interval_key,
+            force=force,
+        ).get("single")
+        if isinstance(outcome, Exception):
+            raise outcome
+        if not isinstance(outcome, dict):
             raise ValueError("This basket has no tickers.")
-        key = str(interval_key or "1y").strip().lower()
-        config = STRATEGY_INTERVALS.get(key, STRATEGY_INTERVALS["1y"])
-        with YF_LOCK:
-            frame = yf.download(
-                unique_symbols,
-                period=config["period"],
-                interval=config["interval"],
-                group_by="ticker",
-                progress=False,
-                auto_adjust=False,
-                threads=True,
-            )
-        close_by_symbol = {}
-        for symbol in unique_symbols:
-            series = extract_close_series(frame, unique_symbols, symbol)
-            if series is not None and not getattr(series, "empty", True):
-                close_by_symbol[symbol] = series
-        payload = weighted_performance(
-            close_by_symbol,
-            weighting=weighting,
-            weights=weights,
-            shares=shares,
-            cash_balance=cash_balance,
-        )
-        payload.update({
-            "interval_key": key,
-            "requested_symbols": unique_symbols,
-            "missing_symbols": [symbol for symbol in unique_symbols if symbol not in payload["included_symbols"]],
-            "source": "Yahoo Finance",
-        })
-        return payload
+        return outcome

@@ -118,9 +118,9 @@ class FundamentalsRenderMixin:
         cash_values, _, _, _ = self._p2_resolve_curated_series(data, 'quarterly', 'cash')
         if not cash_values:
             cash_values, _, _, _ = self._p2_resolve_curated_series(data, 'annual', 'cash')
-        total_cash = float(cash_values[-1]) if cash_values else None
-        if total_cash is None:
-            total_cash = sg('totalCash')
+        cash_and_bonds = float(cash_values[-1]) if cash_values else None
+        if cash_and_bonds is None:
+            cash_and_bonds = sg('totalCash')
         total_debt = self._p2_latest_total_debt_value(data, 'quarterly')
         if total_debt is None:
             total_debt = self._p2_latest_total_debt_value(data, 'annual')
@@ -130,7 +130,7 @@ class FundamentalsRenderMixin:
         fcf_margin = fcf / total_rev * 100 if fcf is not None and total_rev else None
         ev_rev = ev / total_rev if ev is not None and total_rev else None
         ev_ebitda = ev / ebitda if ev is not None and ebitda else None
-        net_cash = total_cash - total_debt if total_cash is not None and total_debt is not None else None
+        net_cash = cash_and_bonds - total_debt if cash_and_bonds is not None and total_debt is not None else None
         self.p2_metric_vals['pe'].setText(fmt_ratio(pe))
         self.p2_metric_vals['fpe'].setText(fmt_ratio(fpe))
         self.p2_metric_vals['ps'].setText(fmt_ratio(ps))

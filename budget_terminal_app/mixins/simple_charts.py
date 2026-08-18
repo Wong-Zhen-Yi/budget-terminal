@@ -2,6 +2,23 @@ from __future__ import annotations
 from typing import Any
 from ..compat import *
 
+# Balance sheet rows that make up "Cash and Bonds". These are matched exactly rather than by
+# substring: 'short term investments' is contained in the combined row name, and the quarterly
+# branch of _p2_extract_statement_series ranks substring hits by column coverage ahead of key
+# order, so a loose match silently resolves the cash row twice.
+_P2_CASH_COMBINED_KEYS = ['cash cash equivalents and short term investments']
+_P2_CASH_EQUIVALENT_KEYS = ['cash and cash equivalents', 'cash equivalents', 'cash financial']
+_P2_SHORT_TERM_INVESTMENT_KEYS = [
+    'other short term investments',
+    'marketable securities current',
+    'short term investments',
+]
+_P2_LONG_TERM_INVESTMENT_KEYS = [
+    'available for sale securities',
+    'marketable securities noncurrent',
+    'long term investments',
+]
+
 
 class SimpleChartsMixin:
 
@@ -74,13 +91,9 @@ class SimpleChartsMixin:
                 'color': self.theme_color('accent_negative'),
             },
             'cash': {
-                'label': 'Cash',
-                'kind': 'sum',
+                'label': 'Cash and Bonds',
+                'kind': 'cash_and_bonds',
                 'family': 'balance_sheet',
-                'groups': [
-                    ['cash cash equivalents and short term investments', 'cash and cash equivalents', 'cash equivalents'],
-                    ['available for sale securities', 'marketable securities'],
-                ],
                 'color': self.theme_color('accent_positive'),
             },
             'total_debt': {
@@ -125,7 +138,7 @@ class SimpleChartsMixin:
                 'color': self.theme_series_color(3),
             },
             'net_cash': {
-                'label': 'Net Cash',
+                'label': 'Net Cash & Bonds',
                 'kind': 'difference',
                 'left': 'cash',
                 'right': 'total_debt',
@@ -260,6 +273,50 @@ class SimpleChartsMixin:
             sorted_cols,
         )
 
+    def _p2_exact_statement_row(self, df: Any, keys: Any) -> Any:
+        """Return the first statement row matching one key exactly, ignoring case."""
+        idx_lower = {str(row).lower(): row for row in getattr(df, 'index', [])}
+        for key in keys:
+            row = idx_lower.get(str(key or '').strip().lower())
+            if row is not None:
+                return row
+        return None
+
+    def _p2_cash_and_bonds_series(self, df: Any, period: Any) -> Any:
+        """Resolve cash, equivalents, and short and long term marketable securities."""
+        if df is None or df.empty:
+            return ([], [], [])
+        combined_row = self._p2_exact_statement_row(df, _P2_CASH_COMBINED_KEYS)
+        cash_row = self._p2_exact_statement_row(df, _P2_CASH_EQUIVALENT_KEYS)
+        short_term_row = self._p2_exact_statement_row(df, _P2_SHORT_TERM_INVESTMENT_KEYS)
+        long_term_row = self._p2_exact_statement_row(df, _P2_LONG_TERM_INVESTMENT_KEYS)
+        values, labels, cols = ([], [], [])
+        for column in self._p2_ordered_statement_cols(df):
+
+            def cell(row: Any) -> float | None:
+                """Return one numeric cell, or None when the row is absent or blank."""
+                if row is None:
+                    return None
+                try:
+                    value = float(df.at[row, column])
+                except Exception:
+                    return None
+                return None if pd.isna(value) else value
+
+            # The combined row already bundles cash with short term investments, so it is used
+            # on its own to avoid double counting the short term leg.
+            base = cell(combined_row)
+            if base is None:
+                cash = cell(cash_row)
+                short_term = cell(short_term_row)
+                if cash is None and short_term is None:
+                    continue
+                base = (cash or 0.0) + (short_term or 0.0)
+            values.append(base + (cell(long_term_row) or 0.0))
+            labels.append(self._p2_col_label(column, period))
+            cols.append(column)
+        return (values, labels, cols) if values else ([], [], [])
+
     def _p2_total_debt_series(self, df: Any, period: Any) -> Any:
         """Resolve total debt with fallbacks for statements that split debt rows."""
         total_debt = self._p2_extract_statement_series(df, ['total debt'], period)
@@ -344,6 +401,9 @@ class SimpleChartsMixin:
         frame = self._p2_statement_frame(data, family, period)
         if spec.get('kind') == 'sum':
             values, labels, cols = self._p2_sum_statement_series(frame, period, *spec.get('groups', []))
+            return (values, labels, cols, color)
+        if spec.get('kind') == 'cash_and_bonds':
+            values, labels, cols = self._p2_cash_and_bonds_series(frame, period)
             return (values, labels, cols, color)
         if spec.get('kind') == 'debt':
             values, labels, cols = self._p2_total_debt_series(frame, period)
@@ -916,12 +976,7 @@ class SimpleChartsMixin:
                     shares = ([float(shares_scalar)], ['Current'], ['current'])
                 except (TypeError, ValueError):
                     shares = ([], [], [])
-        cash_series = self._p2_sum_statement_series(
-            bs_df,
-            period,
-            ['cash cash equivalents and short term investments', 'cash and cash equivalents', 'cash equivalents'],
-            ['available for sale securities', 'marketable securities'],
-        )
+        cash_series = self._p2_resolve_curated_series(data, period, 'cash')
         debt_series = self._p2_total_debt_series(bs_df, period)
         sga_series = self._p2_extract_statement_series(
             fin_df,
@@ -957,10 +1012,10 @@ class SimpleChartsMixin:
                 [spec('Shares Outstanding', shares, self.theme_series_color(4))],
             ),
             self._p2_chart_model(
-                'Cash & Total Debt',
+                'Cash and Bonds & Total Debt',
                 period,
                 [
-                    spec('Cash', cash_series, self.theme_color('accent_positive'), offset=-0.25, width=0.42),
+                    spec('Cash and Bonds', cash_series, self.theme_color('accent_positive'), offset=-0.25, width=0.42),
                     spec('Total Debt', debt_series, self.theme_color('accent_negative'), offset=0.25, width=0.42),
                 ],
             ),

@@ -1,0 +1,62 @@
+name: Python checks
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Upgrade packaging tools
+        run: python -m pip install --upgrade pip==26.1.2 setuptools==83.0.0
+      - name: Install dependencies
+        run: python -m pip install --upgrade --upgrade-strategy eager -r requirements.txt -r requirements-dev.txt
+      - name: Audit dependencies
+        run: python -m pip_audit
+      - name: Public repository privacy
+        run: python scripts/test_public_repo_privacy.py
+      - name: Lint
+        run: python -m ruff check budget_terminal.py budget_terminal_app scripts
+      - name: Compile
+        run: python -m compileall -q budget_terminal.py budget_terminal_app
+      - name: Deterministic backend smokes
+        run: |
+          python scripts/test_backend_analysis_services.py
+          python scripts/test_cache_identifiers.py
+          python scripts/test_data_service_transport.py
+          python scripts/test_market_data_foundation.py
+          python scripts/test_persistence_safety.py
+          python scripts/test_portfolio_margin_settlement.py
+          python scripts/test_quant_analytics.py
+      - name: Desktop smokes
+        run: |
+          python scripts/test_tab_picker_search.py
+          python scripts/test_refresh_control.py
+          python scripts/test_batched_render.py
+          python scripts/test_calendar_refresh_async.py
+          python scripts/test_dashboard_hidden_page_updates.py
+          python scripts/test_refresh_hidden_result_deferral.py
+          python scripts/test_refresh_route_inventory.py
+          python scripts/test_refresh_responsiveness.py
+          python scripts/test_bulk_render_responsiveness.py
+          python scripts/test_networth_fx_hidden_render.py
+          python scripts/test_portfolio_positions_row_stability.py
+          python scripts/test_portfolio_margin_settlement_ui.py
+          python scripts/test_portfolio_editing_safety.py
+          python scripts/test_options_refresh_responsiveness.py
+          python scripts/test_charts_refresh_responsiveness.py
+          python scripts/test_charts_options_top_volume_page.py
+          python scripts/test_youtube_refresh_responsiveness.py
+          python scripts/test_launch_stability.py
+          python scripts/test_startup_profile.py --offscreen

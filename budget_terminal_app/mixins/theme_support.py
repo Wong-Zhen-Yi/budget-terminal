@@ -50,6 +50,7 @@ class ThemeSupportMixin:
             ("_apply_youtube_theme", "page16"),
             ("_apply_dictionary_theme", "page38"),
             ("_apply_signal_scanner2_theme", "page40"),
+            ("_apply_quant_theme", "page41"),
         ):
             if page_attr and not self._page_initialized(page_attr=page_attr):
                 continue

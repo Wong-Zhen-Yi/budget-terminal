@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from ..cache import CacheManager
 from ..dependencies import YF_LOCK, logger, pd, yf
 from .signal_engine import SignalConfig, SignalResult, TrendBreakoutStrategy, data_error_result
+
+#: Bounded recovery for a throttled Yahoo batch download. The scanner asks for four timeframes
+#: across the whole shortlist, so an unthrottled per-ticker fallback turns one rate-limited batch
+#: into dozens more requests and guarantees further throttling.
+BATCH_RETRY_ATTEMPTS = 2
+BATCH_RETRY_BACKOFF_SECONDS = 1.5
+FALLBACK_LIMIT = 8
+FALLBACK_SLEEP_SECONDS = 0.35
+RATE_LIMIT_MESSAGE = "Rate limited by the market data source; try again shortly"
+
+
+class ScanCancelled(RuntimeError):
+    """Raised when a caller cancels an in-flight scan."""
 
 
 @dataclass(frozen=True)
@@ -14,16 +28,17 @@ class TimeframeRequest:
     interval: str
     period: str
     cache_max_age_hours: float
+    bar_seconds: float
 
 
 TIMEFRAME_REQUESTS: dict[str, TimeframeRequest] = {
-    "1 Week": TimeframeRequest("1 Week", "1wk", "10y", 12.0),
-    "1 Day": TimeframeRequest("1 Day", "1d", "2y", 4.0),
-    "1 Hour": TimeframeRequest("1 Hour", "1h", "6mo", 0.25),
-    "30 Minutes": TimeframeRequest("30 Minutes", "30m", "60d", 0.10),
-    "15 Minutes": TimeframeRequest("15 Minutes", "15m", "60d", 0.05),
-    "5 Minutes": TimeframeRequest("5 Minutes", "5m", "30d", 2.0 / 60.0),
-    "1 Minute": TimeframeRequest("1 Minute", "1m", "7d", 45.0 / 3600.0),
+    "1 Week": TimeframeRequest("1 Week", "1wk", "10y", 12.0, 7 * 24 * 3600.0),
+    "1 Day": TimeframeRequest("1 Day", "1d", "2y", 4.0, 24 * 3600.0),
+    "1 Hour": TimeframeRequest("1 Hour", "1h", "6mo", 0.25, 3600.0),
+    "30 Minutes": TimeframeRequest("30 Minutes", "30m", "60d", 0.10, 1800.0),
+    "15 Minutes": TimeframeRequest("15 Minutes", "15m", "60d", 0.05, 900.0),
+    "5 Minutes": TimeframeRequest("5 Minutes", "5m", "30d", 2.0 / 60.0, 300.0),
+    "1 Minute": TimeframeRequest("1 Minute", "1m", "7d", 45.0 / 3600.0, 60.0),
 }
 
 DEFAULT_ROLE_TIMEFRAMES = {
@@ -78,7 +93,10 @@ class SignalMarketDataService:
 
     @staticmethod
     def _cache_interval(request: TimeframeRequest) -> str:
-        return f"signal_{request.interval}"
+        # The ``adj`` marker is part of the cache identity on purpose. Frames saved before the
+        # switch to dividend-adjusted downloads hold different Close values, so mixing the two
+        # inside one rolling average would produce a trend reading that belongs to neither series.
+        return f"signal_adj_{request.interval}"
 
     def fetch_frame(
         self,
@@ -104,7 +122,7 @@ class SignalMarketDataService:
                 ticker,
                 period=request.period,
                 interval=request.interval,
-                auto_adjust=False,
+                auto_adjust=True,
                 prepost=False,
                 progress=False,
                 threads=False,
@@ -113,6 +131,48 @@ class SignalMarketDataService:
             raise ValueError(f"No {request.label} history returned")
         self.cache_manager.save_data(ticker, cache_interval, frame)
         return frame.copy()
+
+    def _download_batch(self, symbols: Sequence[str], request: TimeframeRequest) -> dict[str, pd.DataFrame]:
+        """Download one timeframe for many symbols, retrying once on a throttled response.
+
+        ``auto_adjust=True`` matches ``fetch_frame``. yfinance back-adjusts splits either way, so
+        this is about dividends: the EMA200 spans two years of daily bars, and an unadjusted series
+        steps down on every ex-dividend date, biasing a long average against dividend payers. It
+        also drops the ``Adj Close`` column that ``_normalize_ohlcv`` used to discard, so the
+        column the engine reads is unambiguously the one that was adjusted.
+        """
+
+        last_error: Exception | None = None
+        for attempt in range(1, BATCH_RETRY_ATTEMPTS + 1):
+            try:
+                with YF_LOCK:
+                    batch = yf.download(
+                        list(symbols),
+                        period=request.period,
+                        interval=request.interval,
+                        auto_adjust=True,
+                        prepost=False,
+                        progress=False,
+                        threads=True,
+                        group_by="column",
+                    )
+                split = self.split_download_frame(batch, symbols)
+                if split:
+                    return split
+                last_error = ValueError("empty batch response")
+            except Exception as exc:
+                last_error = exc
+            if attempt < BATCH_RETRY_ATTEMPTS:
+                logger.warning(
+                    "Batched signal fetch attempt %s/%s failed for %s (%s); backing off",
+                    attempt,
+                    BATCH_RETRY_ATTEMPTS,
+                    request.interval,
+                    last_error,
+                )
+                time.sleep(BATCH_RETRY_BACKOFF_SECONDS * attempt)
+        logger.warning("Batched signal fetch failed for %s: %s", request.interval, last_error)
+        return {}
 
     def fetch_frames(
         self,
@@ -156,22 +216,7 @@ class SignalMarketDataService:
             request.interval,
             request.period,
         )
-        try:
-            with YF_LOCK:
-                batch = yf.download(
-                    missing,
-                    period=request.period,
-                    interval=request.interval,
-                    auto_adjust=False,
-                    prepost=False,
-                    progress=False,
-                    threads=True,
-                    group_by="column",
-                )
-            split = self.split_download_frame(batch, missing)
-        except Exception as exc:
-            logger.warning("Batched signal fetch failed for %s: %s", request.interval, exc)
-            split = {}
+        split = self._download_batch(missing, request)
 
         for ticker, frame in split.items():
             if frame is None or getattr(frame, "empty", True):
@@ -179,9 +224,15 @@ class SignalMarketDataService:
             frames[ticker] = frame.copy()
             self.cache_manager.save_data(ticker, cache_interval, frame)
 
-        for ticker in missing:
-            if ticker in frames:
+        # Recover stragglers one at a time, but only a handful: a batch that came back short is
+        # usually rate limited, and hammering it per ticker makes the next scan worse.
+        outstanding = [ticker for ticker in missing if ticker not in frames]
+        for position, ticker in enumerate(outstanding):
+            if position >= FALLBACK_LIMIT:
+                errors[ticker] = RATE_LIMIT_MESSAGE
                 continue
+            if position:
+                time.sleep(FALLBACK_SLEEP_SECONDS)
             try:
                 frames[ticker] = self.fetch_frame(ticker, request, force_refresh=True)
             except Exception as exc:
@@ -234,6 +285,18 @@ class SignalScannerService:
         self.data_service = data_service or SignalMarketDataService()
         self.strategy = strategy
 
+    def _role_bar_seconds(self, request: SignalScanRequest) -> dict[str, float]:
+        """Resolve each role's bar duration so the engine can detect a still-forming bar."""
+
+        resolved: dict[str, float] = {}
+        for role in self._ROLES:
+            label = request.role_timeframes.get(role, DEFAULT_ROLE_TIMEFRAMES[role])
+            try:
+                resolved[role] = self.data_service.timeframe_request(label).bar_seconds
+            except ValueError:
+                continue
+        return resolved
+
     def scan_ticker(self, ticker: Any, request: SignalScanRequest) -> SignalResult:
         symbol = normalize_tickers([ticker], limit=1)
         if not symbol:
@@ -260,7 +323,7 @@ class SignalScannerService:
 
         strategy = self.strategy or TrendBreakoutStrategy(request.config)
         try:
-            result = strategy.evaluate(ticker_text, frames)
+            result = strategy.evaluate(ticker_text, frames, role_bar_seconds=self._role_bar_seconds(request))
         except Exception as exc:
             logger.exception("Signal calculation failed for %s", ticker_text)
             return data_error_result(ticker_text, f"Signal calculation failed: {exc}", request.config)
@@ -284,14 +347,20 @@ class SignalScannerService:
         request: SignalScanRequest,
         *,
         progress: Callable[[int, int, str], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
     ) -> tuple[list[SignalResult], dict[str, str]]:
         """Evaluate a ticker collection after batched timeframe collection."""
+
+        def _check_cancelled() -> None:
+            if cancel is not None and cancel():
+                raise ScanCancelled("Signal scan cancelled")
 
         tickers = normalize_tickers(request.tickers, limit=max(len(request.tickers), 1))
         frames_by_ticker: dict[str, dict[str, pd.DataFrame]] = {ticker: {} for ticker in tickers}
         errors_by_ticker: dict[str, list[str]] = {ticker: [] for ticker in tickers}
         fetched_by_interval: dict[str, tuple[dict[str, pd.DataFrame], dict[str, str]]] = {}
         for role in self._ROLES:
+            _check_cancelled()
             label = request.role_timeframes.get(role, DEFAULT_ROLE_TIMEFRAMES[role])
             timeframe = self.data_service.timeframe_request(label)
             if timeframe.interval not in fetched_by_interval:
@@ -311,14 +380,16 @@ class SignalScannerService:
                     errors_by_ticker[ticker].append(f"{role.title()} data: {message}")
 
         strategy = self.strategy or TrendBreakoutStrategy(request.config)
+        role_bar_seconds = self._role_bar_seconds(request)
         results: list[SignalResult] = []
         errors: dict[str, str] = {}
         total = len(tickers)
         for position, ticker in enumerate(tickers, start=1):
+            _check_cancelled()
             if progress:
                 progress(position - 1, total, ticker)
             try:
-                result = strategy.evaluate(ticker, frames_by_ticker[ticker])
+                result = strategy.evaluate(ticker, frames_by_ticker[ticker], role_bar_seconds=role_bar_seconds)
             except Exception as exc:
                 logger.exception("Signal calculation failed for %s", ticker)
                 result = data_error_result(ticker, f"Signal calculation failed: {exc}", request.config)

@@ -127,7 +127,7 @@ class FundamentalsSetupMixin:
             ('FCF Mgn', 'fcf_margin'),
             ('EV/Rev', 'ev_rev'),
             ('EV/EBITDA', 'ev_ebitda'),
-            ('Net Cash', 'net_cash'),
+            ('Net Cash & Bonds', 'net_cash'),
             ('Beta', 'beta'),
             ('Mkt Cap', 'mktcap'),
         ]
@@ -191,7 +191,7 @@ class FundamentalsSetupMixin:
         self.p2_chart_hover_proxies = []
         self.p2_fullscreen_dialog = None
         for chart_index, title in enumerate(
-            ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash & Total Debt', 'Operating Expenses']
+            ['Revenue', 'Net Income', 'Cash Flow', 'Shares Outstanding', 'Cash and Bonds & Total Debt', 'Operating Expenses']
         ):
             card = self._p2_create_chart_card(title, chart_index)
             self.p2_chart_cards.append(card)

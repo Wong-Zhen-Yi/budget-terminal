@@ -1,6 +1,17 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable
+
+
+def _positive_amount(value: Any) -> float:
+    try:
+        number = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    return max(number, 0.0)
 
 
 def returns_cache_key(portfolio_id: Any, timeframe_key: Any, symbols: Iterable[Any]) -> tuple[Any, ...]:
@@ -68,3 +79,36 @@ def filtered_summary(
         "checked_stock_pnl": stock_pnl,
         "filtered_total": stock_value + cash - margin,
     }
+
+
+def settle_trade(cash_balance: Any, margin_debt: Any, cost_delta: Any) -> tuple[float, float]:
+    """Settle a cost-basis change against cash first, then margin.
+
+    A positive ``cost_delta`` (a buy) draws down cash and borrows the shortfall on margin.
+    A negative ``cost_delta`` (a sell) repays margin debt first and credits the rest to cash.
+    """
+    cash = _positive_amount(cash_balance)
+    margin = _positive_amount(margin_debt)
+    try:
+        delta = float(cost_delta or 0.0)
+    except (TypeError, ValueError):
+        delta = 0.0
+    if not math.isfinite(delta) or delta == 0.0:
+        return cash, margin
+    if delta > 0.0:
+        from_cash = min(cash, delta)
+        return cash - from_cash, margin + (delta - from_cash)
+    proceeds = -delta
+    repaid = min(margin, proceeds)
+    return cash + (proceeds - repaid), margin - repaid
+
+
+def margin_utilization(stock_market_value: Any, cash_balance: Any, margin_debt: Any) -> float | None:
+    """Return margin debt as a percent of gross assets, or None when there is nothing to report."""
+    margin = _positive_amount(margin_debt)
+    if margin <= 0.0:
+        return None
+    gross_assets = _positive_amount(stock_market_value) + _positive_amount(cash_balance)
+    if gross_assets <= 0.0:
+        return None
+    return margin / gross_assets * 100.0

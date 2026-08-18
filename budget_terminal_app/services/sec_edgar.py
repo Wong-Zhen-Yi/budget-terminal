@@ -129,8 +129,17 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
         "family": "balance_sheet",
         "kind": "instant",
         "units": ("USD",),
+        # Only the combined tag belongs here. A cash-only fallback would publish a value that
+        # contradicts the row name and, because SEC cells win the merge, would overwrite the
+        # correct combined figure Yahoo reports for filers that split cash from investments.
+        "tags": ("CashCashEquivalentsAndShortTermInvestments",),
+    },
+    "cash_and_equivalents": {
+        "row": "Cash And Cash Equivalents",
+        "family": "balance_sheet",
+        "kind": "instant",
+        "units": ("USD",),
         "tags": (
-            "CashCashEquivalentsAndShortTermInvestments",
             "CashAndCashEquivalentsAtCarryingValue",
             "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         ),
@@ -141,6 +150,16 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
         "kind": "instant",
         "units": ("USD",),
         "tags": ("MarketableSecuritiesCurrent", "ShortTermInvestments"),
+    },
+    "marketable_securities_noncurrent": {
+        "row": "Marketable Securities Noncurrent",
+        "family": "balance_sheet",
+        "kind": "instant",
+        "units": ("USD",),
+        "tags": (
+            "MarketableSecuritiesNoncurrent",
+            "AvailableForSaleSecuritiesDebtSecuritiesNoncurrent",
+        ),
     },
     "total_debt": {
         "row": "Total Debt",

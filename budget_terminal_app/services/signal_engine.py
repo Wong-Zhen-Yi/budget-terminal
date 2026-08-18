@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -203,6 +204,57 @@ def _slice_frame_at_index(frame: Any, index: Any = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _to_naive_utc(value: Any) -> datetime | None:
+    """Normalize any pandas timestamp to a tz-naive UTC datetime for comparison."""
+
+    try:
+        timestamp_value = pd.Timestamp(value)
+        if timestamp_value.tzinfo is not None:
+            timestamp_value = timestamp_value.tz_convert("UTC").tz_localize(None)
+        return timestamp_value.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _final_bar_is_open(timestamp: datetime | None, bar_seconds: Any, now: datetime | None) -> bool:
+    """Report whether the last bar's own interval has not elapsed yet."""
+
+    duration = _finite_float(bar_seconds)
+    if timestamp is None or duration is None or duration <= 0.0:
+        return False
+    reference = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    elapsed = (reference - timestamp).total_seconds()
+    # A bar stamped in the future (clock skew, or a source that stamps the bar close) is treated as
+    # complete rather than open, so skew can never silently discard the newest row.
+    return 0.0 <= elapsed < duration
+
+
+@dataclass(frozen=True)
+class _TimeframeRead:
+    row: pd.Series | None
+    status: str
+    timestamp: datetime | None
+    calculated: pd.DataFrame
+    partial: bool = False
+    dropped: bool = False
+    #: ``ok`` | ``short`` (too few bars to score) | ``missing`` (nothing usable arrived).
+    kind: str = "ok"
+
+    @property
+    def available(self) -> bool:
+        """Whether a row could be scored. Kept separate from ``status`` so the status text stays
+        free to describe *which* bar was used without being mistaken for a data failure."""
+
+        return self.row is not None
+
+    def provenance(self) -> dict[str, Any]:
+        return {
+            "as_of": self.timestamp.isoformat() if self.timestamp is not None else None,
+            "partial": bool(self.partial),
+            "dropped": bool(self.dropped),
+        }
+
+
 def _timeframe_row(
     frames: Mapping[str, pd.DataFrame],
     role: str,
@@ -211,25 +263,44 @@ def _timeframe_row(
     *,
     minimum_bars: int,
     include_vwap: bool = False,
-) -> tuple[pd.Series | None, str, datetime | None, pd.DataFrame]:
+    bar_seconds: Any = None,
+    now: datetime | None = None,
+    drop_open_bar: bool = False,
+) -> _TimeframeRead:
     frame = _slice_frame_at_index(frames.get(role), indices.get(role))
     if frame.empty:
-        return None, "Unavailable", None, pd.DataFrame()
-    if len(frame) < minimum_bars:
-        return None, f"Insufficient history ({len(frame)}/{minimum_bars} bars)", None, pd.DataFrame()
+        return _TimeframeRead(None, "Unavailable", None, pd.DataFrame(), kind="missing")
+    # Dropping a still-forming bar consumes one row, so require it up front rather than letting the
+    # drop turn an already-marginal frame into a short one.
+    required_bars = minimum_bars + (1 if drop_open_bar else 0)
+    if len(frame) < required_bars:
+        return _TimeframeRead(
+            None,
+            f"Insufficient history ({len(frame)}/{required_bars} bars)",
+            None,
+            pd.DataFrame(),
+            kind="short",
+        )
     calculated = calculate_indicators(frame, config, include_vwap=include_vwap)
     if calculated.empty:
-        return None, "Malformed OHLCV data", None, pd.DataFrame()
-    row = calculated.iloc[-1]
-    timestamp = calculated.index[-1]
-    try:
-        timestamp_value = pd.Timestamp(timestamp)
-        if timestamp_value.tzinfo is not None:
-            timestamp_value = timestamp_value.tz_convert("UTC").tz_localize(None)
-        timestamp_value = timestamp_value.to_pydatetime()
-    except Exception:
-        timestamp_value = None
-    return row, "Available", timestamp_value, calculated
+        return _TimeframeRead(None, "Malformed OHLCV data", None, pd.DataFrame(), kind="missing")
+
+    position = -1
+    partial = _final_bar_is_open(_to_naive_utc(calculated.index[-1]), bar_seconds, now)
+    dropped = False
+    if partial and drop_open_bar and len(calculated) >= 2:
+        position = -2
+        dropped = True
+    elif partial and drop_open_bar:
+        return _TimeframeRead(
+            None, "Only a partially formed bar is available", None, pd.DataFrame(), kind="short"
+        )
+
+    row = calculated.iloc[position]
+    timestamp_value = _to_naive_utc(calculated.index[position])
+    status = "Available (last closed bar)" if dropped else "Available"
+    scored = calculated.iloc[: position + 1] if position == -2 else calculated
+    return _TimeframeRead(row, status, timestamp_value, scored, partial=partial, dropped=dropped)
 
 
 def _reason(
@@ -273,37 +344,83 @@ class TrendBreakoutStrategy:
         frames: Mapping[str, pd.DataFrame],
         *,
         indices: Mapping[str, Any] | None = None,
+        role_bar_seconds: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
     ) -> SignalResult:
         cfg = self.config
         requested_indices = dict(indices or {})
-        trend, trend_status, trend_timestamp, _ = _timeframe_row(
-            frames, "trend", cfg, requested_indices, minimum_bars=cfg.ema_long
+        bar_seconds = dict(role_bar_seconds or {})
+        # Explicit indices mean a historical replay, where "the last row" is chosen by the caller
+        # and there is no live bar to exclude.
+        drop_open = bool(cfg.score_on_completed_bars) and not requested_indices
+
+        trend_read = _timeframe_row(
+            frames,
+            "trend",
+            cfg,
+            requested_indices,
+            minimum_bars=cfg.ema_long,
+            bar_seconds=bar_seconds.get("trend"),
+            now=now,
+            drop_open_bar=drop_open,
         )
-        momentum, momentum_status, momentum_timestamp, momentum_frame = _timeframe_row(
+        momentum_read = _timeframe_row(
             frames,
             "momentum",
             cfg,
             requested_indices,
             minimum_bars=cfg.macd_slow + cfg.macd_signal,
+            bar_seconds=bar_seconds.get("momentum"),
+            now=now,
+            drop_open_bar=drop_open,
         )
-        setup, setup_status, setup_timestamp, _ = _timeframe_row(
+        setup_read = _timeframe_row(
             frames,
             "setup",
             cfg,
             requested_indices,
             minimum_bars=max(cfg.volume_lookback, cfg.breakout_lookback) + 1,
+            bar_seconds=bar_seconds.get("setup"),
+            now=now,
+            drop_open_bar=drop_open,
         )
-        entry, entry_status, entry_timestamp, _ = _timeframe_row(
-            frames, "entry", cfg, requested_indices, minimum_bars=2, include_vwap=True
+        # The entry role keeps the live bar on purpose: it supplies the current price and the VWAP
+        # distance that the risk filter acts on.
+        entry_read = _timeframe_row(
+            frames,
+            "entry",
+            cfg,
+            requested_indices,
+            minimum_bars=2,
+            include_vwap=True,
+            bar_seconds=bar_seconds.get("entry"),
+            now=now,
         )
+        trend, momentum, setup, entry = trend_read.row, momentum_read.row, setup_read.row, entry_read.row
+        momentum_frame = momentum_read.calculated
         timeframe_status = {
-            "trend": trend_status,
-            "momentum": momentum_status,
-            "setup": setup_status,
-            "entry": entry_status,
+            "trend": trend_read.status,
+            "momentum": momentum_read.status,
+            "setup": setup_read.status,
+            "entry": entry_read.status,
         }
+        timeframe_bars = {
+            "trend": trend_read.provenance(),
+            "momentum": momentum_read.provenance(),
+            "setup": setup_read.provenance(),
+            "entry": entry_read.provenance(),
+        }
+        reads_by_role = {
+            "trend": trend_read,
+            "momentum": momentum_read,
+            "setup": setup_read,
+            "entry": entry_read,
+        }
+        availability = {role: read.available for role, read in reads_by_role.items()}
         timestamp_candidates = [
-            value for value in (entry_timestamp, setup_timestamp, momentum_timestamp, trend_timestamp) if value is not None
+            read.timestamp
+            for read in (entry_read, setup_read, momentum_read, trend_read)
+            if read.timestamp is not None
         ]
         timestamp = max(timestamp_candidates) if timestamp_candidates else datetime.now()
         reasons: list[SignalReason] = []
@@ -405,13 +522,20 @@ class TrendBreakoutStrategy:
             entry_score += vwap_reason.points
 
         raw_score = trend_score + momentum_score + volume_score + entry_score
-        missing = [f"{role}: {status}" for role, status in timeframe_status.items() if status != "Available"]
+        missing = [
+            f"{role}: {timeframe_status[role]}" for role, ok in availability.items() if not ok
+        ]
         signal = classify_score(raw_score, trend_score, cfg) if not missing else SignalClass.NONE
         if not missing and raw_score >= cfg.long_minimum_score and trend_score < cfg.minimum_trend_score_for_long:
             warnings.append("Lower-timeframe strength is capped at WATCH because the higher-timeframe trend is not qualified.")
         if missing:
             warnings.extend(missing)
-            trade_status = TradeStatus.DATA_ERROR
+            # A symbol that is simply too young to carry a 200-bar average is not a feed failure,
+            # and reporting it as one buries real fetch problems among benign rows.
+            only_short = all(
+                read.kind == "short" for role, read in reads_by_role.items() if not availability[role]
+            )
+            trade_status = TradeStatus.INSUFFICIENT_HISTORY if only_short else TradeStatus.DATA_ERROR
             error = "; ".join(missing)
         elif signal in {SignalClass.LONG, SignalClass.STRONG_LONG}:
             trade_status = TradeStatus.VALID_LONG
@@ -443,6 +567,7 @@ class TrendBreakoutStrategy:
             warnings=warnings,
             indicators=indicators,
             timeframe_status=timeframe_status,
+            timeframe_bars=timeframe_bars,
             error=error,
         )
         if result.trade_status is not TradeStatus.DATA_ERROR:
@@ -455,8 +580,13 @@ def evaluate_signal(
     ticker: str,
     frames: Mapping[str, pd.DataFrame],
     config: SignalConfig | None = None,
+    *,
+    role_bar_seconds: Mapping[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> SignalResult:
-    return TrendBreakoutStrategy(config).evaluate(ticker, frames)
+    return TrendBreakoutStrategy(config).evaluate(
+        ticker, frames, role_bar_seconds=role_bar_seconds, now=now
+    )
 
 
 def evaluate_signal_at_index(
@@ -501,6 +631,10 @@ def data_error_result(
             "momentum": "Unavailable",
             "setup": "Unavailable",
             "entry": "Unavailable",
+        },
+        timeframe_bars={
+            role: {"as_of": None, "partial": False, "dropped": False}
+            for role in ("trend", "momentum", "setup", "entry")
         },
         error=error,
     )

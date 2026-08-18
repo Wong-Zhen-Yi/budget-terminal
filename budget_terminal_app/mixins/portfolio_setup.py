@@ -14,6 +14,12 @@ _P4_OPTIONS_SECTION_MIN_HEIGHT = 180
 _P4_TABLE_FIXED_ACTION_WIDTH = 36
 _P4_TABLE_RESIZE_DEBOUNCE_MS = 120
 _P4_HIGHLIGHT_TIMEOUT_MS = 30_000
+# Navigating a cell must not open an editor, so CurrentChanged is deliberately excluded.
+_P4_STOCK_EDIT_TRIGGERS = (
+    QTableWidget.EditTrigger.DoubleClicked
+    | QTableWidget.EditTrigger.EditKeyPressed
+    | QTableWidget.EditTrigger.AnyKeyPressed
+)
 P4_OPTIONS_COLUMNS = (
     'Ticker',
     'Type',
@@ -66,6 +72,35 @@ class _PortfolioManagerList(QListWidget):
             str(self.item(index).data(Qt.ItemDataRole.UserRole) or '')
             for index in range(self.count())
         ])
+
+
+class _PortfolioPositionsTable(QTableWidget):
+    """Positions table that reports whether a cell editor is open.
+
+    Re-rendering a QTableWidget replaces the item under an open editor, which closes it and
+    discards uncommitted text. Callers check `editor_open` to defer renders until editing ends.
+    """
+
+    editingFinished = pyqtSignal()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.editor_open = False
+
+    def edit(self, index: Any, trigger: Any=None, event: Any=None) -> bool:
+        """Track editor creation. Qt also calls this to test whether a trigger would edit."""
+        if trigger is None:
+            return super().edit(index)
+        started = super().edit(index, trigger, event)
+        if started:
+            self.editor_open = True
+        return started
+
+    def closeEditor(self, editor: Any, hint: Any) -> None:
+        """Clear the editing flag. Fires before Qt opens the next editor on Tab."""
+        super().closeEditor(editor, hint)
+        self.editor_open = False
+        self.editingFinished.emit()
 
 
 class _PortfolioNameEdit(QLineEdit):
@@ -336,7 +371,7 @@ class PortfolioSetupMixin:
         if stock_table is not None:
             stock_table.setEditTriggers(
                 QTableWidget.EditTrigger.NoEditTriggers
-                if read_only else QTableWidget.EditTrigger.AllEditTriggers
+                if read_only else _P4_STOCK_EDIT_TRIGGERS
             )
         options_table = getattr(self, 'p4_opt_table', None)
         if options_table is not None:
@@ -1914,8 +1949,16 @@ class PortfolioSetupMixin:
         self.p4_margin_input.setToolTip('Margin debt deducted from portfolio total and counted as debt in Personal Finance')
         self.set_theme_role(self.p4_margin_input, 'cash_input')
         self.p4_margin_input.valueChanged.connect(self._p4_on_margin_debt_changed)
+        self.p4_margin_pct_label = QLabel('')
+        self.p4_margin_pct_label.setToolTip(
+            'Margin used = margin debt / (stock market value + cash)\n'
+            'Green below 15%   Yellow 15-25%   Orange 25-40%   Red above 40%'
+        )
+        self.set_theme_role(self.p4_margin_pct_label, 'summary_chip_label')
+        self.p4_margin_pct_label.setVisible(False)
         margin_chip_layout.addWidget(self.p4_margin_label)
         margin_chip_layout.addWidget(self.p4_margin_input)
+        margin_chip_layout.addWidget(self.p4_margin_pct_label)
         summary_bar.addWidget(title_lbl)
         summary_bar.addSpacing(8)
         summary_bar.addWidget(self.p4_cash_chip)
@@ -2002,12 +2045,12 @@ class PortfolioSetupMixin:
         stock_header_layout.addWidget(export_tickers_btn)
         stock_header_layout.addStretch()
         stock_layout.addLayout(stock_header_layout)
-        self.p4_table = QTableWidget(0, len(P4_PORTFOLIO_COLUMNS))
+        self.p4_table = _PortfolioPositionsTable(0, len(P4_PORTFOLIO_COLUMNS))
         self.p4_table.setHorizontalHeaderLabels(P4_PORTFOLIO_COLUMNS)
         hh = self.p4_table.horizontalHeader()
         hh.setSectionsMovable(True)
         self.p4_table.verticalHeader().setVisible(False)
-        self.p4_table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
+        self.p4_table.setEditTriggers(_P4_STOCK_EDIT_TRIGGERS)
         self.p4_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.p4_table.setAlternatingRowColors(True)
         self.p4_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2017,6 +2060,7 @@ class PortfolioSetupMixin:
         self.p4_table.itemChanged.connect(self._on_tracker_cell_changed)
         self.p4_table.itemSelectionChanged.connect(self._p4_update_remove_stock_button_state)
         self.p4_table.currentCellChanged.connect(self._p4_on_stock_current_cell_changed)
+        self.p4_table.editingFinished.connect(self._p4_on_stock_editor_finished)
         hh.setSortIndicator(P4_PORTFOLIO_COL_MARKET_VALUE, Qt.SortOrder.DescendingOrder)
         self.p4_table.setSortingEnabled(True)
         self._p4_apply_table_width_preferences('stock')
@@ -2205,7 +2249,7 @@ class PortfolioSetupMixin:
         button.setEnabled(bool(
             not self._p4_active_portfolio_is_combined()
             and table is not None
-            and table.rowCount() > 0
+            and self._p4_selected_stock_ticker()
         ))
 
     def _p4_remove_selected_stock_position(self) -> None:

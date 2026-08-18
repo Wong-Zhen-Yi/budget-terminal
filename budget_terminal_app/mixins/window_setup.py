@@ -97,6 +97,7 @@ class WindowSetupMixin:
         33: 'News',
         37: 'Dictionary',
         39: 'Signals',
+        40: 'Quant',
     }
 
     @staticmethod
@@ -219,6 +220,8 @@ class WindowSetupMixin:
         self.btn_page18.setCheckable(True)
         self.btn_page21 = QPushButton('IPO')
         self.btn_page21.setCheckable(True)
+        self.btn_page41 = QPushButton('Quant')
+        self.btn_page41.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
             self.btn_page26,
@@ -249,6 +252,7 @@ class WindowSetupMixin:
             self.btn_page15,
             self.btn_page16,
             self.btn_page38,
+            self.btn_page41,
             self.btn_page9,
         ]
         self._top_refresh_default_text = 'Reload (F5)'
@@ -987,6 +991,7 @@ class WindowSetupMixin:
             {'index': 37, 'page_attr': 'page38', 'init_method': 'init_page38', 'theme_hook': '_apply_dictionary_theme'},
             {'index': 38, 'page_attr': '_retired_page38', 'placeholder_only': True},
             {'index': 39, 'page_attr': 'page40', 'init_method': 'init_page40', 'theme_hook': '_apply_signal_scanner2_theme'},
+            {'index': 40, 'page_attr': 'page41', 'init_method': 'init_page41', 'theme_hook': '_apply_quant_theme'},
         )
 
     def _startup_page_labels(self) -> tuple[tuple[int, str], ...]:

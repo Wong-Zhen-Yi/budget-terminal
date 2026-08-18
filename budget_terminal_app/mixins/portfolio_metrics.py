@@ -40,11 +40,18 @@ from budget_terminal_app.mixins.portfolio_presenters import (
     build_portfolio_stock_row,
     format_market_cap,
     format_market_cap_value,
+    margin_health_color_token,
     market_cap_color_token,
     market_cap_sort_value,
     market_cap_value,
 )
-from budget_terminal_app.services.portfolio_analysis import filtered_summary, filtered_weights, returns_cache_key
+from budget_terminal_app.services.portfolio_analysis import (
+    filtered_summary,
+    filtered_weights,
+    margin_utilization,
+    returns_cache_key,
+    settle_trade,
+)
 from budget_terminal_app.table_cells import TableCell
 from budget_terminal_app.widgets.batched_render import run_batched
 from budget_terminal_app.widgets.table_render import render_table_cell, render_table_row, render_table_rows
@@ -273,9 +280,43 @@ class PortfolioMetricsMixin:
             self._p4_restoring_position_entry_cell = False
 
     def _p4_focus_stock_entry_cell(self, ticker: Any, column: int=P4_PORTFOLIO_COL_SHARES) -> None:
-        """Focus one stock row's editable cell."""
+        """Focus one stock row's editable cell and open its editor."""
         self._p4_begin_position_entry(ticker, column)
         self._p4_restore_position_entry_cell()
+        table = getattr(self, 'p4_table', None)
+        active = self._p4_active_position_entry()
+        if table is None or not active:
+            return
+        row = self._p4_find_stock_row(active.get('ticker'))
+        if row < 0:
+            return
+        item = table.item(row, int(active.get('column', column)))
+        if item is not None:
+            table.editItem(item)
+
+    def _p4_stock_editor_open(self) -> bool:
+        """Return whether a positions cell editor is currently open."""
+        return bool(getattr(getattr(self, 'p4_table', None), 'editor_open', False))
+
+    def _p4_defer_positions_render(self) -> None:
+        """Mark the positions table for a render once the open editor closes."""
+        self._p4_dirty_subtabs = set(getattr(self, '_p4_dirty_subtabs', set()))
+        self._p4_dirty_subtabs.add('positions')
+
+    def _p4_on_stock_editor_finished(self) -> None:
+        """Re-render the positions table once editing has really finished."""
+        QTimer.singleShot(0, self._p4_flush_deferred_positions_render)
+
+    def _p4_flush_deferred_positions_render(self) -> None:
+        """Apply a positions render that was skipped because a cell editor was open."""
+        if self._p4_stock_editor_open():
+            return
+        if 'positions' not in getattr(self, '_p4_dirty_subtabs', set()):
+            return
+        data = getattr(self, 'last_data', None)
+        if not data:
+            return
+        self.update_page4(data, render_scope='positions', mark_hidden_dirty=False)
 
     def _p4_on_stock_current_cell_changed(self, current_row: int, current_column: int, previous_row: int, previous_column: int) -> None:
         """Release the entry guard once focus leaves the protected row."""
@@ -912,6 +953,7 @@ class PortfolioMetricsMixin:
         summary = self._p4_filtered_summary_values(metrics_map)
         if hasattr(self, 'p4_total_label'):
             self.p4_total_label.setText(f'Total:  ${summary["filtered_total"]:,.2f}  USD')
+        self._p4_update_margin_utilization_label(metrics_map)
         stock_pl_label = getattr(self, 'p4_stock_pl_label', None)
         if stock_pl_label is None:
             return
@@ -1033,8 +1075,7 @@ class PortfolioMetricsMixin:
             self.update_page4(last_data, defer_expensive_refresh=True)
         else:
             self._p4_update_cash_dependent_views()
-        if hasattr(self, '_p6_populate_tables'):
-            self._p6_populate_tables(force_progress_rebuild=True)
+        self._p4_refresh_personal_finance_tables()
 
     def _p4_active_margin_debt(self, portfolio_id: Any = None) -> float:
         """Return the selected portfolio's margin debt."""
@@ -1099,14 +1140,116 @@ class PortfolioMetricsMixin:
         """Handle user edits to margin debt."""
         self._p4_set_active_margin_debt(value)
 
+    def _p4_refresh_personal_finance_tables(self) -> None:
+        """Rebuild Personal Finance totals, but only once page 6 has been built.
+
+        Page 6 is lazily initialized, so calling ``_p6_populate_tables`` before its widgets
+        exist raises. ``_call_if_page_initialized`` is missing on lightweight test probes that
+        compose only the portfolio mixins, hence the defensive lookup.
+        """
+        call_if_initialized = getattr(self, '_call_if_page_initialized', None)
+        if callable(call_if_initialized):
+            call_if_initialized('_p6_populate_tables', force_progress_rebuild=True, page_attr='page6')
+        elif hasattr(self, '_p6_populate_tables'):
+            self._p6_populate_tables(force_progress_rebuild=True)
+
+    def _p4_tracker_entry_cost(self, tracker_entry: Any) -> float:
+        """Return one tracker entry's cost basis (shares times average price)."""
+        entry = tracker_entry if isinstance(tracker_entry, dict) else {}
+        try:
+            cost = float(entry.get('shares', 0) or 0) * float(entry.get('avg_price', 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return cost if math.isfinite(cost) else 0.0
+
+    def _p4_margin_utilization_percent(self, metrics_map: Any) -> float | None:
+        """Return margin debt as a percent of gross assets for the active portfolio."""
+        metrics = metrics_map if isinstance(metrics_map, dict) else {}
+        stock_market_value = 0.0
+        for row in metrics.values():
+            try:
+                stock_market_value += float((row or {}).get('market_value', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return margin_utilization(stock_market_value, self._p4_active_cash_balance(), self._p4_active_margin_debt())
+
+    def _p4_update_margin_utilization_label(self, metrics_map: Any) -> None:
+        """Colour-code the margin chip by how much of the account is borrowed."""
+        label = getattr(self, 'p4_margin_pct_label', None)
+        margin_input = getattr(self, 'p4_margin_input', None)
+        if label is None and margin_input is None:
+            return
+        percent = self._p4_margin_utilization_percent(metrics_map)
+        color = self._p4_market_cap_color_from_token(margin_health_color_token(percent))
+        if label is not None:
+            if percent is None:
+                label.setVisible(False)
+            else:
+                label.setText(f'{percent:.1f}% used')
+                label.setStyleSheet(f'color: {color}; font-size: 11px; font-weight: 700;')
+                label.setVisible(True)
+        if margin_input is not None:
+            margin_input.setStyleSheet(
+                f'QDoubleSpinBox[bt_role="cash_input"] {{ color: {color}; }}'
+                if percent is not None else ''
+            )
+
+    def _p4_apply_trade_cash_flow(self, cost_delta: Any, ticker: Any = '') -> None:
+        """Settle a position's cost-basis change against brokerage cash, then margin."""
+        if getattr(self, '_p4_active_portfolio_is_combined', lambda: False)():
+            return
+        try:
+            delta = float(cost_delta or 0.0)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(delta) or delta == 0.0:
+            return
+        previous_cash = self._p4_active_cash_balance()
+        previous_margin = self._p4_active_margin_debt()
+        cash, margin = settle_trade(previous_cash, previous_margin, delta)
+        if cash == previous_cash and margin == previous_margin:
+            return
+        self.active_cash_balance = cash
+        self.active_margin_debt = margin
+        entry = self._get_portfolio_entry(self.active_portfolio_id)
+        entry['cash_balance'] = cash
+        entry['margin_debt'] = margin
+        if self.active_portfolio_id == self.main_portfolio_id:
+            self.cash_balance = cash
+        self._persist_all_portfolios()
+        self._p4_sync_cash_input()
+        self._p4_invalidate_momentum_cache()
+        self._p4_invalidate_portfolio_analytics_cache()
+        self._p4_refresh_personal_finance_tables()
+        self._p4_report_trade_cash_flow(ticker, previous_cash - cash, margin - previous_margin)
+
+    def _p4_report_trade_cash_flow(self, ticker: Any, cash_used: float, margin_added: float) -> None:
+        """Announce an automatic cash/margin settlement so an accidental edit stays visible."""
+        status_bar = getattr(self, 'status_bar', None)
+        if status_bar is None or not hasattr(self, 'set_status_text'):
+            return
+        symbol = str(ticker or '').strip().upper()
+        parts = []
+        if abs(cash_used) >= 0.005:
+            parts.append(f'{self._p4_signed_currency_text(-cash_used)} cash')
+        if abs(margin_added) >= 0.005:
+            parts.append(f'{self._p4_signed_currency_text(margin_added)} margin')
+        if not parts:
+            return
+        prefix = f'{symbol}: ' if symbol else ''
+        self.set_status_text(
+            status_bar,
+            f'{prefix}{", ".join(parts)}',
+            status='warning' if margin_added > 0.0 else 'info',
+        )
+
     def _p4_update_margin_dependent_views(self) -> None:
         """Refresh displays whose net values include margin debt."""
         portfolio = self.last_data.get('portfolio', {}) if isinstance(getattr(self, 'last_data', None), dict) else {}
         metrics_map, _net_total = self._p4_build_tracker_metrics_map(portfolio)
         self._p4_update_filtered_summary_labels(metrics_map)
         self._p4_refresh_pie_chart(metrics_map)
-        if hasattr(self, '_p6_populate_tables'):
-            self._p6_populate_tables(force_progress_rebuild=True)
+        self._p4_refresh_personal_finance_tables()
 
     def _p4_on_cash_weight_inclusion_changed(self, included: bool) -> None:
         """Persist the Cash checkbox and refresh only its filtered views."""
@@ -1936,7 +2079,9 @@ class PortfolioMetricsMixin:
             self._p4_begin_position_entry(ticker, col)
         tracker_data = self._p4_active_tracker_data()
         tracker_entry = tracker_data.setdefault(ticker, {})
+        previous_cost = self._p4_tracker_entry_cost(tracker_entry)
         tracker_entry['shares' if col == P4_PORTFOLIO_COL_SHARES else 'avg_price'] = val
+        self._p4_apply_trade_cash_flow(self._p4_tracker_entry_cost(tracker_entry) - previous_cost, ticker)
         self._persist_all_portfolios()
         if self.last_data:
             self._recalc_tracker_row(row, ticker, self.last_data.get('portfolio', {}))
@@ -1970,6 +2115,7 @@ class PortfolioMetricsMixin:
         if table is not None:
             previous = table.blockSignals(True)
             sorting_enabled = table.isSortingEnabled()
+            keep_sorting_disabled = self._p4_position_entry_is_active()
             if sorting_enabled:
                 table.setSortingEnabled(False)
             try:
@@ -1987,9 +2133,10 @@ class PortfolioMetricsMixin:
                     render_table_cell(table, row, P4_PORTFOLIO_COL_WEIGHT, weight_cell)
                     self._p4_apply_symbol_checkbox(row, ticker)
             finally:
-                if sorting_enabled:
+                if sorting_enabled and not keep_sorting_disabled:
                     table.setSortingEnabled(True)
                 table.blockSignals(previous)
+            self._p4_restore_position_entry_cell()
         if hasattr(self, 'p4_weight_chart'):
             self._update_weight_chart(weights)
         self._p4_refresh_pie_chart(metrics_map)
@@ -2048,6 +2195,13 @@ class PortfolioMetricsMixin:
 
     def _recalc_tracker_row(self, row: Any, ticker: Any, portfolio: Any) -> None:
         """Handle recalc tracker row."""
+        if self._p4_stock_editor_open():
+            # Qt commits data before closing the editor, so on Tab this would rewrite the row
+            # while an editor is still live. The deferred render picks the values up instead.
+            self._p4_defer_positions_render()
+            metrics_map, _total_market_value = self._p4_build_tracker_metrics_map(portfolio)
+            self._p4_update_filtered_summary_labels(metrics_map)
+            return
         metrics_map, _total_market_value = self._p4_build_tracker_metrics_map(portfolio)
         metrics = metrics_map.get(ticker)
         if metrics is None:
@@ -2201,8 +2355,12 @@ class PortfolioMetricsMixin:
             return
         tickers.remove(matched_ticker)
         tracker_data = self._p4_active_tracker_data()
+        removed_cost = self._p4_tracker_entry_cost(
+            tracker_data.get(matched_ticker) or tracker_data.get(clean_ticker)
+        )
         tracker_data.pop(matched_ticker, None)
         tracker_data.pop(clean_ticker, None)
+        self._p4_apply_trade_cash_flow(-removed_cost, clean_ticker)
         self._p4_invalidate_returns_cache()
         self._p4_invalidate_momentum_cache()
         self._p4_invalidate_portfolio_analytics_cache()
@@ -2888,6 +3046,10 @@ class PortfolioMetricsMixin:
 
     def _p4_render_positions_rows(self, rows: Any) -> bool:
         """Render large holdings tables in short, navigation-safe GUI slices."""
+        if self._p4_stock_editor_open():
+            # Replacing items would close the open editor and discard uncommitted text.
+            self._p4_defer_positions_render()
+            return False
         normalized_rows = list(rows or [])
         selected_symbol = ''
         selection_model = self.p4_table.selectionModel()
@@ -3037,6 +3199,11 @@ class PortfolioMetricsMixin:
             self._p4_dirty_subtabs.discard(scope)
             return
 
+        if self._p4_stock_editor_open():
+            # Rendering now would replace the item under the open editor, closing it and
+            # discarding uncommitted text. Summary labels above stay live; the table waits.
+            self._p4_defer_positions_render()
+            return
         active_entry = self._p4_position_entry_is_active()
         preserve_order = active_entry if preserve_visible_order is None else bool(preserve_visible_order)
         defer_refresh = bool(defer_expensive_refresh or active_entry)
