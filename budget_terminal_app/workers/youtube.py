@@ -22,10 +22,10 @@ YOUTUBE_MISSING_DEPENDENCY_MESSAGE = 'yt-dlp is not installed. Install requireme
 
 
 class YouTubeWorker(QObject):
-    item_ready = pyqtSignal(dict)
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-    status = pyqtSignal(str)
+    item_ready = Signal(object)
+    finished = Signal(object)
+    error = Signal(str)
+    status = Signal(str)
 
     def __init__(self, tickers: Any, force_refresh: bool = False) -> None:
         super().__init__()

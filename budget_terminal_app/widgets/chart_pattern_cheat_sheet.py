@@ -3,9 +3,9 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGridLayout,
@@ -266,7 +266,7 @@ class ChartPatternCard(QFrame):
 
 
 class _PatternGridHost(QWidget):
-    resized = pyqtSignal(int)
+    resized = Signal(int)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
         super().resizeEvent(event)
@@ -276,7 +276,7 @@ class _PatternGridHost(QWidget):
 class ChartPatternCheatSheet(QWidget):
     """Offline searchable reference for the app's classical chart patterns."""
 
-    status_changed = pyqtSignal(str)
+    status_changed = Signal(str)
 
     def __init__(self, theme_color: ThemeColor, parent: QWidget | None = None) -> None:
         super().__init__(parent)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtGui import QImage
+from PySide6.QtGui import QImage
 
 from ..compat import *
 from budget_terminal_app.services.global_markets import (
@@ -435,7 +435,7 @@ class GlobalPageMixin:
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.scale(scale_value, scale_value)
-            map_widget.render(painter)
+            map_widget.render(painter, QPoint(0, 0))
         finally:
             painter.end()
         return image

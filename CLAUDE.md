@@ -107,8 +107,22 @@ page mixin  ->  self._data_service_client  ->  DashboardFetchCoordinator  ->  wo
   `_dashboard_wait_for_data_service_client` in `mixins/dashboard.py`.
 - `data_service/coordinator.py` coalesces identical in-flight requests by a normalized key, so two
   pages asking for the same tickers cause one upstream fetch.
-- `workers/` classes are `QObject`s exposing `finished = pyqtSignal(dict)` / `error = pyqtSignal(str)`,
+- `workers/` classes are `QObject`s exposing `finished = Signal(object)` / `error = Signal(str)`,
   moved onto a `QThread`. Long-running work belongs here, never on the GUI thread.
+  Declare container payloads as `Signal(object)`, never `Signal(dict)` or `Signal(list)`: PySide6
+  marshals those through `QVariantMap`/`QVariantList`, which copies the payload and silently turns a
+  dict with non-string keys into `{}`. `object` passes the Python payload through untouched.
+- **Every Yahoo request is paced by one process-wide gate**, installed on yfinance's HTTP session by
+  `services/yahoo_rate_limit.py`. yfinance 1.5.2 has no pacing of its own (`network.retries = 0`) and
+  raises `YFRateLimitError` on 429. The gate smooths bursts to a sustained rate, caps in-flight
+  requests, and on any 429 halves the rate and starts an exponential cooldown, recovering after a
+  run of clean responses. Tune it with `BUDGET_TERMINAL_YF_REQUESTS_PER_SECOND`, `_BURST`,
+  `_MAX_CONCURRENCY`, `_COOLDOWN_SECONDS`; `BUDGET_TERMINAL_YF_RATE_LIMIT=0` disables it.
+  It is installed by the `on_load` hook on the `yf` lazy proxy in `dependencies.py`, so **reach
+  yfinance through `from ..dependencies import yf`, never `import yfinance`** — a direct import
+  bypasses the gate. `YF_LOCK` still serializes multi-step ticker interactions, but it is a mutex,
+  not a rate limiter, and `yf.download(threads=True)` fans out beneath it; do not treat it as
+  throttling.
 - `services/` is deliberately Qt-free and presentation-independent. Put testable calculation and
   data-shaping logic there — that is what the smoke tests import directly.
 
@@ -128,6 +142,9 @@ lazily reuse it via `getattr(self, '_refresh_coordinator', None)`.
   `requests`, and `yfinance` in `_LazyModuleProxy` so those heavy imports happen on first attribute
   access rather than at startup. Do not import them directly at module top level in hot-path
   modules, and do not "clean up" the star imports — ruff ignores `F403`/`F405` for this.
+  It also sets `PYQTGRAPH_QT_LIB=PySide6` before the proxy loads: pyqtgraph probes `PyQt6` ahead of
+  `PySide6`, and letting it pick would put a second Qt binding in the process. Qt symbols come from
+  `PySide6` — use `Signal`/`Slot`, never the PyQt spellings.
 - `paths.py` — resolves every writable location (`%LOCALAPPDATA%\BudgetTerminal`,
   `Documents\Budget Terminal User Data`) and read-only bundled resources via `resource_path()`,
   which is PyInstaller-aware. Never write beside the executable, and do not derive user-data paths

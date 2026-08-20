@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any
 import threading
 import time
-from ..dependencies import QObject, ThreadPoolExecutor, YF_LOCK, is_yahoo_unauthorized_error, logger, math, pd, pyqtSignal, yf
+from ..dependencies import QObject, ThreadPoolExecutor, YF_LOCK, is_yahoo_unauthorized_error, logger, math, pd, Signal, yf
 
 
 def _worker_count(tickers: Any, upper_bound: int = 8) -> int:
@@ -12,7 +12,7 @@ def _worker_count(tickers: Any, upper_bound: int = 8) -> int:
 
 
 class MonthReturnWorker(QObject):
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
 
     def __init__(self, tickers: Any, period: str='1mo', interval: str='1d', start: Any=None) -> None:
         """Initialize the object."""
@@ -100,7 +100,7 @@ def _synthetic_business_index(*, start: Any=None, period: str='1mo') -> Any:
 
 
 class PortfolioMomentumWorker(QObject):
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
 
     def __init__(self, tickers: Any, shares_map: Any, period: str='1mo', interval: str='1d', start: Any=None, cash_amount: Any=0.0) -> None:
         """Initialize the object."""
@@ -262,7 +262,7 @@ class PortfolioMomentumWorker(QObject):
 
 
 class PortfolioAnalyticsWorker(QObject):
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
 
     _ANNUALIZATION_DAYS = 252.0
     _LOOKBACK_PERIODS = {
@@ -660,7 +660,7 @@ class PortfolioAnalyticsWorker(QObject):
 
 
 class MarketCapWorker(QObject):
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
     _ETF_AUM_CACHE_TTL_SECONDS = 24 * 60 * 60
     _ETF_AUM_CACHE: dict[str, float] = {}
     _ETF_AUM_CACHE_AT = 0.0

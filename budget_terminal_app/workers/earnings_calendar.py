@@ -58,8 +58,8 @@ def earnings_symbol_universe_cache_path() -> Path:
 class EarningsCalendarWorker(QObject):
     """Background wrapper for all-market US-listed company earnings rows."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(
         self,

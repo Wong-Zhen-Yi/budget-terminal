@@ -3,6 +3,7 @@ import time
 from typing import Any
 from ..compat import *
 from ..widgets.batched_render import cancel_all_batched
+from ..services.thread_shutdown import shutdown_worker_threads
 
 
 REFRESH_ROUTE_ARCHITECTURE = {
@@ -1953,8 +1954,8 @@ class WindowLifecycleMixin:
         if reply == QMessageBox.StandardButton.Yes:
             self.close()
 
-    def closeEvent(self, event: Any) -> None:
-        """Closeevent."""
+    def _shutdown_stop_activity(self) -> None:
+        """Stop refresh controllers, timers, and input hooks before state is written."""
         self._refresh_shutdown = True
         self._p40_stop_controller()
         coordinator = getattr(self, '_refresh_coordinator', None)
@@ -1984,15 +1985,14 @@ class WindowLifecycleMixin:
         p6_goal_timer = getattr(self, '_p6_goal_anim_timer', None)
         if p6_goal_timer is not None:
             p6_goal_timer.stop()
-        p6_fx_thread = getattr(self, '_p6_fx_thread', None)
-        if p6_fx_thread is not None and p6_fx_thread.isRunning():
-            p6_fx_thread.quit()
-            p6_fx_thread.wait(3000)
         app = QApplication.instance()
         global_filter = getattr(self, '_global_input_exit_filter', None)
         if app is not None and global_filter is not None and getattr(self, '_app_keyboard_event_filter_installed', False):
             app.removeEventFilter(global_filter)
             self._app_keyboard_event_filter_installed = False
+
+    def _shutdown_persist_state(self) -> None:
+        """Write portfolio, dashboard, and per-page session state to disk."""
         main_entry = self._get_portfolio_entry(self.main_portfolio_id)
         main_entry['portfolio'] = self.tickers
         main_entry['chart_slots'] = self.chart_slots
@@ -2034,6 +2034,9 @@ class WindowLifecycleMixin:
         if self._page_initialized(page_attr='page6') and hasattr(self, '_p6_on_goal_controls_changed'):
             self._p6_on_goal_controls_changed()
         save_networth_data(self.networth_data)
+
+    def _shutdown_executors(self) -> None:
+        """Cancel queued work in every thread-pool executor the window owns."""
         dashboard_executor = getattr(self, '_dashboard_fetch_executor', None)
         if dashboard_executor is not None:
             dashboard_executor.shutdown(wait=False, cancel_futures=True)
@@ -2081,8 +2084,36 @@ class WindowLifecycleMixin:
         economic_stop = getattr(self, '_p42_stop_controller', None)
         if callable(economic_stop):
             economic_stop()
-        handler = getattr(self, '_session_log_handler', None)
-        if handler is not None:
-            logger.removeHandler(handler)
-            self._session_log_handler = None
+
+    def closeEvent(self, event: Any) -> None:
+        """Shut down in guarded phases so no single failure can skip worker-thread teardown.
+
+        A QThread still running when Python finalizes it aborts the process with no traceback, so
+        the drain has to run even when persistence raises on the way out.
+        """
+        for label, step in (
+            ('stop activity', self._shutdown_stop_activity),
+            ('persist state', self._shutdown_persist_state),
+            ('shut down executors', self._shutdown_executors),
+        ):
+            try:
+                step()
+            except Exception:
+                logger.exception('Shutdown phase failed: %s.', label)
+        try:
+            summary = shutdown_worker_threads(self, logger=logger)
+            if summary['lingering']:
+                logger.error(
+                    'Worker threads still running at close: %s.',
+                    ', '.join(summary['lingering']),
+                )
+        except Exception:
+            logger.exception('Worker thread shutdown failed.')
+        try:
+            handler = getattr(self, '_session_log_handler', None)
+            if handler is not None:
+                logger.removeHandler(handler)
+                self._session_log_handler = None
+        except Exception:
+            logger.exception('Unable to detach the session log handler.')
         event.accept()

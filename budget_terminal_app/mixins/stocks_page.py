@@ -18,23 +18,39 @@ STOCKS_MFI_OVERSOLD = 20
 STOCKS_FUNDAMENTAL_FIELDS = (
     ('Market cap', 'market_cap'),
     ('Revenue', 'revenue'),
-    ('Net Income', 'net_income'),
+    ('Net income', 'net_income'),
     ('EPS', 'eps'),
-    ('Gross Margin', 'gross_margin'),
-    ('Operating Margin', 'operating_margin'),
-    ('Net Margin', 'net_margin'),
+    ('Gross margin', 'gross_margin'),
+    ('Operating margin', 'operating_margin'),
+    ('Net margin', 'net_margin'),
     ('Shares outstanding', 'shares_outstanding'),
-    ('PE', 'pe'),
-    ('Forward PE', 'forward_pe'),
+    ('P/E', 'pe'),
+    ('Forward P/E', 'forward_pe'),
     ('Dividend', 'dividend'),
-    ('Ex-Dividend date', 'ex_dividend_date'),
+    ('Ex-dividend date', 'ex_dividend_date'),
     ('Volume', 'volume'),
     ('Beta', 'beta'),
     ('Earnings date', 'earnings_date'),
 )
 STOCKS_PRICE_TARGET_FIELDS = (
+    ('Low', 'low_target'),
     ('Mean', 'mean_target'),
-    ('Upside', 'upside_to_mean'),
+    ('High', 'high_target'),
+    ('Upside to mean', 'upside_to_mean'),
+    ('Analysts', 'analyst_count'),
+)
+STOCKS_RANGE_PRESETS = (
+    ('1M', 21),
+    ('3M', 63),
+    ('6M', 126),
+    ('1Y', 252),
+    ('3Y', 0),
+)
+STOCKS_HANDOFF_BUTTONS = (
+    ('charts', 'Charts', 'Open this ticker on the Charts page.'),
+    ('fundamentals', 'Fundamentals', 'Open this ticker on the Fundamentals page.'),
+    ('options', 'Options', 'Open this ticker on the Options page.'),
+    ('valuation', 'Valuation', 'Open this ticker on the Valuation page.'),
 )
 
 
@@ -66,6 +82,8 @@ class StocksPageMixin:
         self._stocks_target_value_labels = []
         self.stocks_auto_follow = bool(state.get('auto', True))
         self.stocks_mfi_enabled = bool(state.get('mfi_enabled', False))
+        self.stocks_range_buttons = {}
+        self._stocks_range_preset = self._stocks_normalize_range_preset(state.get('range_preset', ''))
         self._stocks_view_change_guard = False
         self._stocks_manual_x_range = None
         self._stocks_pending_x_range = None
@@ -91,47 +109,54 @@ class StocksPageMixin:
 
         ticker_frame = QFrame()
         self.set_theme_role(ticker_frame, 'panel')
-        ticker_frame.setMinimumHeight(132)
         ticker_layout = QVBoxLayout(ticker_frame)
-        ticker_layout.setContentsMargins(10, 8, 10, 8)
-        ticker_layout.setSpacing(5)
+        ticker_layout.setContentsMargins(10, 10, 10, 10)
+        ticker_layout.setSpacing(8)
+        symbol_row = QHBoxLayout()
+        symbol_row.setContentsMargins(0, 0, 0, 0)
+        symbol_row.setSpacing(6)
         self.stocks_symbol_input = QLineEdit(self.stocks_symbol)
-        self.stocks_symbol_input.setPlaceholderText('Stock ticker')
+        self.stocks_symbol_input.setPlaceholderText('Ticker')
         self.stocks_symbol_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.stocks_symbol_input.setMinimumHeight(32)
+        self.stocks_symbol_input.setMinimumHeight(40)
+        self.stocks_symbol_input.setClearButtonEnabled(True)
+        self.stocks_symbol_input.setToolTip('Type a ticker and press Enter to load it.')
         self.stocks_symbol_input.returnPressed.connect(self._stocks_load_from_input)
-        ticker_layout.addWidget(self.stocks_symbol_input)
+        self.stocks_load_btn = QPushButton('Load')
+        self.set_theme_variant(self.stocks_load_btn, 'accent')
+        self.stocks_load_btn.setMinimumHeight(40)
+        self.stocks_load_btn.setMinimumWidth(76)
+        self.stocks_load_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stocks_load_btn.setToolTip('Fetch quote, fundamentals, news and holders for this ticker.')
+        self.stocks_load_btn.clicked.connect(self._stocks_load_from_input)
+        symbol_row.addWidget(self.stocks_symbol_input, 1)
+        symbol_row.addWidget(self.stocks_load_btn, 0)
+        ticker_layout.addLayout(symbol_row)
+        self.stocks_handoff_title = QLabel('Open this ticker in')
+        self.set_theme_role(self.stocks_handoff_title, 'card_title')
+        ticker_layout.addWidget(self.stocks_handoff_title)
         ticker_actions = QGridLayout()
         ticker_actions.setContentsMargins(0, 0, 0, 0)
         ticker_actions.setHorizontalSpacing(6)
         ticker_actions.setVerticalSpacing(6)
-        self.stocks_load_btn = QPushButton('Load')
-        self.set_theme_variant(self.stocks_load_btn, 'accent')
-        self.stocks_load_btn.clicked.connect(self._stocks_load_from_input)
-        self.stocks_go_to_charts_btn = QPushButton('Go to Charts')
-        self.stocks_go_to_charts_btn.clicked.connect(self._stocks_go_to_charts)
-        self.stocks_go_to_fundamentals_btn = QPushButton('Go to Fundamentals')
-        self.stocks_go_to_fundamentals_btn.clicked.connect(self._stocks_go_to_fundamentals)
-        self.stocks_go_to_options_btn = QPushButton('Go to Options')
-        self.stocks_go_to_options_btn.clicked.connect(self._stocks_go_to_options)
-        self.stocks_go_to_valuation_btn = QPushButton('Go to Valuation')
-        self.stocks_go_to_valuation_btn.clicked.connect(self._stocks_go_to_valuation)
-        self.stocks_export_btn = QPushButton('Export for LLM')
-        self.set_theme_variant(self.stocks_export_btn, 'positive')
-        self.stocks_export_btn.clicked.connect(self._stocks_export_for_llm)
-        ticker_actions.addWidget(self.stocks_load_btn, 0, 0)
-        ticker_actions.addWidget(self.stocks_go_to_charts_btn, 0, 1)
-        ticker_actions.addWidget(self.stocks_go_to_fundamentals_btn, 1, 0)
-        ticker_actions.addWidget(self.stocks_go_to_options_btn, 1, 1)
+        for button_index, (key, label_text, tooltip) in enumerate(STOCKS_HANDOFF_BUTTONS):
+            handoff_btn = QPushButton(label_text)
+            handoff_btn.setMinimumHeight(28)
+            handoff_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            handoff_btn.setToolTip(tooltip)
+            handoff_btn.clicked.connect(getattr(self, f'_stocks_go_to_{key}'))
+            setattr(self, f'stocks_go_to_{key}_btn', handoff_btn)
+            ticker_actions.addWidget(handoff_btn, button_index // 2, button_index % 2)
         ticker_actions.setColumnStretch(0, 1)
         ticker_actions.setColumnStretch(1, 1)
         ticker_layout.addLayout(ticker_actions)
-        ticker_handoff_row = QHBoxLayout()
-        ticker_handoff_row.setContentsMargins(0, 0, 0, 0)
-        ticker_handoff_row.setSpacing(6)
-        ticker_handoff_row.addWidget(self.stocks_go_to_valuation_btn, 1)
-        ticker_handoff_row.addWidget(self.stocks_export_btn, 1)
-        ticker_layout.addLayout(ticker_handoff_row)
+        self.stocks_export_btn = QPushButton('Export for LLM')
+        self.set_theme_variant(self.stocks_export_btn, 'positive')
+        self.stocks_export_btn.setMinimumHeight(28)
+        self.stocks_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stocks_export_btn.setToolTip('Copy the whole workspace to the clipboard as markdown.')
+        self.stocks_export_btn.clicked.connect(self._stocks_export_for_llm)
+        ticker_layout.addWidget(self.stocks_export_btn)
         left_layout.addWidget(ticker_frame)
 
         fundamentals_frame = QFrame()
@@ -142,9 +167,18 @@ class StocksPageMixin:
         self.stocks_company_label = QLabel('—')
         self.stocks_company_label.setWordWrap(True)
         fundamentals_layout.addWidget(self.stocks_company_label)
+        self.stocks_company_subtitle = QLabel('')
+        self.stocks_company_subtitle.setWordWrap(True)
+        self.stocks_company_subtitle.setVisible(False)
+        fundamentals_layout.addWidget(self.stocks_company_subtitle)
+        self.stocks_company_divider = QFrame()
+        self.stocks_company_divider.setFrameShape(QFrame.Shape.HLine)
+        self.stocks_company_divider.setFrameShadow(QFrame.Shadow.Plain)
+        self.stocks_company_divider.setFixedHeight(1)
+        fundamentals_layout.addWidget(self.stocks_company_divider)
         fundamentals_grid = QGridLayout()
         fundamentals_grid.setHorizontalSpacing(12)
-        fundamentals_grid.setVerticalSpacing(2)
+        fundamentals_grid.setVerticalSpacing(3)
         for row_index, (label_text, field_key) in enumerate(STOCKS_FUNDAMENTAL_FIELDS):
             grid_row = row_index * 2
             name_label = QLabel(label_text)
@@ -169,12 +203,13 @@ class StocksPageMixin:
                 fundamentals_grid.addWidget(row_line, grid_row + 1, 0, 1, 2)
         fundamentals_grid.setColumnStretch(1, 1)
         fundamentals_layout.addLayout(fundamentals_grid)
+        fundamentals_layout.addStretch(1)
         price_targets_frame = QFrame()
         self.set_theme_role(price_targets_frame, 'panel')
         targets_layout = QVBoxLayout(price_targets_frame)
         targets_layout.setContentsMargins(10, 8, 10, 8)
         targets_layout.setSpacing(5)
-        targets_title = QLabel('Price Targets')
+        targets_title = QLabel('Price targets')
         self.set_theme_role(targets_title, 'section_title')
         targets_layout.addWidget(targets_title)
         targets_grid = QGridLayout()
@@ -192,17 +227,19 @@ class StocksPageMixin:
             targets_grid.addWidget(value_label, row_index, 1, 1, 1)
         targets_grid.setColumnStretch(1, 1)
         targets_layout.addLayout(targets_grid)
+        targets_layout.addStretch(1)
 
         news_frame = QFrame()
         self.set_theme_role(news_frame, 'panel')
         news_layout = QVBoxLayout(news_frame)
         news_layout.setContentsMargins(10, 8, 10, 8)
         news_layout.setSpacing(5)
-        news_title = QLabel('News')
-        self.set_theme_role(news_title, 'section_title')
-        news_layout.addWidget(news_title)
+        self.stocks_news_title = QLabel('News')
+        self.set_theme_role(self.stocks_news_title, 'section_title')
+        news_layout.addWidget(self.stocks_news_title)
         self.stocks_news_empty = QLabel('Load a ticker to inspect recent headlines.')
         self.stocks_news_empty.setWordWrap(True)
+        self._stocks_prepare_empty_label(self.stocks_news_empty)
         news_layout.addWidget(self.stocks_news_empty)
         self.stocks_news_table = self._make_news_table(self._open_news_link_table)
         self.stocks_news_table.verticalHeader().setDefaultSectionSize(22)
@@ -217,11 +254,12 @@ class StocksPageMixin:
         institutional_layout = QVBoxLayout(institutional_frame)
         institutional_layout.setContentsMargins(10, 8, 10, 8)
         institutional_layout.setSpacing(5)
-        institutional_title = QLabel('Top Institutional holders')
-        self.set_theme_role(institutional_title, 'section_title')
-        institutional_layout.addWidget(institutional_title)
+        self.stocks_institutional_title = QLabel('Top institutional holders')
+        self.set_theme_role(self.stocks_institutional_title, 'section_title')
+        institutional_layout.addWidget(self.stocks_institutional_title)
         self.stocks_institutional_empty = QLabel('Load a ticker to inspect top institutional holders.')
         self.stocks_institutional_empty.setWordWrap(True)
+        self._stocks_prepare_empty_label(self.stocks_institutional_empty)
         institutional_layout.addWidget(self.stocks_institutional_empty)
         self.stocks_institutional_table = QTableWidget(0, 6)
         self.stocks_institutional_table.setHorizontalHeaderLabels(['Holder', '% Held', 'Shares', 'Value', 'Change', 'Reported'])
@@ -253,6 +291,7 @@ class StocksPageMixin:
         self.stocks_description_output = QPlainTextEdit()
         self.stocks_description_output.setReadOnly(True)
         self.stocks_description_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.stocks_description_output.setPlaceholderText('Load a ticker to read its company description.')
         self.stocks_description_output.setMinimumHeight(80)
         description_layout.addWidget(self.stocks_description_output, 1)
 
@@ -261,11 +300,12 @@ class StocksPageMixin:
         insider_layout = QVBoxLayout(insider_frame)
         insider_layout.setContentsMargins(10, 8, 10, 8)
         insider_layout.setSpacing(5)
-        insider_title = QLabel('Insider transactions')
-        self.set_theme_role(insider_title, 'section_title')
-        insider_layout.addWidget(insider_title)
+        self.stocks_insider_title = QLabel('Insider transactions')
+        self.set_theme_role(self.stocks_insider_title, 'section_title')
+        insider_layout.addWidget(self.stocks_insider_title)
         self.stocks_insider_empty = QLabel('Load a ticker to inspect insider transactions.')
         self.stocks_insider_empty.setWordWrap(True)
+        self._stocks_prepare_empty_label(self.stocks_insider_empty)
         insider_layout.addWidget(self.stocks_insider_empty)
         self.stocks_insider_table = QTableWidget(0, 6)
         self.stocks_insider_table.setHorizontalHeaderLabels(['Date', 'Insider', 'Title/Relation', 'Transaction', 'Shares', 'Value'])
@@ -292,33 +332,52 @@ class StocksPageMixin:
         chart_layout.setContentsMargins(10, 8, 10, 8)
         chart_layout.setSpacing(5)
         chart_title_row = QHBoxLayout()
-        self.stocks_chart_title = QLabel('Stock Chart')
-        self.set_theme_role(self.stocks_chart_title, 'page_title')
-        self.stocks_auto_btn = QPushButton('Auto')
-        self.stocks_auto_btn.setCheckable(True)
-        self.stocks_auto_btn.clicked.connect(self._stocks_toggle_auto_follow)
-        self.stocks_mfi_btn = QPushButton('MFI')
-        self.stocks_mfi_btn.setCheckable(True)
-        self.stocks_mfi_btn.clicked.connect(self._stocks_toggle_mfi_enabled)
-        self.stocks_status_label = QLabel('Ready')
-        self.set_theme_role(self.stocks_status_label, 'status_muted')
-        chart_title_row.addWidget(self.stocks_chart_title)
-        chart_title_row.addStretch()
-        chart_title_row.addWidget(self.stocks_auto_btn)
-        chart_title_row.addWidget(self.stocks_mfi_btn)
-        chart_title_row.addWidget(self.stocks_status_label)
-        chart_layout.addLayout(chart_title_row)
-        chart_quote_row = QHBoxLayout()
+        chart_title_row.setSpacing(10)
         self.stocks_chart_symbol_label = QLabel(self.stocks_symbol)
         self.stocks_chart_price_label = QLabel('--')
         self.stocks_chart_change_label = QLabel('--')
-        chart_quote_row.addWidget(self.stocks_chart_symbol_label)
-        chart_quote_row.addWidget(self.stocks_chart_price_label)
-        chart_quote_row.addWidget(self.stocks_chart_change_label)
-        chart_quote_row.addStretch()
-        chart_layout.addLayout(chart_quote_row)
+        chart_title_row.addWidget(self.stocks_chart_symbol_label)
+        chart_title_row.addWidget(self.stocks_chart_price_label)
+        chart_title_row.addWidget(self.stocks_chart_change_label)
+        chart_title_row.addStretch()
+        self.stocks_range_buttons = {}
+        range_row = QHBoxLayout()
+        range_row.setContentsMargins(0, 0, 0, 0)
+        range_row.setSpacing(2)
+        for preset_key, preset_bars in STOCKS_RANGE_PRESETS:
+            range_btn = QPushButton(preset_key)
+            range_btn.setCheckable(True)
+            range_btn.setFixedWidth(38)
+            range_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            range_btn.setToolTip(f'Zoom the chart to the last {preset_key}.' if preset_bars else 'Zoom the chart to the full loaded history.')
+            range_btn.clicked.connect(lambda _checked=False, key=preset_key: self._stocks_select_range_preset(key))
+            self.stocks_range_buttons[preset_key] = range_btn
+            range_row.addWidget(range_btn)
+        chart_title_row.addLayout(range_row)
+        self.stocks_auto_btn = QPushButton('Auto')
+        self.stocks_auto_btn.setCheckable(True)
+        self.stocks_auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stocks_auto_btn.setToolTip('Keep the newest candle anchored in view when new data loads.')
+        self.stocks_auto_btn.clicked.connect(self._stocks_toggle_auto_follow)
+        self.stocks_mfi_btn = QPushButton('MFI')
+        self.stocks_mfi_btn.setCheckable(True)
+        self.stocks_mfi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stocks_mfi_btn.setToolTip(f'Show the Money Flow Index ({STOCKS_MFI_PERIOD}) sub-panel below the chart.')
+        self.stocks_mfi_btn.clicked.connect(self._stocks_toggle_mfi_enabled)
+        chart_title_row.addWidget(self.stocks_auto_btn)
+        chart_title_row.addWidget(self.stocks_mfi_btn)
+        chart_layout.addLayout(chart_title_row)
+        chart_detail_row = QHBoxLayout()
+        chart_detail_row.setContentsMargins(0, 0, 0, 0)
+        chart_detail_row.setSpacing(10)
         self.stocks_chart_ohlc_label = QLabel('O --  H --  L --  C --')
-        chart_layout.addWidget(self.stocks_chart_ohlc_label)
+        self.stocks_status_label = QLabel('Ready')
+        self.set_theme_role(self.stocks_status_label, 'status_muted')
+        self.stocks_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        chart_detail_row.addWidget(self.stocks_chart_ohlc_label)
+        chart_detail_row.addStretch()
+        chart_detail_row.addWidget(self.stocks_status_label)
+        chart_layout.addLayout(chart_detail_row)
         self.stocks_chart_axis = DateAxisItem(orientation='bottom')
         self.stocks_plot = pg.PlotWidget(axisItems={'bottom': self.stocks_chart_axis})
         self.stocks_plot.showGrid(x=True, y=True, alpha=0.15)
@@ -346,9 +405,10 @@ class StocksPageMixin:
         self.stocks_left_splitter.addWidget(fundamentals_frame)
         self.stocks_left_splitter.addWidget(price_targets_frame)
         self.stocks_left_splitter.addWidget(description_frame)
-        self.stocks_left_splitter.setStretchFactor(0, 4)
-        self.stocks_left_splitter.setStretchFactor(1, 2)
-        self.stocks_left_splitter.setStretchFactor(2, 3)
+        # Metrics and targets have a fixed row count, so spare height belongs to the description.
+        self.stocks_left_splitter.setStretchFactor(0, 0)
+        self.stocks_left_splitter.setStretchFactor(1, 0)
+        self.stocks_left_splitter.setStretchFactor(2, 1)
         left_layout.addWidget(self.stocks_left_splitter, 1)
 
         middle_column = QWidget()
@@ -462,6 +522,7 @@ class StocksPageMixin:
             'symbol': self.stocks_symbol,
             'auto': self.stocks_auto_follow,
             'mfi_enabled': self.stocks_mfi_enabled,
+            'range_preset': getattr(self, '_stocks_range_preset', ''),
             'main_splitter_sizes': self._stocks_current_splitter_sizes('stocks_main_splitter', 3, 'main_splitter_sizes'),
             'left_splitter_sizes': self._stocks_current_splitter_sizes('stocks_left_splitter', 3, 'left_splitter_sizes'),
             'middle_splitter_sizes': self._stocks_current_splitter_sizes('stocks_middle_splitter', 3, 'middle_splitter_sizes'),
@@ -511,8 +572,71 @@ class StocksPageMixin:
         self.stocks_mfi_btn.setProperty('bt_checked', 'true' if self.stocks_mfi_enabled else 'false')
         self._repolish_widget(self.stocks_mfi_btn)
 
+    def _stocks_prepare_empty_label(self, label: Any) -> None:
+        """Keep a panel placeholder pinned under its title instead of floating mid-panel."""
+        label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+    def _stocks_set_section_title(self, label: Any, base_text: str, count: int) -> None:
+        """Show a live row count beside a section title once rows are rendered."""
+        if label is None:
+            return
+        label.setText(f'{base_text}  ·  {count}' if count > 0 else base_text)
+
+    def _stocks_normalize_range_preset(self, value: Any) -> str:
+        text = str(value or '').upper().strip()
+        return text if any(text == preset_key for preset_key, _ in STOCKS_RANGE_PRESETS) else ''
+
+    def _stocks_range_preset_bars(self, preset_key: str) -> int:
+        for candidate_key, preset_bars in STOCKS_RANGE_PRESETS:
+            if candidate_key == preset_key:
+                return int(preset_bars)
+        return 0
+
+    def _stocks_update_range_button_styles(self) -> None:
+        for preset_key, range_btn in getattr(self, 'stocks_range_buttons', {}).items():
+            selected = preset_key == self._stocks_range_preset
+            range_btn.blockSignals(True)
+            range_btn.setChecked(selected)
+            range_btn.blockSignals(False)
+            range_btn.setProperty('bt_checked', 'true' if selected else 'false')
+            self._repolish_widget(range_btn)
+
+    def _stocks_select_range_preset(self, preset_key: Any) -> None:
+        self._stocks_range_preset = self._stocks_normalize_range_preset(preset_key)
+        self._stocks_update_range_button_styles()
+        self._stocks_apply_range_preset()
+        self._stocks_save_state()
+
+    def _stocks_clear_range_preset(self) -> None:
+        """Drop the preset highlight once the user pans or zooms the chart by hand."""
+        if not self._stocks_range_preset:
+            return
+        self._stocks_range_preset = ''
+        self._stocks_update_range_button_styles()
+
+    def _stocks_apply_range_preset(self) -> None:
+        if not self._stocks_range_preset or not self._stocks_chart_rows:
+            return
+        row_count = float(len(self._stocks_chart_rows))
+        preset_bars = float(self._stocks_range_preset_bars(self._stocks_range_preset) or row_count)
+        span = max(STOCKS_MIN_REUSABLE_SPAN, min(preset_bars, row_count))
+        latest_index = row_count - 1.0
+        anchored = (latest_index - span * STOCKS_AUTO_ANCHOR, latest_index + span * (1.0 - STOCKS_AUTO_ANCHOR))
+        self._stocks_set_x_range(anchored)
+        self._stocks_apply_auto_y_range(anchored)
+        if not self.stocks_auto_follow:
+            self._stocks_manual_x_range = anchored
+
     def _stocks_update_indicator_panel_visibility(self) -> None:
-        self.stocks_mfi_plot.setVisible(bool(self.stocks_mfi_enabled and self._stocks_chart_rows))
+        show_indicator = bool(self.stocks_mfi_enabled and self._stocks_chart_rows)
+        self.stocks_mfi_plot.setVisible(show_indicator)
+        # The indicator panel carries its own date axis, so only one of the two should show it.
+        plot_item = self.stocks_plot.getPlotItem()
+        if show_indicator:
+            plot_item.hideAxis('bottom')
+        else:
+            plot_item.showAxis('bottom')
 
     def _stocks_toggle_auto_follow(self, checked: Any=False) -> None:
         self.stocks_auto_follow = bool(checked)
@@ -614,6 +738,7 @@ class StocksPageMixin:
         current_range = self._stocks_get_current_x_range()
         if not current_range:
             return
+        self._stocks_clear_range_preset()
         if self.stocks_auto_follow:
             self._stocks_apply_auto_x_range(current_range)
             self._stocks_apply_auto_y_range(self._stocks_get_current_x_range())
@@ -783,7 +908,9 @@ class StocksPageMixin:
         self._stocks_chart_rows = list(self._stocks_chart_df.itertuples()) if self._stocks_chart_df is not None else []
         self._stocks_mfi_series = self._stocks_calculate_mfi(self._stocks_chart_df)
         self._stocks_render_chart()
-        if self.stocks_auto_follow:
+        if self._stocks_range_preset and not self._stocks_pending_x_range:
+            self._stocks_apply_range_preset()
+        elif self.stocks_auto_follow:
             self._stocks_apply_auto_x_range(self._stocks_pending_x_range)
         else:
             self._stocks_restore_manual_x_range()
@@ -801,7 +928,15 @@ class StocksPageMixin:
         self._stocks_pending_x_range = None
         if update_collection_info:
             self._set_data_collection_info(['yfinance'])
-        self._stocks_set_status(status_text or f'Loaded {self.stocks_symbol}.', 'positive', include_global=include_global_status)
+        if status_text:
+            resolved_status, status_level = (status_text, 'positive')
+        elif not self._stocks_info:
+            # Yahoo serves the chart and the metadata separately, so say which half is missing.
+            resolved_status = f'Loaded {self.stocks_symbol} chart only - Yahoo returned no company metadata.'
+            status_level = 'warning'
+        else:
+            resolved_status, status_level = (f'Loaded {self.stocks_symbol}.', 'positive')
+        self._stocks_set_status(resolved_status, status_level, include_global=include_global_status)
         self._stocks_save_session_snapshot()
 
     def _stocks_apply_payload(self, request_id: int, payload: dict[str, Any]) -> None:
@@ -1007,8 +1142,10 @@ class StocksPageMixin:
         chart_stats = payload.get('chart', {}).get('stats', {}) if isinstance(payload.get('chart', {}), dict) else {}
         symbol = str(payload.get('symbol') or self.stocks_symbol)
         company_name = str(info.get('longName') or info.get('shortName') or symbol).strip() or symbol
-        subtitle = ' | '.join(part for part in (str(info.get('exchange') or '').strip(), str(info.get('sector') or '').strip(), str(info.get('industry') or '').strip()) if part)
-        self.stocks_company_label.setText(company_name if not subtitle else f'{company_name}\n{subtitle}')
+        subtitle = '  ·  '.join(part for part in (str(info.get('exchange') or '').strip(), str(info.get('sector') or '').strip(), str(info.get('industry') or '').strip()) if part)
+        self.stocks_company_label.setText(company_name)
+        self.stocks_company_subtitle.setText(subtitle)
+        self.stocks_company_subtitle.setVisible(bool(subtitle))
         self.stocks_chart_symbol_label.setText(symbol)
         metrics = {
             'market_cap': self._stocks_format_compact_value(self._stocks_info_value(info, 'marketCap')),
@@ -1059,13 +1196,34 @@ class StocksPageMixin:
         mean_target = self._stocks_info_value(info, 'targetMeanPrice')
         upside_to_mean = self._stocks_calculate_target_upside(current_price, mean_target)
         values = {
+            'low_target': self._stocks_format_currency(self._stocks_info_value(info, 'targetLowPrice')),
             'mean_target': self._stocks_format_currency(mean_target),
+            'high_target': self._stocks_format_currency(self._stocks_info_value(info, 'targetHighPrice')),
             'upside_to_mean': upside_to_mean,
+            'analyst_count': self._stocks_format_integer(self._stocks_info_value(info, 'numberOfAnalystOpinions')),
         }
         for _, field_key in STOCKS_PRICE_TARGET_FIELDS:
-            self.stocks_target_labels[field_key].setText(str(values.get(field_key, 'N/A')))
+            label = self.stocks_target_labels.get(field_key)
+            if label is not None:
+                label.setText(str(values.get(field_key, 'N/A')))
+        self._stocks_style_target_values()
+
+    def _stocks_style_target_values(self) -> None:
+        """Colour the upside row so the analyst gap reads at a glance."""
+        label = self.stocks_target_labels.get('upside_to_mean') if isinstance(self.stocks_target_labels, dict) else None
+        if label is None:
+            return
+        text = label.text().strip()
+        if text.startswith('+'):
+            token, weight = ('accent_positive', 700)
+        elif text.startswith('-'):
+            token, weight = ('accent_negative', 700)
+        else:
+            token, weight = ('text_primary', 400)
+        label.setStyleSheet(f'color: {self.theme_color(token)}; font-size: 12px; font-weight: {weight};')
 
     def _stocks_render_news_rows(self, articles: list[dict[str, Any]]) -> None:
+        self._stocks_set_section_title(getattr(self, 'stocks_news_title', None), 'News', len(articles))
         if not articles:
             self.stocks_news_table.setRowCount(0)
             self.stocks_news_table.setVisible(False)
@@ -1077,6 +1235,7 @@ class StocksPageMixin:
         self.stocks_news_table.setVisible(True)
 
     def _stocks_render_institutional_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._stocks_set_section_title(getattr(self, 'stocks_institutional_title', None), 'Top institutional holders', len(rows))
         if not rows:
             self.stocks_institutional_table.setRowCount(0)
             self.stocks_institutional_table.setVisible(False)
@@ -1094,6 +1253,7 @@ class StocksPageMixin:
         self.stocks_institutional_table.setVisible(True)
 
     def _stocks_render_insider_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._stocks_set_section_title(getattr(self, 'stocks_insider_title', None), 'Insider transactions', len(rows))
         if not rows:
             self.stocks_insider_table.setRowCount(0)
             self.stocks_insider_table.setVisible(False)
@@ -1630,24 +1790,25 @@ class StocksPageMixin:
             '_ts': ts,
         }
 
-    def _stocks_format_ratio(self, value: Any) -> str:
+    def _stocks_finite_number(self, value: Any) -> Any:
+        """Return a displayable finite float, or None for missing and NaN values."""
         try:
-            return f'{float(value):.2f}x'
+            numeric = float(value)
         except Exception:
-            return 'N/A'
+            return None
+        return numeric if math.isfinite(numeric) else None
+
+    def _stocks_format_ratio(self, value: Any) -> str:
+        numeric = self._stocks_finite_number(value)
+        return 'N/A' if numeric is None else f'{numeric:.2f}x'
 
     def _stocks_format_decimal(self, value: Any) -> str:
-        try:
-            return f'{float(value):.2f}'
-        except Exception:
-            return 'N/A'
+        numeric = self._stocks_finite_number(value)
+        return 'N/A' if numeric is None else f'{numeric:.2f}'
 
     def _stocks_format_percentage(self, value: Any) -> str:
-        try:
-            numeric = float(value) * 100.0
-        except Exception:
-            return 'N/A'
-        return f'{numeric:.2f}%'
+        numeric = self._stocks_finite_number(value)
+        return 'N/A' if numeric is None else f'{numeric * 100.0:.2f}%'
 
     def _stocks_format_holder_percentage(self, value: Any, *, signed: bool=False) -> str:
         try:
@@ -1672,40 +1833,31 @@ class StocksPageMixin:
         return f'{sign}{percentage:.2f}%'
 
     def _stocks_format_compact_value(self, value: Any) -> str:
-        try:
-            return fmt_num(float(value))
-        except Exception:
-            return 'N/A'
+        numeric = self._stocks_finite_number(value)
+        return 'N/A' if numeric is None else fmt_num(numeric)
 
     def _stocks_format_currency(self, value: Any) -> str:
-        try:
-            numeric = float(value)
-        except Exception:
+        numeric = self._stocks_finite_number(value)
+        if numeric is None:
             return 'N/A'
-        return f'${fmt_num(numeric)}' if math.isfinite(numeric) and abs(numeric) >= 1000 else f'${numeric:,.2f}'
+        return f'${fmt_num(numeric)}' if abs(numeric) >= 1000 else f'${numeric:,.2f}'
 
     def _stocks_format_integer(self, value: Any) -> str:
-        try:
-            return f'{int(float(value)):,}'
-        except Exception:
-            return 'N/A'
+        numeric = self._stocks_finite_number(value)
+        return 'N/A' if numeric is None else f'{int(numeric):,}'
 
     def _stocks_calculate_target_upside(self, current_price: Any, mean_target: Any) -> str:
-        try:
-            current_value = float(current_price)
-            target_value = float(mean_target)
-        except Exception:
-            return 'N/A'
-        if not current_value:
+        current_value = self._stocks_finite_number(current_price)
+        target_value = self._stocks_finite_number(mean_target)
+        if current_value is None or target_value is None or not current_value:
             return 'N/A'
         upside_pct = (target_value - current_value) / current_value * 100.0
         sign = '+' if upside_pct >= 0 else ''
         return f'{sign}{upside_pct:.2f}%'
 
     def _stocks_format_shares(self, value: Any) -> str:
-        try:
-            numeric = float(value)
-        except Exception:
+        numeric = self._stocks_finite_number(value)
+        if numeric is None:
             return 'N/A'
         return fmt_num(numeric) if abs(numeric) >= 1000 else f'{numeric:,.0f}'
 
@@ -1737,15 +1889,18 @@ class StocksPageMixin:
                 splitter.setStyleSheet(splitter_style)
         self.stocks_symbol_input.setStyleSheet(
             f'background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_primary")}; '
-            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; padding: 6px 12px 8px 12px; '
-            'font-size: 22px; font-weight: bold;'
+            f'border: 1px solid {self.theme_color("panel_border")}; border-radius: 6px; padding: 4px 10px; '
+            'font-size: 22px; font-weight: bold; letter-spacing: 1px;'
         )
         self.stocks_company_label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 14px; font-weight: bold;')
-        self.stocks_chart_symbol_label.setStyleSheet(f'font-size: 18px; font-weight: bold; color: {self.theme_color("text_primary")};')
-        self.stocks_chart_price_label.setStyleSheet(f'font-size: 18px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.stocks_company_subtitle.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 11px;')
+        self.stocks_company_divider.setStyleSheet(f'background-color: {self.theme_color("panel_border")}; border: 0;')
+        self.stocks_chart_symbol_label.setStyleSheet(f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};')
+        self.stocks_chart_price_label.setStyleSheet(f'font-size: 20px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.stocks_chart_ohlc_label.setStyleSheet(f'font-size: 12px; color: {self.theme_color("text_secondary")};')
         self._stocks_update_auto_button_style()
         self._stocks_update_mfi_button_style()
+        self._stocks_update_range_button_styles()
         self.set_status_text(self.stocks_status_label, self.stocks_status_label.text(), status=self.stocks_status_label.property('bt_status') or 'muted')
         self.stocks_news_empty.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         self.stocks_institutional_empty.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
@@ -1764,6 +1919,7 @@ class StocksPageMixin:
             label.setStyleSheet(f'color: {self.theme_color("text_secondary")}; font-size: 12px;')
         for label in self._stocks_target_value_labels:
             label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 12px;')
+        self._stocks_style_target_values()
         self.stocks_insider_table.setStyleSheet(
             f'QTableWidget {{ background-color: {self.theme_color("panel_background")}; color: {self.theme_color("text_primary")}; '
             f'border: 1px solid {self.theme_color("panel_border")}; }} '

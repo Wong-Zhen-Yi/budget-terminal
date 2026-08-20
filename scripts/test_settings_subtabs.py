@@ -64,6 +64,7 @@ def _build_tabs(harness: _SettingsHarness):
         _panel('Data Health'),
         _panel('Application Logs'),
         _panel('Startup Performance'),
+        _panel('Crash Reports'),
     )
 
 
@@ -87,7 +88,7 @@ def main() -> None:
             ['Preferences', 'Keyboard Shortcuts'],
             ['Page Navigation', 'Privacy'],
             ['User Data', 'Data Health'],
-            ['Application Logs', 'Startup Performance'],
+            ['Application Logs', 'Startup Performance', 'Crash Reports'],
         ]
         for index, expected in enumerate(expected_panels):
             tab = harness.settings_tabs.widget(index)

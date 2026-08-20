@@ -5,8 +5,8 @@ from ..dependencies import *
 from ..services.sec_edgar import fetch_company_bundle, merge_sec_frames
 
 class FundamentalsWorker(QObject):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, ticker: Any) -> None:
         """Initialize the object."""

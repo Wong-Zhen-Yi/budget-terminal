@@ -783,8 +783,8 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
 
 
 class ValuationWorker(QObject):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, ticker: Any, custom_peers: Any=None) -> None:
         super().__init__()

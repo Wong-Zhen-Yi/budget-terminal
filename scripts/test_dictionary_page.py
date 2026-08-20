@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from budget_terminal_app.services.chart_pattern_catalog import CHART_PATTERN_CATALOG
 from budget_terminal_app.services.dictionary_catalog import (

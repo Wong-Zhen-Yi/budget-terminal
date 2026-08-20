@@ -64,7 +64,7 @@ _P4_HEATMAP_INTERVALS = (
 class _PortfolioManagerList(QListWidget):
     """Drag-reorderable portfolio list that reports the resulting id order."""
 
-    orderChanged = pyqtSignal(list)
+    orderChanged = Signal(object)
 
     def dropEvent(self, event: Any) -> None:
         super().dropEvent(event)
@@ -81,7 +81,7 @@ class _PortfolioPositionsTable(QTableWidget):
     discards uncommitted text. Callers check `editor_open` to defer renders until editing ends.
     """
 
-    editingFinished = pyqtSignal()
+    editingFinished = Signal()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

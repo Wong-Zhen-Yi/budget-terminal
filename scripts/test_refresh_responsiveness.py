@@ -21,15 +21,15 @@ for path in (ROOT, SCRIPTS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from PyQt6.QtCore import QEventLoop, QObject, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QStackedWidget, QWidget
+from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QStackedWidget, QWidget
 
 from test_portfolio_positions_row_stability import _PortfolioProbe
 from test_tab_picker_search import _build_window
 
 
 class _QueuedInvoker(QObject):
-    invoked = pyqtSignal(object)
+    invoked = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()

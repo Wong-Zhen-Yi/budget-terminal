@@ -16,17 +16,18 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 from zoneinfo import ZoneInfo
-from PyQt6.QtCore import QObject, QEvent, QPoint, QSize, Qt, QThread, QTime, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPalette, QPicture, QPolygonF, QScreen, QShortcut
-from PyQt6.QtWidgets import QApplication, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGraphicsBlurEffect, QGraphicsItem, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QTimeEdit, QToolButton, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, QEvent, QPoint, QSize, Qt, QThread, QTime, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPalette, QPicture, QPolygonF, QScreen, QShortcut
+from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGraphicsBlurEffect, QGraphicsItem, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QTimeEdit, QToolButton, QToolTip, QVBoxLayout, QWidget
 
 
 class _LazyModuleProxy:
     """Import heavy third-party modules only when their attributes are first used."""
 
-    def __init__(self, module_name: str) -> None:
+    def __init__(self, module_name: str, on_load: Any = None) -> None:
         self._module_name = module_name
         self._module = None
+        self._on_load = on_load
         self._lock = threading.Lock()
 
     def _load(self) -> Any:
@@ -37,6 +38,16 @@ class _LazyModuleProxy:
             module = self._module
             if module is None:
                 module = importlib.import_module(self._module_name)
+                if self._on_load is not None:
+                    # Runs before the module is published so no thread can take the fast path and
+                    # use the module before the hook has configured it. The hook therefore must not
+                    # touch this proxy: the lock is not reentrant.
+                    try:
+                        self._on_load(module)
+                    except Exception:
+                        logging.getLogger(__name__).debug(
+                            'lazy on_load hook failed for %s', self._module_name, exc_info=True
+                        )
                 self._module = module
         return module
 
@@ -51,10 +62,26 @@ class _LazyModuleProxy:
         return f'<lazy-module {self._module_name} ({state})>'
 
 
+# pyqtgraph probes PyQt6 before PySide6, so name the binding explicitly rather than relying on
+# import order. Loading a second Qt binding into this process would be fatal.
+os.environ.setdefault('PYQTGRAPH_QT_LIB', 'PySide6')
+
+def _install_yahoo_rate_limit(_module: Any) -> None:
+    """Pace every Yahoo request as soon as yfinance is first imported.
+
+    Hooked onto the lazy proxy rather than called from startup: yfinance must stay lazily imported,
+    but the limiter has to be installed before the first request goes out, and the proxy's load is
+    the one point that is both. See ``services/yahoo_rate_limit.py``.
+    """
+    from .services.yahoo_rate_limit import install_yahoo_rate_limit
+
+    install_yahoo_rate_limit()
+
+
 pd = _LazyModuleProxy('pandas')
 pg = _LazyModuleProxy('pyqtgraph')
 requests = _LazyModuleProxy('requests')
-yf = _LazyModuleProxy('yfinance')
+yf = _LazyModuleProxy('yfinance', on_load=_install_yahoo_rate_limit)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)

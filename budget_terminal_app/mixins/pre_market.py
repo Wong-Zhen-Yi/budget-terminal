@@ -1,8 +1,8 @@
 from __future__ import annotations
 import math
 from typing import Any
-from PyQt6.QtCore import QPointF, QRectF
-from PyQt6.QtGui import QBrush, QFont, QPen
+from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QBrush, QFont, QPen
 from ..compat import *
 from budget_terminal_app.workers.pre_market import PreMarketWorker
 

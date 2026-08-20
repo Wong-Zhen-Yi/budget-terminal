@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from budget_terminal_app.constants import SECTOR_DATA
 from budget_terminal_app.mixins.sectors import SectorTickerSnapshot

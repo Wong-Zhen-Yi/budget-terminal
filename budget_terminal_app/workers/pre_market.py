@@ -13,8 +13,8 @@ class PreMarketWorker(QObject):
         ('ZB=F', 'T-Bond'),
     )
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, watchlist: list[str] | None = None) -> None:
         super().__init__()

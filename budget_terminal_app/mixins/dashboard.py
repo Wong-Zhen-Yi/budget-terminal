@@ -2,8 +2,8 @@ from __future__ import annotations
 import math
 import time
 from typing import Any
-from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QFont
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QFont
 from ..compat import *
 from budget_terminal_app.data_service.results import data_sources_from_meta, describe_market_data_status
 from budget_terminal_app.mixins.dashboard_presenters import (

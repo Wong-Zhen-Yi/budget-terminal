@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from ..compat import *
 from budget_terminal_app.workers.youtube import YouTubeWorker
@@ -13,7 +13,7 @@ from budget_terminal_app.widgets.batched_render import run_batched
 
 
 class _ClickableThumbnailLabel(QLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -874,7 +874,7 @@ class YouTubeMixin:
         self._p16_thumbnail_reply = None
         try:
             reply.finished.disconnect(self._p16_on_thumbnail_reply_finished)
-        except TypeError:
+        except (TypeError, RuntimeError):
             pass
         reply.abort()
         reply.deleteLater()
@@ -935,7 +935,7 @@ class YouTubeMixin:
         status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
         error_code = reply.error()
         error_text = str(reply.errorString() or '').strip()
-        content_type = bytes(reply.rawHeader(b'Content-Type')).decode('latin-1', errors='ignore').lower()
+        content_type = bytes(reply.rawHeader('Content-Type')).decode('latin-1', errors='ignore').lower()
         raw_bytes = bytes(reply.readAll())
         reply.deleteLater()
         if token != self._p16_thumbnail_request_token:

@@ -85,8 +85,8 @@ class PieChartWidget(QWidget):
 
     def paintEvent(self, event: Any) -> None:
         """Handle paintEvent."""
-        from PyQt6.QtGui import QPainter, QColor, QFont
-        from PyQt6.QtCore import QRectF
+        from PySide6.QtGui import QPainter, QColor, QFont
+        from PySide6.QtCore import QRectF
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = (float(self.width()), float(self.height()))
@@ -155,7 +155,7 @@ class PieChartWidget(QWidget):
 
     def _build_callout_layout(self, width: float, height: float) -> dict[str, Any]:
         """Return chart and external-label geometry for callout rendering."""
-        from PyQt6.QtCore import QPointF, QRectF
+        from PySide6.QtCore import QPointF, QRectF
 
         width = max(float(width), 1.0)
         height = max(float(height), 1.0)
@@ -250,7 +250,7 @@ class PieChartWidget(QWidget):
 
     def _callout_text_metrics(self) -> dict[str, float]:
         """Return measured two-line callout dimensions and safe row spacing."""
-        from PyQt6.QtGui import QFont, QFontMetrics
+        from PySide6.QtGui import QFont, QFontMetrics
 
         font_size = 9.0
         label_font = QFont(self.font())
@@ -327,7 +327,7 @@ class PieChartWidget(QWidget):
 
     def _draw_callout_labels(self, painter: Any, layout: dict[str, Any]) -> None:
         """Draw leader lines plus ticker and percentage labels."""
-        from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPen
+        from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
 
         primary_color = QColor(self.legend_text_color)
         secondary_color = QColor(primary_color)
@@ -367,8 +367,8 @@ class PieChartWidget(QWidget):
 
     def _draw_donut_center(self, painter: Any, cx: float, cy: float, diameter: float) -> None:
         """Render the hollow center and optional center text."""
-        from PyQt6.QtGui import QColor, QFont
-        from PyQt6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QFont
+        from PySide6.QtCore import QRectF
         inner_diameter = diameter * self._donut_hole_ratio
         inner_rect = QRectF(
             cx - inner_diameter / 2,

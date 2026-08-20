@@ -19,8 +19,8 @@ for path in (ROOT, SCRIPTS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from PyQt6.QtCore import QEventLoop, QTimer
-from PyQt6.QtWidgets import QLabel, QPushButton
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import QLabel, QPushButton
 
 from test_tab_picker_search import _build_window
 

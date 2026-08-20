@@ -39,8 +39,10 @@ jobs:
           python scripts/test_fundamentals_compare_service.py
           python scripts/test_market_data_foundation.py
           python scripts/test_persistence_safety.py
+          python scripts/test_thread_shutdown.py
           python scripts/test_portfolio_margin_settlement.py
           python scripts/test_quant_analytics.py
+          python scripts/test_yahoo_rate_limit.py
       - name: Desktop smokes
         run: |
           python scripts/test_tab_picker_search.py
@@ -55,6 +57,7 @@ jobs:
           python scripts/test_bulk_render_responsiveness.py
           python scripts/test_networth_fx_hidden_render.py
           python scripts/test_portfolio_positions_row_stability.py
+          python scripts/test_portfolio_positions_layout.py
           python scripts/test_portfolio_margin_settlement_ui.py
           python scripts/test_portfolio_editing_safety.py
           python scripts/test_options_refresh_responsiveness.py
@@ -62,4 +65,5 @@ jobs:
           python scripts/test_charts_options_top_volume_page.py
           python scripts/test_youtube_refresh_responsiveness.py
           python scripts/test_launch_stability.py
+          python scripts/test_crash_reporting.py
           python scripts/test_startup_profile.py --offscreen

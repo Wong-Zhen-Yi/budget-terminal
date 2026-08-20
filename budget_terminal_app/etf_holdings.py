@@ -10,8 +10,11 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 import requests
-import yfinance as yf
 from bs4 import BeautifulSoup
+
+# Via the shared lazy proxy, not `import yfinance`: the proxy's load hook installs the process-wide
+# request pacer, and a direct import would let this module's calls bypass it.
+from .dependencies import yf
 
 
 DEFAULT_TIMEOUT = 20

@@ -4,9 +4,9 @@ import math
 from functools import partial
 from typing import Any, Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGridLayout,
@@ -30,8 +30,8 @@ PlotStyler = Callable[[Any], None]
 class RelationshipLabWidget(QWidget):
     """Two-security relationship analysis controls, metrics, and plots."""
 
-    analyze_requested = pyqtSignal()
-    settings_changed = pyqtSignal()
+    analyze_requested = Signal()
+    settings_changed = Signal()
 
     def __init__(self, theme_color: ThemeColor, parent: QWidget | None = None) -> None:
         super().__init__(parent)

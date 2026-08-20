@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import QEventLoop, QObject, QTimer
-from PyQt6.QtWidgets import QApplication, QStackedWidget, QTableWidget, QTableWidgetItem, QWidget
+from PySide6.QtCore import QEventLoop, QObject, QTimer
+from PySide6.QtWidgets import QApplication, QStackedWidget, QTableWidget, QTableWidgetItem, QWidget
 
 from budget_terminal_app.widgets.batched_render import run_batched
 

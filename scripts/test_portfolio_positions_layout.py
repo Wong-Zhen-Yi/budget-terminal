@@ -10,11 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractItemView, QLabel, QPushButton
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractItemView, QLabel, QPushButton
 
 from budget_terminal_app.constants import P4_PORTFOLIO_COLUMNS
-from budget_terminal_app.mixins.portfolio_setup import P4_OPTIONS_COLUMNS
+from budget_terminal_app.mixins.portfolio_setup import P4_OPTIONS_COLUMNS, _P4_STOCK_EDIT_TRIGGERS
 from scripts.test_tab_picker_search import _build_window
 
 
@@ -65,8 +65,12 @@ def test_positions_layout_and_table_fit() -> None:
         )
         _assert(window.p4_table.isSortingEnabled(), "stock sorting should remain enabled")
         _assert(
-            window.p4_table.editTriggers() == QAbstractItemView.EditTrigger.AllEditTriggers,
+            window.p4_table.editTriggers() == _P4_STOCK_EDIT_TRIGGERS,
             "stock editing behavior should remain unchanged",
+        )
+        _assert(
+            not (window.p4_table.editTriggers() & QAbstractItemView.EditTrigger.CurrentChanged),
+            "navigating a stock cell must not open an editor",
         )
         _assert(window.p4_table.verticalHeader().defaultSectionSize() == 52, "stock row height should remain unchanged")
         _assert(window.p4_opt_table.verticalHeader().defaultSectionSize() == 38, "options row height should remain unchanged")

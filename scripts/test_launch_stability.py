@@ -31,6 +31,20 @@ def _authoritative_page_labels(window_setup_mixin: Any) -> tuple[tuple[int, str]
     return tuple(labels)
 
 
+def test_default_page_labels_match_authoritative_registry(
+    default_page_labels: tuple[tuple[int, str], ...],
+    window_setup_mixin: Any,
+) -> None:
+    authoritative = dict(_authoritative_page_labels(window_setup_mixin))
+    defaults = dict(default_page_labels)
+    assert defaults == authoritative, (
+        'startup_loading.DEFAULT_PAGE_LABELS drifted from the authoritative page registry, '
+        'so the loader would rebuild every page row mid-launch: '
+        f'only_in_defaults={sorted(set(defaults) - set(authoritative))!r} '
+        f'only_in_registry={sorted(set(authoritative) - set(defaults))!r}'
+    )
+
+
 def test_loader_reconciles_authoritative_pages(
     app: Any,
     startup_loading_screen: Any,
@@ -40,7 +54,19 @@ def test_loader_reconciles_authoritative_pages(
     screen = startup_loading_screen()
     try:
         page_labels = _authoritative_page_labels(window_setup_mixin)
+        bars_before = {key: id(bar) for key, bar in screen._task_bars.items()}
         screen.register_pages(page_labels)
+        bars_after = {key: id(bar) for key, bar in screen._task_bars.items()}
+        assert bars_after == bars_before, (
+            'registering the authoritative pages recreated loader progress bars instead of reusing them'
+        )
+
+        from PySide6.QtWidgets import QScrollArea
+
+        assert not screen.findChildren(QScrollArea), (
+            'startup loader kept a scroll area; every progress bar must be visible without scrolling'
+        )
+
         expected_keys = {screen._page_key(index) for index, _label in page_labels}
         actual_page_keys = {key for key in screen._page_keys if key.startswith('page_')}
         assert actual_page_keys == expected_keys, (
@@ -207,6 +233,7 @@ def main() -> int:
         from budget_terminal_app.mixins.window_lifecycle import WindowLifecycleMixin
         from budget_terminal_app.mixins.window_setup import WindowSetupMixin
         from budget_terminal_app.startup_loading import (
+            DEFAULT_PAGE_LABELS,
             REQUIRED_STARTUP_TASK_KEYS,
             StartupLoadingScreen,
         )
@@ -219,6 +246,10 @@ def main() -> int:
         app = QApplication.instance() or QApplication([])
         window = None
         try:
+            test_default_page_labels_match_authoritative_registry(
+                DEFAULT_PAGE_LABELS,
+                WindowSetupMixin,
+            )
             test_loader_reconciles_authoritative_pages(
                 app,
                 StartupLoadingScreen,

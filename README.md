@@ -1,6 +1,6 @@
 # Budget Terminal
 
-Budget Terminal is a Windows-focused PyQt6 desktop app for tracking portfolio data, market context, options chains, news, ETF analysis, charts, and related research workflows. The top-level `budget_terminal.py` launcher remains the stable entry point, while the live application code is organized under `budget_terminal_app/`.
+Budget Terminal is a Windows-focused PySide6 desktop app for tracking portfolio data, market context, options chains, news, ETF analysis, charts, and related research workflows. The top-level `budget_terminal.py` launcher remains the stable entry point, while the live application code is organized under `budget_terminal_app/`.
 
 ## Features
 
@@ -96,7 +96,7 @@ The News Hub briefing is generated inside the app and does not use an LLM.
 
 ## Windows Executable Build
 
-This is a PyQt6 desktop GUI app, so the standard packaging target is a windowed PyInstaller build from `budget_terminal.py`.
+This is a PySide6 desktop GUI app, so the standard packaging target is a windowed PyInstaller build from `budget_terminal.py`.
 
 Install build prerequisites:
 
@@ -119,6 +119,25 @@ The build script:
 - creates `release\BudgetTerminal-v*-windows.zip`
 
 See `packaging\PACKAGING.md` for the one-dir build flow, release outputs, and troubleshooting notes.
+
+## Crash Diagnostics
+
+Settings -> Diagnostics -> Crash Reports lists every crash the app recorded, previews the selected
+report, and opens the folder holding them. Files live under
+`%LOCALAPPDATA%\BudgetTerminal\logs\crashes`, and the newest 20 reports are kept.
+
+A report captures the environment, the traceback, every Python thread's stack, and the tail of the
+session log. Three sources feed it, so a crash that never reaches Python is still recorded:
+
+- `sys.excepthook` and `threading.excepthook` for unhandled Python exceptions.
+- A Qt message handler, which writes the report while `qFatal` is still on the stack — this is what
+  catches `QThread: Destroyed while thread is still running` before Qt calls `abort()`.
+- `faulthandler`, which writes native stacks to `crashes\native-faults.log` for segfaults and other
+  aborts that bypass Python entirely.
+
+Each process also drops a session marker and clears it on a clean exit. A marker left by a process
+that is gone becomes a `previous-session-aborted` report on the next launch, so a crash that killed
+the process outright still surfaces.
 
 ## User Data Safety
 

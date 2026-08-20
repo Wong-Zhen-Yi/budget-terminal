@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 
-from ..dependencies import QObject, logger, pyqtSignal
+from ..dependencies import QObject, logger, Signal
 from ..services.automatic_signal_scanner import AutomaticSignalScannerService
 from ..services.signal_scanner import ScanCancelled
 
@@ -10,10 +10,10 @@ from ..services.signal_scanner import ScanCancelled
 class AutomaticSignalScannerWorker(QObject):
     """Run one universe-and-signal scan outside the Qt UI thread."""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, int, str)
-    cancelled = pyqtSignal()
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(int, int, str)
+    cancelled = Signal()
 
     def __init__(
         self,

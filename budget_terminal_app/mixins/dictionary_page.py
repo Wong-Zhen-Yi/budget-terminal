@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtGui import QFontDatabase
-from PyQt6.QtWidgets import QAbstractItemView
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import QAbstractItemView
 
 from ..compat import *
 from budget_terminal_app.services.chart_pattern_catalog import CHART_PATTERN_CATALOG
@@ -22,7 +22,7 @@ _P38_NARROW_WIDTH = 820
 
 
 class _DictionaryBody(QWidget):
-    resized = pyqtSignal(int)
+    resized = Signal(int)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt virtual method
         super().resizeEvent(event)

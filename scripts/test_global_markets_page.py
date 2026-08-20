@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtGui import QImage
+from PySide6.QtGui import QImage
 
 from budget_terminal_app.dependencies import pd
 from budget_terminal_app.persistence import _normalize_global_page_settings

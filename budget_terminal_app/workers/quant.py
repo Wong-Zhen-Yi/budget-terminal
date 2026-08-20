@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from ..dependencies import QObject, logger, pyqtSignal
+from ..dependencies import QObject, logger, Signal
 from ..services.quant import QuantAnalyticsService, QuantScanPayload
 from ..services.signal_scanner import ScanCancelled
 
@@ -11,10 +11,10 @@ from ..services.signal_scanner import ScanCancelled
 class QuantScanWorker(QObject):
     """Run one universe-and-factor Quant scan outside the Qt UI thread."""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, int, str)
-    cancelled = pyqtSignal()
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(int, int, str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -73,8 +73,8 @@ class QuantScanWorker(QObject):
 class QuantPairWorker(QObject):
     """Resolve one ad-hoc pair on demand, for the manual pair override."""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, service: QuantAnalyticsService, left: str, right: str) -> None:
         super().__init__()

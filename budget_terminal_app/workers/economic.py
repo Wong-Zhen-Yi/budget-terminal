@@ -3,17 +3,17 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from ..dependencies import QObject, logger, pyqtSignal
+from ..dependencies import QObject, logger, Signal
 from ..services.economic import EconomicDataService
 
 
 class EconomicDataWorker(QObject):
     """Pull the FRED macro catalog outside the Qt UI thread."""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, int, str)
-    cancelled = pyqtSignal()
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(int, int, str)
+    cancelled = Signal()
 
     def __init__(self, service: EconomicDataService, *, groups: Any = None, force: bool = False) -> None:
         super().__init__()

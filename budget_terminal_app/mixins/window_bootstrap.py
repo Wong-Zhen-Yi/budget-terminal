@@ -293,11 +293,6 @@ class WindowBootstrapMixin:
         if progress is not None:
             progress.register_pages(page_labels)
 
-    def _startup_progress_switch_to_compact(self) -> None:
-        progress = getattr(self, '_startup_progress', None)
-        if progress is not None:
-            progress.switch_to_compact(self)
-
     def _startup_progress_finish_if_complete(self) -> bool:
         progress = getattr(self, '_startup_progress', None)
         return bool(progress is not None and progress.finish_if_complete())

@@ -11,6 +11,7 @@ from budget_terminal_app.backup_bundle import (
     export_backup_bundle,
 )
 from budget_terminal_app.compat import *
+from budget_terminal_app.crash_reporting import crash_dir, list_crash_reports
 from budget_terminal_app.paths import user_data_dir
 from budget_terminal_app.paper_trading import PaperTradingStore
 from budget_terminal_app.strategies import (
@@ -25,6 +26,9 @@ from budget_terminal_app.workers import earnings_calendar as earnings_calendar_w
 from budget_terminal_app.workers.data import DataWorker
 from budget_terminal_app.workers.politics import CACHE_DIR as POLITICS_CACHE_DIR
 from budget_terminal_app.workers.youtube import YOUTUBE_CACHE_DIR
+
+
+SETTINGS_CRASH_PREVIEW_LIMIT = 200_000
 
 
 class SettingsMixin:
@@ -67,6 +71,7 @@ class SettingsMixin:
         actions_box = self._build_settings_user_data_box()
         data_health_box = self._build_settings_data_health_box()
         logs_box = self._build_settings_logs_box()
+        crash_box = self._build_settings_crash_reports_box()
         shortcuts_box = self._build_settings_shortcuts_box()
         startup_box = self._build_settings_startup_performance_box()
         self.settings_tabs = self._build_settings_tabs(
@@ -78,6 +83,7 @@ class SettingsMixin:
             data_health_box,
             logs_box,
             startup_box,
+            crash_box,
         )
 
         self.settings_status_label = QLabel('Ready')
@@ -93,6 +99,7 @@ class SettingsMixin:
         self._refresh_data_health_views()
         self._refresh_settings_log_controls()
         self._refresh_startup_performance_views()
+        self._refresh_settings_crash_reports()
         logger.info('Settings page initialization complete.')
 
     def _build_settings_header(self) -> QFrame:
@@ -353,6 +360,152 @@ class SettingsMixin:
         logs_layout.addWidget(self.settings_log_output, 1)
         return logs_box
 
+    def _build_settings_crash_reports_box(self) -> QGroupBox:
+        """Build Settings controls for reviewing persisted crash reports."""
+        crash_box = QGroupBox('Crash Reports')
+        self.set_theme_role(crash_box, 'panel')
+        crash_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        crash_layout = QVBoxLayout(crash_box)
+        crash_layout.setContentsMargins(12, 12, 12, 10)
+        crash_layout.setSpacing(6)
+        crash_intro = self._settings_section_header(
+            'Crash Diagnostics',
+            'Written when the app aborts or hits an unhandled error, including hard crashes that '
+            'close the window without leaving a Python traceback.',
+        )
+        crash_toolbar = QHBoxLayout()
+        crash_toolbar.setContentsMargins(0, 0, 0, 0)
+        crash_toolbar.setSpacing(8)
+        self.settings_crash_selector = QComboBox()
+        self.settings_crash_selector.setMinimumHeight(28)
+        self.settings_crash_selector.currentIndexChanged.connect(self._on_settings_crash_report_selected)
+        self.settings_crash_refresh_btn = QPushButton('Refresh')
+        self.settings_crash_refresh_btn.setMinimumHeight(28)
+        self.settings_crash_refresh_btn.clicked.connect(lambda: self._refresh_settings_crash_reports())
+        self.settings_crash_open_btn = QPushButton('Open Folder')
+        self.settings_crash_open_btn.setMinimumHeight(28)
+        self.settings_crash_open_btn.clicked.connect(self._on_open_crash_report_folder)
+        self.settings_crash_clear_btn = QPushButton('Clear')
+        self.settings_crash_clear_btn.setMinimumHeight(28)
+        self.set_theme_variant(self.settings_crash_clear_btn, 'danger')
+        self.settings_crash_clear_btn.clicked.connect(self._on_clear_crash_reports)
+        crash_toolbar.addWidget(self.settings_crash_selector, 1)
+        crash_toolbar.addWidget(self.settings_crash_refresh_btn)
+        crash_toolbar.addWidget(self.settings_crash_open_btn)
+        crash_toolbar.addWidget(self.settings_crash_clear_btn)
+        self.settings_crash_meta_label = QLabel('No crash reports recorded.')
+        self.set_theme_role(self.settings_crash_meta_label, 'muted')
+        self.settings_crash_output = QPlainTextEdit()
+        self.settings_crash_output.setReadOnly(True)
+        self.settings_crash_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.settings_crash_output.setMinimumHeight(180)
+        crash_layout.addWidget(crash_intro)
+        crash_layout.addLayout(crash_toolbar)
+        crash_layout.addWidget(self.settings_crash_meta_label)
+        crash_layout.addWidget(self.settings_crash_output, 1)
+        return crash_box
+
+    def _refresh_settings_crash_reports(self, *, select: Any = None) -> None:
+        """Reload the crash report list from disk and show the newest report."""
+        selector = getattr(self, 'settings_crash_selector', None)
+        if selector is None:
+            return
+        try:
+            reports = list_crash_reports()
+        except Exception:
+            logger.exception('Unable to list crash reports.')
+            reports = []
+        self._settings_crash_report_paths = reports
+        selector.blockSignals(True)
+        selector.clear()
+        for report in reports:
+            selector.addItem(report.name)
+        selector.blockSignals(False)
+        meta = getattr(self, 'settings_crash_meta_label', None)
+        if meta is not None:
+            try:
+                folder = str(crash_dir())
+            except Exception:
+                folder = 'unavailable'
+            if reports:
+                meta.setText(f'{len(reports)} crash report(s) | {folder}')
+            else:
+                meta.setText(f'No crash reports recorded | {folder}')
+        if not reports:
+            output = getattr(self, 'settings_crash_output', None)
+            if output is not None:
+                output.setPlainText('No crash reports have been recorded for this installation.')
+            return
+        index = 0
+        if select is not None:
+            for position, report in enumerate(reports):
+                if report.name == str(select):
+                    index = position
+                    break
+        selector.setCurrentIndex(index)
+        self._on_settings_crash_report_selected(index)
+
+    def _on_settings_crash_report_selected(self, index: int) -> None:
+        """Show the selected crash report's contents."""
+        output = getattr(self, 'settings_crash_output', None)
+        if output is None:
+            return
+        reports = getattr(self, '_settings_crash_report_paths', [])
+        if not reports or not 0 <= int(index) < len(reports):
+            return
+        path = reports[int(index)]
+        try:
+            text = path.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            logger.exception('Unable to read crash report %s.', path)
+            output.setPlainText(f'Unable to read {path}.')
+            return
+        if len(text) > SETTINGS_CRASH_PREVIEW_LIMIT:
+            text = text[:SETTINGS_CRASH_PREVIEW_LIMIT] + '\n\n[truncated -- open the folder for the full report]'
+        output.setPlainText(text)
+
+    def _on_open_crash_report_folder(self) -> None:
+        """Open the crash report folder in the system file browser."""
+        try:
+            folder = crash_dir()
+        except Exception:
+            logger.exception('Unable to resolve the crash report folder.')
+            return
+        try:
+            startfile = getattr(os, 'startfile', None)
+            if callable(startfile):
+                startfile(str(folder))
+            else:
+                webbrowser.open(folder.as_uri())
+        except Exception:
+            logger.exception('Unable to open the crash report folder %s.', folder)
+            return
+        self.set_status_text(self.settings_status_label, f'Opened {folder}', status='muted')
+
+    def _on_clear_crash_reports(self) -> None:
+        """Delete every stored crash report after confirming with the user."""
+        reports = getattr(self, '_settings_crash_report_paths', [])
+        if not reports:
+            return
+        reply = QMessageBox.question(
+            self,
+            'Clear Crash Reports',
+            f'Delete all {len(reports)} stored crash report(s)? This cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        removed = 0
+        for report in reports:
+            try:
+                report.unlink(missing_ok=True)
+                removed += 1
+            except Exception:
+                logger.exception('Unable to delete crash report %s.', report)
+        self._refresh_settings_crash_reports()
+        self.set_status_text(self.settings_status_label, f'Deleted {removed} crash report(s).', status='muted')
+
     def _build_settings_startup_performance_box(self) -> QGroupBox:
         """Build Settings controls for startup timing metrics."""
         startup_box = QGroupBox('Startup Performance')
@@ -439,6 +592,7 @@ class SettingsMixin:
         data_health_box: QGroupBox,
         logs_box: QGroupBox,
         startup_box: QGroupBox,
+        crash_box: QGroupBox,
     ) -> QTabWidget:
         """Arrange Settings panels into compact, independently scrolling subtabs."""
         tabs = QTabWidget()
@@ -447,7 +601,7 @@ class SettingsMixin:
             (preferences_box, shortcuts_box),
             (navigation_box, privacy_box),
             (actions_box, data_health_box),
-            (logs_box, startup_box),
+            (logs_box, startup_box, crash_box),
         )
         for (_tab_key, tab_label), panels in zip(self.SETTINGS_SUBTABS, tab_panels):
             tabs.addTab(self._build_settings_scroll_tab(*panels), tab_label)

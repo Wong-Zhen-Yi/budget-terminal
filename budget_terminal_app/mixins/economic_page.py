@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QProgressBar
 
 from ..compat import *
 from ..services.economic import (

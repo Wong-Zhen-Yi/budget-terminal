@@ -8,8 +8,8 @@ from ..dependencies import *
 class TradingVolumeWorker(QObject):
     """Fetch high dollar-volume US equities for the Overview page."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     _LIMIT = 100
     _SCREEN_PAGE_SIZE = 250

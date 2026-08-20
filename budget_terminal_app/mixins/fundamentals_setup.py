@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any
-from PyQt6.QtWidgets import QAbstractItemView, QStyle
+from PySide6.QtWidgets import QAbstractItemView, QStyle
 from ..compat import *
 from budget_terminal_app.paths import user_data_path
 from budget_terminal_app.workers.fundamentals import FundamentalsWorker
@@ -9,7 +9,7 @@ from budget_terminal_app.workers.fundamentals import FundamentalsWorker
 class _FundamentalsFullscreenDialog(QDialog):
     """Fullscreen Fundamentals chart surface with resize notifications."""
 
-    resized = pyqtSignal()
+    resized = Signal()
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)

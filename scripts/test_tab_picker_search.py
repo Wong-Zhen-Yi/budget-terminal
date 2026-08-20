@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QKeyEvent
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QKeyEvent
 
 from budget_terminal_app.persistence import DEFAULT_NAVIGATION_PAGE_ORDER, normalize_navigation_settings
 
@@ -523,7 +523,7 @@ if __name__ == "__main__":
     test_backtick_opens_and_refocuses_from_input()
     print("tab picker search smoke passed")
     sys.stdout.flush()
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
     if app is not None:

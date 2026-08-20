@@ -84,8 +84,8 @@ def _row_cells(row: Any) -> list[str]:
 class DataromaWorker(QObject):
     """Fetch and cache DATAROMA page payloads for the desktop DATAROMA page."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, facet: str, *, force: bool = False, **params: Any) -> None:
         super().__init__()

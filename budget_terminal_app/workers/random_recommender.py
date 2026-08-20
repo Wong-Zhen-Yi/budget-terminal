@@ -16,11 +16,11 @@ class _RandomStockCancelled(RuntimeError):
 
 
 class RandomStockWorker(QObject):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(dict)
-    partial = pyqtSignal(dict)
-    cancelled = pyqtSignal()
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(object)
+    partial = Signal(object)
+    cancelled = Signal()
 
     _MIN_MARKET_CAP = 1_000_000_000
     _MIN_AVG_VOLUME = 1_000_000

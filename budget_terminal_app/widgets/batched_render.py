@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Any, Generic, Hashable, TypeVar
 from weakref import ref
 
-from PyQt6.QtCore import QTimer
+from PySide6.QtCore import QTimer
 
 
 logger = logging.getLogger(__name__)

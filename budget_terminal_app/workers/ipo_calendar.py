@@ -43,8 +43,8 @@ def completed_ipo_cache_path(year: int | None = None) -> Path:
 class IpoCalendarWorker(QObject):
     """Fetch and cache upcoming US IPO calendar rows."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, *, force: bool = False) -> None:
         super().__init__()
@@ -472,8 +472,8 @@ class IpoCalendarWorker(QObject):
 class CompletedIpoWorker(QObject):
     """Fetch and cache completed US IPO rows for the current year."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, *, force: bool = False, year: int | None = None) -> None:
         super().__init__()

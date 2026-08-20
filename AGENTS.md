@@ -16,7 +16,7 @@ Prefer primary sources and current official data. Never infer a conclusion from 
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`budget_terminal.py` is the top-level launcher. The live PyQt6 application now lives under `budget_terminal_app/`, with `main.py` creating the Qt app and `app.py` defining `BudgetTerminalApp`.
+`budget_terminal.py` is the top-level launcher. The live PySide6 application now lives under `budget_terminal_app/`, with `main.py` creating the Qt app and `app.py` defining `BudgetTerminalApp`.
 
 Keep changes close to the subsystem they affect:
 - `budget_terminal_app/mixins/`: window, page, and feature behavior

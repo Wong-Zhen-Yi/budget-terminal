@@ -61,6 +61,14 @@ except Exception:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     logging.getLogger(__name__).exception('Persistent error logging could not be initialized; continuing startup.')
 
+# Installed after error logging so the crash hooks wrap it rather than replace it.
+try:
+    from budget_terminal_app.crash_reporting import configure_crash_reporting
+
+    configure_crash_reporting()
+except Exception:
+    logging.getLogger(__name__).exception('Crash reporting could not be initialized; continuing startup.')
+
 try:
     from budget_terminal_app.main import main
 except ModuleNotFoundError as exc:

@@ -6,8 +6,8 @@ from ..dependencies import *
 
 
 class EtfHeatmapWidget(QWidget):
-    holdingSelected = pyqtSignal(dict)
-    holdingActivated = pyqtSignal(str)
+    holdingSelected = Signal(object)
+    holdingActivated = Signal(str)
     _LEFT_DRAG_THRESHOLD = 4.0
 
     def __init__(self, parent: Any = None) -> None:
@@ -85,8 +85,8 @@ class EtfHeatmapWidget(QWidget):
         return self._selected_symbol
 
     def paintEvent(self, event: Any) -> None:
-        from PyQt6.QtCore import QRectF
-        from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QFont, QPainter, QPen
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -172,7 +172,7 @@ class EtfHeatmapWidget(QWidget):
                 self._draw_tile_labels(painter, draw_rect, row, tile_font, small_font)
 
     def mouseMoveEvent(self, event: Any) -> None:
-        from PyQt6.QtWidgets import QToolTip
+        from PySide6.QtWidgets import QToolTip
 
         if self._panning and self._zoom_scale > 1.0:
             if not (event.buttons() & Qt.MouseButton.RightButton):
@@ -283,7 +283,7 @@ class EtfHeatmapWidget(QWidget):
         return super().resizeEvent(event)
 
     def leaveEvent(self, event: Any) -> None:
-        from PyQt6.QtWidgets import QToolTip
+        from PySide6.QtWidgets import QToolTip
 
         QToolTip.hideText()
         return super().leaveEvent(event)
@@ -352,7 +352,7 @@ class EtfHeatmapWidget(QWidget):
         self._pan_y = max(0.0, min(max_pan_y, self._pan_y))
 
     def _visible_rect(self, rect: Any) -> Any:
-        from PyQt6.QtCore import QRectF
+        from PySide6.QtCore import QRectF
 
         return QRectF(
             rect.left() * self._zoom_scale - self._pan_x,
@@ -362,7 +362,7 @@ class EtfHeatmapWidget(QWidget):
         )
 
     def _draw_tile_labels(self, painter: Any, draw_rect: Any, row: dict[str, Any], tile_font: Any, small_font: Any) -> None:
-        from PyQt6.QtGui import QColor, QFontMetrics
+        from PySide6.QtGui import QColor, QFontMetrics
 
         if draw_rect.width() < 34 or draw_rect.height() < 22:
             return
@@ -459,7 +459,7 @@ class EtfHeatmapWidget(QWidget):
         return f"{number:.2f}%"
 
     def _heat_color(self, change_pct: Any, row: Any = None) -> Any:
-        from PyQt6.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         neutral = QColor(self._colors["neutral"])
         if isinstance(row, dict) and row.get("neutral_heat"):
@@ -476,7 +476,7 @@ class EtfHeatmapWidget(QWidget):
 
     @staticmethod
     def _mix_color(left: Any, right: Any, amount: float) -> Any:
-        from PyQt6.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         mix = max(0.0, min(1.0, amount))
         return QColor(
@@ -486,7 +486,7 @@ class EtfHeatmapWidget(QWidget):
         )
 
     def _binary_layout(self, items: list[Any], rect: Any, value_fn: Any) -> list[tuple[Any, Any]]:
-        from PyQt6.QtCore import QRectF
+        from PySide6.QtCore import QRectF
 
         positive = [item for item in items if value_fn(item) > 0]
         if not positive:

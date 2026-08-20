@@ -593,6 +593,17 @@ class ChartsOptionsTopVolumeMixin:
             for expiry_text, _expiry_date, days_out in parsed
         )
 
+    @staticmethod
+    def _p28_has_option_rows(bucket_records_by_filter: Any) -> bool:
+        """Return whether any expiration returned top-volume rows for either option type."""
+        if not isinstance(bucket_records_by_filter, dict):
+            return False
+        return any(
+            any(list(rows or []) for rows in buckets.values())
+            for buckets in bucket_records_by_filter.values()
+            if isinstance(buckets, dict)
+        )
+
     def _p28_update_view(
         self,
         request_id: int,
@@ -609,10 +620,13 @@ class ChartsOptionsTopVolumeMixin:
         """Accept a completed combined payload and render it only while visible."""
         if request_id != getattr(self, '_p28_latest_request_id', 0):
             return
-        if not isinstance(chart_df, pd.DataFrame) or chart_df.empty:
-            message = str(chart_error or f'No chart data returned for {ticker}.')
-            self._p28_handle_load_error(request_id, ticker, message)
-            return
+        if not isinstance(chart_df, pd.DataFrame):
+            chart_df = pd.DataFrame()
+        if chart_df.empty:
+            chart_error = str(chart_error or f'No chart data returned for {ticker}.')
+            if not self._p28_has_option_rows(bucket_records_by_filter):
+                self._p28_handle_load_error(request_id, ticker, chart_error)
+                return
         self._p28_set_loading(False)
         completed_view = {
             'request_id': request_id,

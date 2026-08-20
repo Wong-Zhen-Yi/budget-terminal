@@ -72,8 +72,8 @@ class BarChartWidget(QWidget):
         return None
 
     def paintEvent(self, event: Any) -> None:
-        from PyQt6.QtGui import QPainter, QColor, QFont, QFontMetrics
-        from PyQt6.QtCore import QRectF
+        from PySide6.QtGui import QPainter, QColor, QFont, QFontMetrics
+        from PySide6.QtCore import QRectF
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if not self.items:

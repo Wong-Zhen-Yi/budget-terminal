@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtTest import QTest
+from PySide6.QtTest import QTest
 
 from budget_terminal_app.dependencies import QHBoxLayout, QLabel, QPushButton, QToolTip, Qt, QWidget, pd, pg
 from budget_terminal_app.persistence import (

@@ -4,7 +4,7 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from PyQt6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QProgressBar
 
 from ..compat import *
 from ..paper_trading.engine import PaperTradingEngine

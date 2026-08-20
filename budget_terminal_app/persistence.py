@@ -125,12 +125,14 @@ DEFAULT_DASHBOARD_CHART_SETTINGS = {
     'main_splitter_sizes': [3, 5],
     'left_splitter_sizes': [3, 2, 2],
 }
+STOCKS_RANGE_PRESET_KEYS = ('1M', '3M', '6M', '1Y', '3Y')
 DEFAULT_STOCKS_PAGE_SETTINGS = {
     'symbol': 'SPY',
     'auto': True,
     'mfi_enabled': False,
+    'range_preset': '',
     'main_splitter_sizes': [3, 3, 5],
-    'left_splitter_sizes': [4, 2, 3],
+    'left_splitter_sizes': [430, 150, 330],
     'middle_splitter_sizes': [2, 2, 3],
 }
 DEFAULT_VALUATION_PAGE_SETTINGS = {
@@ -2078,6 +2080,9 @@ def _normalize_stocks_page_settings(settings: Any) -> Any:
     auto_enabled = bool(auto_value) if isinstance(auto_value, bool | int) else DEFAULT_STOCKS_PAGE_SETTINGS['auto']
     mfi_value = saved.get('mfi_enabled', DEFAULT_STOCKS_PAGE_SETTINGS['mfi_enabled'])
     mfi_enabled = bool(mfi_value) if isinstance(mfi_value, bool | int) else DEFAULT_STOCKS_PAGE_SETTINGS['mfi_enabled']
+    range_preset = str(saved.get('range_preset', DEFAULT_STOCKS_PAGE_SETTINGS['range_preset']) or '').upper().strip()
+    if range_preset not in STOCKS_RANGE_PRESET_KEYS:
+        range_preset = DEFAULT_STOCKS_PAGE_SETTINGS['range_preset']
     raw_main_splitter = saved.get('main_splitter_sizes', DEFAULT_STOCKS_PAGE_SETTINGS['main_splitter_sizes'])
     main_splitter_sizes = []
     if isinstance(raw_main_splitter, list):
@@ -2126,6 +2131,7 @@ def _normalize_stocks_page_settings(settings: Any) -> Any:
         'symbol': symbol or DEFAULT_STOCKS_PAGE_SETTINGS['symbol'],
         'auto': auto_enabled,
         'mfi_enabled': mfi_enabled,
+        'range_preset': range_preset,
         'main_splitter_sizes': main_splitter_sizes,
         'left_splitter_sizes': left_splitter_sizes,
         'middle_splitter_sizes': middle_splitter_sizes,

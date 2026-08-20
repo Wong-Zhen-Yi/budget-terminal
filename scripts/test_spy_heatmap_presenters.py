@@ -178,7 +178,7 @@ def test_formatting_detail_selection_and_weighted_change() -> None:
 
 def test_offscreen_widget_row_smoke() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
 

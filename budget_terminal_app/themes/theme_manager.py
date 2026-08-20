@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..dependencies import QObject, QPalette, QColor, Qt, pyqtSignal
+from ..dependencies import QObject, QPalette, QColor, Qt, Signal
 from .theme_tokens import ThemeTokens
 from .trading_dark_theme import TRADING_DARK_THEME
 
@@ -216,7 +216,7 @@ QSplitter::handle {{
 
 
 class ThemeManager(QObject):
-    theme_changed = pyqtSignal(str)
+    theme_changed = Signal(str)
 
     def __init__(self, app: object) -> None:
         super().__init__()

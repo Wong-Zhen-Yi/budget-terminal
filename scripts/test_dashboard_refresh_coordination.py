@@ -13,21 +13,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QApplication, QLineEdit, QPushButton
+from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
 
 from budget_terminal_app.mixins.dashboard import DashboardMixin
 from budget_terminal_app.services.refresh_control import RefreshCoordinator
 
 
 class _QueuedInvoker(QObject):
-    dispatched = pyqtSignal(object)
+    dispatched = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self.dispatched.connect(self._run, Qt.ConnectionType.QueuedConnection)
 
-    @pyqtSlot(object)
+    @Slot(object)
     def _run(self, callback: Callable[[], None]) -> None:
         callback()
 

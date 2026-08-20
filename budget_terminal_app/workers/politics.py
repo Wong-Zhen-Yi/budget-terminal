@@ -19,8 +19,8 @@ _THEME_BY_TICKER = {
 
 
 class PoliticsWorker(QObject):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, page: int = 1, force_refresh: bool = False) -> None:
         super().__init__()
@@ -296,9 +296,9 @@ class PoliticsWorker(QObject):
 
 
 class PoliticsExportWorker(QObject):
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int)
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(int)
 
     def __init__(self, pages: int = 5) -> None:
         super().__init__()

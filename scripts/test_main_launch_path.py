@@ -140,8 +140,8 @@ def _failure_main_child() -> int:
 
 def _ready_main_child() -> int:
     import budget_terminal_app.main as main_module
-    from PyQt6.QtCore import QTimer as RealQTimer
-    from PyQt6.QtWidgets import QWidget
+    from PySide6.QtCore import QTimer as RealQTimer
+    from PySide6.QtWidgets import QWidget
 
     from budget_terminal_app.startup_loading import REQUIRED_STARTUP_TASK_KEYS
 

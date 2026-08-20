@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 from typing import Any
 
 import yfinance as yf
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# This script talks to Yahoo from the same IP as the app, so it shares the app's pacer rather than
+# running unthrottled alongside it. Imported directly (not via `dependencies`) to keep the
+# diagnostic free of the Qt import chain -- the limiter module is stdlib-only.
+from budget_terminal_app.services.yahoo_rate_limit import install_yahoo_rate_limit
+
+install_yahoo_rate_limit()
 
 
 def _symbol_frame(batch: Any, symbol: str) -> Any:

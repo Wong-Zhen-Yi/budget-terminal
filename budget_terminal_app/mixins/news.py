@@ -5,7 +5,7 @@ import time
 from html import escape
 from typing import Any
 
-from PyQt6.QtCore import QStandardPaths
+from PySide6.QtCore import QStandardPaths
 
 from ..compat import *
 from budget_terminal_app.widgets.batched_render import DEFAULT_MAX_ITEMS, run_batched
@@ -30,11 +30,11 @@ NEWS_AI_PROMPT = (
 
 
 class _NewsPreviewSignals(QObject):
-    preview_ready = pyqtSignal(int, object, object)
+    preview_ready = Signal(int, object, object)
 
 
 class _NewsCardHost(QWidget):
-    width_changed = pyqtSignal(int)
+    width_changed = Signal(int)
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
@@ -42,8 +42,8 @@ class _NewsCardHost(QWidget):
 
 
 class _NewsArticleCard(QFrame):
-    selected = pyqtSignal(object)
-    activated = pyqtSignal(object)
+    selected = Signal(object)
+    activated = Signal(object)
 
     def __init__(self, article: dict[str, Any]) -> None:
         super().__init__()

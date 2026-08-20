@@ -30,7 +30,7 @@ from ..dependencies import (
     is_yahoo_unauthorized_error,
     logger,
     pd,
-    pyqtSignal,
+    Signal,
     threading,
     yf,
 )
@@ -70,8 +70,8 @@ CHART_CACHE_PERIOD_DAY_MAP = {
 
 
 class DataWorker(QObject):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
     _DETAILS_CACHE_TTL_SECONDS = 900.0
     _NON_CHART_SNAPSHOT_TTL_SECONDS = 30.0
     _stock_details_cache: dict[str, tuple[float, dict[str, Any]]] = {}

@@ -11,7 +11,7 @@ import sys
 import tempfile
 from typing import Any, Callable
 
-from .dependencies import QObject, logger, pyqtSignal, requests
+from .dependencies import QObject, logger, Signal, requests
 from .paths import is_frozen, user_data_path
 
 
@@ -473,8 +473,8 @@ def launch_packaged_update(
 class UpdateCheckWorker(QObject):
     """Check GitHub Releases for packaged updates without blocking the Settings UI."""
 
-    status = pyqtSignal(str)
-    finished = pyqtSignal(dict)
+    status = Signal(str)
+    finished = Signal(object)
 
     def __init__(self, current_version: str) -> None:
         super().__init__()
@@ -488,8 +488,8 @@ class UpdateCheckWorker(QObject):
 class UpdateDownloadWorker(QObject):
     """Download and verify a packaged update without blocking the Settings UI."""
 
-    status = pyqtSignal(str)
-    finished = pyqtSignal(dict)
+    status = Signal(str)
+    finished = Signal(object)
 
     def __init__(self, asset: dict[str, Any], target_dir: str | Path) -> None:
         super().__init__()

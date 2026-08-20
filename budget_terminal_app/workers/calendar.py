@@ -663,7 +663,7 @@ def _economic_events_cached_for_year(year: Any, *, fresh_only: bool = True) -> b
 
 class CalendarWorker(QObject):
     """Fetches earnings dates, ex-dividend dates, and analyst ratings for portfolio tickers."""
-    finished = pyqtSignal(int, object, dict)
+    finished = Signal(int, object, object)
 
     def __init__(self, tickers: Any, *, generation: int = 0, signature: Any = None) -> None:
         """Initialize the object."""
@@ -718,7 +718,7 @@ class CalendarWorker(QObject):
 class MarketHolidayWarmupWorker(QObject):
     """Warm one or more cached market-holiday years without blocking the UI thread."""
 
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
 
     def __init__(self, years: Any, force_refresh: bool = False) -> None:
         super().__init__()
@@ -752,7 +752,7 @@ class MarketHolidayWarmupWorker(QObject):
 class EconomicCalendarWarmupWorker(QObject):
     """Refresh official economic-calendar cache entries outside the UI thread."""
 
-    finished = pyqtSignal(int, dict)
+    finished = Signal(int, object)
 
     def __init__(self, years: Any, *, generation: int, force_refresh: bool = False) -> None:
         super().__init__()

@@ -9,9 +9,9 @@ from .news_sources import fetch_keyless_crypto_news
 class CryptoMarketWorker(QObject):
     """Fetch Crypto page market data without blocking the Qt UI thread."""
 
-    partial = pyqtSignal(dict)
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    partial = Signal(object)
+    finished = Signal(object)
+    error = Signal(str)
 
     CRYPTO_TICKERS: tuple[tuple[str, str, str], ...] = (
         ('BTC', 'BTC-USD', 'Bitcoin'),

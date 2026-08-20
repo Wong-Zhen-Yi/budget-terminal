@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from PyQt6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QProgressBar
 
 from ..compat import *
 from ..services.quant import QuantAnalyticsService, QuantScanPayload

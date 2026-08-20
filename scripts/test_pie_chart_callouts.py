@@ -10,8 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PyQt6.QtCore import QLineF
-from PyQt6.QtGui import QImage
+from PySide6.QtCore import QLineF
+from PySide6.QtGui import QImage
 
 from budget_terminal_app.dependencies import QApplication
 from budget_terminal_app.widgets.pie_chart import PieChartWidget

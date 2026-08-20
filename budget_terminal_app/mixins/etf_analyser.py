@@ -11,18 +11,6 @@ _P13_MAX_NAMED_SLICES = 12
 _P13_MIN_REMAINDER_WEIGHT = 0.001
 
 
-class _AumTableWidgetItem(QTableWidgetItem):
-    """QTableWidgetItem that sorts by its raw numeric AUM value."""
-
-    def __lt__(self, other: QTableWidgetItem) -> bool:
-        try:
-            left = float(self.data(Qt.ItemDataRole.UserRole))
-            right = float(other.data(Qt.ItemDataRole.UserRole))
-            return left < right
-        except Exception:
-            return super().__lt__(other)
-
-
 class _NumericTableWidgetItem(QTableWidgetItem):
     """QTableWidgetItem that sorts by a numeric UserRole value."""
 
@@ -66,12 +54,17 @@ class EtfAnalyserMixin:
         self._p13_arbitrage_payload: dict[str, Any] = {}
         self._p13_arbitrage_service = self._p13_build_arbitrage_service()
         self._p13_render_generations: dict[str, int] = {}
+        self._p13_pending_render = False
+        self._p13_holdings_filter = ''
+        self._p13_aum_filter = ''
 
         outer_layout = QHBoxLayout(self.page13)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(4)
 
         self.p13_left_panel = self._p13_build_aum_panel()
         splitter.addWidget(self.p13_left_panel)
@@ -84,6 +77,7 @@ class EtfAnalyserMixin:
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 4)
+        splitter.setSizes([280, 1120])
         outer_layout.addWidget(splitter)
 
         title_row = QHBoxLayout()
@@ -91,6 +85,11 @@ class EtfAnalyserMixin:
         self.set_theme_role(self.p13_title_lbl, 'page_title')
         title_row.addWidget(self.p13_title_lbl)
         title_row.addStretch()
+        self.p13_source_lbl = QLabel('')
+        self.p13_source_lbl.setOpenExternalLinks(True)
+        self.p13_source_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.p13_source_lbl.setVisible(False)
+        title_row.addWidget(self.p13_source_lbl)
         layout.addLayout(title_row)
 
         self.p13_controls_frame = QFrame()
@@ -102,13 +101,21 @@ class EtfAnalyserMixin:
         self.p13_etf_input = QLineEdit()
         self.p13_etf_input.setPlaceholderText('Enter ETF ticker (e.g. SPY, QQQ, VOO)')
         self.p13_etf_input.setMinimumWidth(220)
+        self.p13_etf_input.setClearButtonEnabled(True)
+        self.p13_etf_input.setToolTip('Type an ETF ticker and press Enter to load its holdings.')
+        self.p13_etf_input.textEdited.connect(self._p13_force_upper_input)
         self.p13_etf_input.returnPressed.connect(self._p13_load_etf)
         self.p13_load_btn = QPushButton('Load Holdings')
+        self.p13_load_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.p13_load_btn.setToolTip('Fetch the full holdings list from the official issuer source.')
         self.set_theme_variant(self.p13_load_btn, 'accent')
         self.p13_load_btn.clicked.connect(self._p13_load_etf)
         controls_layout.addWidget(self.p13_symbol_lbl)
         controls_layout.addWidget(self.p13_etf_input)
-        self.p13_export_btn = QPushButton('Export')
+        self.p13_export_btn = QPushButton('Copy Table')
+        self.p13_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.p13_export_btn.setToolTip('Copy the visible rows of the active subtab to the clipboard (tab-separated).')
+        self.p13_export_btn.setEnabled(False)
         self.p13_export_btn.clicked.connect(self._p13_export_clipboard)
         controls_layout.addWidget(self.p13_load_btn)
         controls_layout.addWidget(self.p13_export_btn)
@@ -190,6 +197,21 @@ class EtfAnalyserMixin:
         self.p13_table.setAlternatingRowColors(True)
         self.p13_table.setSortingEnabled(True)
         self.p13_table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+        self.p13_table.setToolTip('Double-click a holding to open it in Charts.')
+        self.p13_table.cellDoubleClicked.connect(self._p13_open_holding_in_charts)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(8)
+        self.p13_filter_input = QLineEdit()
+        self.p13_filter_input.setPlaceholderText('Filter holdings by ticker or name...')
+        self.p13_filter_input.setClearButtonEnabled(True)
+        self.p13_filter_input.textChanged.connect(self._p13_on_holdings_filter_changed)
+        filter_row.addWidget(self.p13_filter_input, 1)
+        self.p13_filter_count_lbl = QLabel('')
+        filter_row.addWidget(self.p13_filter_count_lbl)
+        holdings_layout.addLayout(filter_row)
+
         self.p13_holdings_row = QHBoxLayout()
         self.p13_holdings_row.setSpacing(10)
         self.p13_holdings_row.addWidget(self.p13_table, 3)
@@ -220,9 +242,17 @@ class EtfAnalyserMixin:
         controls_layout.setContentsMargins(12, 8, 12, 8)
         controls_layout.setSpacing(10)
         self.p13_arbitrage_title_lbl = QLabel('<b>ETF vs Basket</b>')
+        self.p13_arbitrage_title_lbl.setToolTip(
+            'Compares the ETF price move against the weighted move of its loaded holdings. '
+            'A positive gap means the ETF is running rich to its basket.'
+        )
         controls_layout.addWidget(self.p13_arbitrage_title_lbl)
         controls_layout.addStretch()
+        self.p13_arbitrage_asof_lbl = QLabel('')
+        controls_layout.addWidget(self.p13_arbitrage_asof_lbl)
         self.p13_arbitrage_refresh_btn = QPushButton('Refresh Arbitrage')
+        self.p13_arbitrage_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.p13_arbitrage_refresh_btn.setToolTip('Re-fetch ETF and component quotes for the loaded basket.')
         self.set_theme_variant(self.p13_arbitrage_refresh_btn, 'accent')
         self.p13_arbitrage_refresh_btn.clicked.connect(lambda: self._p13_request_arbitrage_refresh(force=True))
         controls_layout.addWidget(self.p13_arbitrage_refresh_btn)
@@ -234,14 +264,14 @@ class EtfAnalyserMixin:
         summary_layout.setSpacing(0)
         self.p13_arbitrage_metric_labels: dict[str, QLabel] = {}
         metrics = (
-            ('etf_price', 'ETF Price'),
-            ('etf_move', 'ETF Move'),
-            ('basket_move', 'Basket Move'),
-            ('gap_bps', 'Gap'),
-            ('coverage', 'Quote Coverage'),
-            ('signal', 'Signal'),
+            ('etf_price', 'ETF Price', 'Last traded price of the ETF itself.'),
+            ('etf_move', 'ETF Move', 'Percent move of the ETF over the current session.'),
+            ('basket_move', 'Basket Move', 'Weight-adjusted percent move of the loaded holdings.'),
+            ('gap_bps', 'Gap', 'ETF move minus basket move, in basis points. Positive means the ETF is rich.'),
+            ('coverage', 'Quote Coverage', 'How many holdings returned a usable quote. A low count makes the gap unreliable.'),
+            ('signal', 'Signal', 'Plain-language reading of the gap.'),
         )
-        for index, (key, title) in enumerate(metrics):
+        for index, (key, title, hint) in enumerate(metrics):
             if index:
                 sep = QFrame()
                 sep.setFixedWidth(1)
@@ -252,9 +282,11 @@ class EtfAnalyserMixin:
             cell.setSpacing(2)
             header = QLabel(title)
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.setToolTip(hint)
             value = QLabel('--')
             value.setAlignment(Qt.AlignmentFlag.AlignCenter)
             value.setMinimumWidth(86)
+            value.setToolTip(hint)
             cell.addWidget(header)
             cell.addWidget(value)
             summary_layout.addLayout(cell, 1)
@@ -284,6 +316,8 @@ class EtfAnalyserMixin:
         self.p13_arbitrage_table.setAlternatingRowColors(True)
         self.p13_arbitrage_table.setSortingEnabled(True)
         self.p13_arbitrage_table.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+        self.p13_arbitrage_table.setToolTip('Double-click a component to open it in Charts.')
+        self.p13_arbitrage_table.cellDoubleClicked.connect(self._p13_open_arbitrage_row_in_charts)
         layout.addWidget(self.p13_arbitrage_table, 1)
         return tab
 
@@ -397,7 +431,7 @@ class EtfAnalyserMixin:
         self._p13_show_holdings_chart_placeholder('Loading', 'Breakdown')
         self._p13_clear_arbitrage_payload('Arbitrage refresh will be available after holdings load.')
         self.set_status_text(self.p13_status_lbl, f'Loading ETF holdings for {ticker} from official issuer sources...', status='warning')
-        self.p13_load_btn.setEnabled(False)
+        self._p13_set_loading(True)
 
         def _run() -> None:
             """Fetch fund metadata and holdings off the UI thread."""
@@ -409,6 +443,11 @@ class EtfAnalyserMixin:
                 self._invoke_main.emit(lambda t=ticker, err=str(exc), rid=request_id: self._p13_handle_error(rid, t, err))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _p13_set_loading(self, loading: bool) -> None:
+        """Reflect an in-flight holdings fetch on the load button."""
+        self.p13_load_btn.setEnabled(not loading)
+        self.p13_load_btn.setText('Loading...' if loading else 'Load Holdings')
 
     def _p13_handle_loaded_result(self, request_id: int, result: 'EtfHoldingsResult') -> None:
         """Apply one ETF response only when it is still current."""
@@ -438,73 +477,167 @@ class EtfAnalyserMixin:
             for holding in result.holdings
         ]
         self._p13_rows = rows
+        self._p13_update_export_button()
+        self._p13_save_session_snapshot()
         if not self._p13_is_render_surface_visible():
-            self.p13_load_btn.setEnabled(True)
+            self._p13_pending_render = True
+            self._p13_set_loading(False)
             return
+        self._p13_pending_render = False
         self._p13_update_holdings_chart(result.holdings)
         self._p13_render_holdings_rows(rows)
         self.p13_name_lbl.setText(f'Fund: {result.fund_name or result.ticker}')
+        self.p13_name_lbl.setToolTip(result.fund_name or result.ticker)
         self.p13_category_lbl.setText(f'Issuer: {result.issuer or "Unknown"}')
         self.p13_family_lbl.setText(f'As Of: {result.as_of_date or "--"}')
         self.p13_expense_lbl.setText(f'Expense Ratio: {result.expense_ratio or "--"}')
         self.p13_assets_lbl.setText(f'Net Assets: {result.net_assets or "--"}')
-        self.p13_count_lbl.setText(f'Holdings Loaded: {len(rows)}')
+        self._p13_update_holdings_count_label()
+        self._p13_update_source_label(result)
         if result.sector_breakdown:
             parts = [f'{name} {pct:.1f}%' for name, pct in result.sector_breakdown.items()]
             self.p13_sectors_lbl.setText(f'<b>Sectors:</b>  {" | ".join(parts)}')
             self.p13_sectors_lbl.setVisible(True)
         else:
             self.p13_sectors_lbl.setVisible(False)
-        if rows and result.is_partial:
+        coverage_note = str(getattr(result, 'coverage_note', '') or '').strip()
+        note_suffix = f' {coverage_note}' if coverage_note else ''
+        if status_text:
+            self.set_status_text(self.p13_status_lbl, f'{status_text}{note_suffix}', status='positive')
+        elif rows and result.is_partial:
             self.set_status_text(
                 self.p13_status_lbl,
-                f'Loaded {len(rows)} top holdings for {result.ticker} via Yahoo Finance fallback. This is not the full holdings list.',
+                f'Loaded {len(rows)} top holdings for {result.ticker} via Yahoo Finance fallback. '
+                f'This is not the full holdings list.{note_suffix}',
                 status='warning',
             )
         elif rows:
             self.set_status_text(
                 self.p13_status_lbl,
-                f'Loaded {len(rows)} holdings for {result.ticker} from {result.issuer}.',
+                f'Loaded {len(rows)} holdings for {result.ticker} from {result.issuer}.{note_suffix}',
                 status='positive',
             )
         else:
             self.set_status_text(
                 self.p13_status_lbl,
-                f'No holdings were returned by the official issuer source for {result.ticker}.',
+                f'No holdings were returned by the official issuer source for {result.ticker}.{note_suffix}',
                 status='warning',
             )
-        if status_text:
-            self.set_status_text(self.p13_status_lbl, status_text, status='positive')
         if update_collection_info:
             self._set_data_collection_info([result.issuer or 'official issuer source'])
-        self.p13_load_btn.setEnabled(True)
-        self._p13_clear_arbitrage_payload(
-            f'Refresh arbitrage to compare {result.ticker} against the loaded basket.'
-            if rows
-            else 'Load ETF holdings before refreshing arbitrage.'
-        )
+        self._p13_set_loading(False)
+        arbitrage_ticker = str(getattr(self, '_p13_arbitrage_payload', {}).get('ticker', '') or '').upper().strip()
+        if rows and arbitrage_ticker and arbitrage_ticker == str(result.ticker or '').upper().strip():
+            # Re-showing the page must not discard an arbitrage run that still matches this basket.
+            self._p13_render_arbitrage_payload()
+        else:
+            self._p13_clear_arbitrage_payload(
+                f'Refresh arbitrage to compare {result.ticker} against the loaded basket.'
+                if rows
+                else 'Load ETF holdings before refreshing arbitrage.'
+            )
         if rows and self._p13_arbitrage_tab_active():
             self._p13_request_arbitrage_refresh(force=False)
-        self._p13_save_session_snapshot()
 
     def _p13_render_holdings_rows(self, rows: list[dict[str, Any]]) -> None:
         table = self.p13_table
+        visible_rows = self._p13_filter_holdings_rows(rows)
 
         def _apply(row_index: int, row: dict[str, Any]) -> None:
             ticker_item = QTableWidgetItem(row.get('symbol', ''))
             ticker_item.setForeground(self.theme_qcolor('text_primary'))
             name_item = QTableWidgetItem(row.get('name', ''))
             name_item.setForeground(self.theme_qcolor('text_secondary'))
-            weight_value = row.get('weight')
-            weight_text = '--' if weight_value is None else f'{weight_value * 100:.2f}%'
-            weight_item = QTableWidgetItem(weight_text)
-            weight_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            weight_item.setForeground(self.theme_qcolor('accent_positive'))
+            name_item.setToolTip(row.get('name', ''))
+            weight_item = self._p13_numeric_table_item(
+                self._p13_format_weight(row.get('weight')),
+                row.get('weight'),
+                'accent_positive',
+            )
             table.setItem(row_index, 0, ticker_item)
             table.setItem(row_index, 1, name_item)
             table.setItem(row_index, 2, weight_item)
 
-        self._p13_render_table_batched(table, 'holdings', rows, _apply, sort_column=2)
+        self._p13_render_table_batched(table, 'holdings', visible_rows, _apply, sort_column=2)
+        self._p13_update_holdings_count_label()
+
+    def _p13_filter_holdings_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Narrow holdings to the active ticker/name filter."""
+        needle = str(getattr(self, '_p13_holdings_filter', '') or '').strip().lower()
+        if not needle:
+            return list(rows or [])
+        return [
+            row for row in (rows or [])
+            if needle in str(row.get('symbol', '') or '').lower()
+            or needle in str(row.get('name', '') or '').lower()
+        ]
+
+    def _p13_on_holdings_filter_changed(self, text: Any) -> None:
+        """Re-render the holdings table for a new filter string."""
+        self._p13_holdings_filter = str(text or '')
+        self._p13_render_holdings_rows(getattr(self, '_p13_rows', []) or [])
+
+    def _p13_update_holdings_count_label(self) -> None:
+        """Keep the loaded/shown holdings counters in sync with the active filter."""
+        total = len(getattr(self, '_p13_rows', []) or [])
+        shown = len(self._p13_filter_holdings_rows(getattr(self, '_p13_rows', []) or []))
+        if hasattr(self, 'p13_count_lbl'):
+            self.p13_count_lbl.setText(f'Holdings Loaded: {total}')
+        if hasattr(self, 'p13_filter_count_lbl'):
+            self.p13_filter_count_lbl.setText('' if shown == total else f'{shown} of {total} shown')
+
+    def _p13_update_source_label(self, result: Any) -> None:
+        """Expose the issuer source document as a clickable link."""
+        if not hasattr(self, 'p13_source_lbl'):
+            return
+        url = str(getattr(result, 'source_url', '') or '').strip()
+        if not url.startswith(('http://', 'https://')):
+            self.p13_source_lbl.setVisible(False)
+            self.p13_source_lbl.setText('')
+            return
+        color = self.theme_color('info')
+        self.p13_source_lbl.setText(f'<a href="{url}" style="color:{color};">Source</a>')
+        self.p13_source_lbl.setToolTip(url)
+        self.p13_source_lbl.setVisible(True)
+
+    def _p13_force_upper_input(self, text: Any) -> None:
+        """Keep the ticker field uppercase without disturbing the cursor."""
+        upper = str(text or '').upper()
+        if upper == str(text or ''):
+            return
+        position = self.p13_etf_input.cursorPosition()
+        self.p13_etf_input.setText(upper)
+        self.p13_etf_input.setCursorPosition(position)
+
+    def _p13_open_holding_in_charts(self, row: int, _column: int) -> None:
+        """Double-click a holding to open it on the Charts page."""
+        item = self.p13_table.item(row, 0)
+        self._p13_open_symbol_in_charts(item.text() if item is not None else '')
+
+    def _p13_open_arbitrage_row_in_charts(self, row: int, _column: int) -> None:
+        """Double-click a basket component to open it on the Charts page."""
+        item = self.p13_arbitrage_table.item(row, 0)
+        self._p13_open_symbol_in_charts(item.text() if item is not None else '')
+
+    def _p13_open_symbol_in_charts(self, symbol: Any) -> None:
+        """Hand a component ticker to the Charts page, matching the heatmap behaviour."""
+        ticker = str(symbol or '').upper().strip()
+        if not ticker:
+            return
+        page = getattr(self, 'page10', None)
+        stacked = getattr(self, 'stacked_widget', None)
+        target_index = stacked.indexOf(page) if stacked is not None and page is not None else -1
+        if target_index < 0:
+            target_index = 9
+        self.switch_page(target_index)
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, 'p10_symbol_input'):
+                self.p10_symbol_input.setText(ticker)
+            if hasattr(self, '_p10_load_from_input'):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(target_index, _apply_chart_symbol)
 
     def _p13_render_table_batched(
         self,
@@ -530,6 +663,12 @@ class EtfAnalyserMixin:
         sorting_enabled = False
         prepared = False
         selected_signature = ()
+        header = table.horizontalHeader()
+        active_sort_column = header.sortIndicatorSection()
+        active_sort_order = header.sortIndicatorOrder()
+        if active_sort_column < 0 or active_sort_column >= table.columnCount():
+            active_sort_column = sort_column
+            active_sort_order = Qt.SortOrder.DescendingOrder
         selected_row = table.currentRow()
         if selected_row >= 0:
             selected_signature = tuple(
@@ -553,7 +692,7 @@ class EtfAnalyserMixin:
             table.setUpdatesEnabled(previous_updates)
             if sorting_enabled or not supports_batched_render:
                 table.setSortingEnabled(True)
-                table.sortByColumn(sort_column, Qt.SortOrder.DescendingOrder)
+                table.sortByColumn(active_sort_column, active_sort_order)
             table.blockSignals(previous_signals)
             if selected_signature:
                 for row_index in range(table.rowCount()):
@@ -600,25 +739,52 @@ class EtfAnalyserMixin:
             return False
 
     def _p13_on_show(self) -> None:
-        """Apply cached ETF results once when the page becomes visible."""
+        """Render results that arrived while the page was hidden."""
         result = getattr(self, '_p13_last_result', None)
-        if result is not None:
+        needs_render = bool(getattr(self, '_p13_pending_render', False)) or (
+            bool(getattr(self, '_p13_rows', None)) and self.p13_table.rowCount() == 0
+        )
+        if result is not None and needs_render:
             self._p13_apply_result(result, update_collection_info=False)
-        if getattr(self, '_p13_aum_cache', None):
+        if getattr(self, '_p13_aum_cache', None) and self._p13_aum_table.rowCount() == 0:
             self._p13_render_aum_table()
 
     def _p13_export_clipboard(self) -> None:
-        """Copy holdings to clipboard in tab-separated format for spreadsheet pasting."""
-        if not self._p13_rows:
-            self.set_status_text(self.p13_status_lbl, 'No holdings to export.', status='warning')
+        """Copy the active subtab's visible rows as tab-separated text."""
+        if self._p13_arbitrage_tab_active():
+            self._p13_export_arbitrage_clipboard()
+            return
+        rows = self._p13_filter_holdings_rows(getattr(self, '_p13_rows', []) or [])
+        if not rows:
+            self.set_status_text(self.p13_status_lbl, 'No holdings to copy.', status='warning')
             return
         lines = ['Ticker\tName\tWeight']
-        for row in self._p13_rows:
-            weight = row.get('weight')
-            weight_text = '' if weight is None else f'{weight * 100:.2f}%'
-            lines.append(f'{row.get("symbol", "")}\t{row.get("name", "")}\t{weight_text}')
+        for row in rows:
+            lines.append(
+                f'{row.get("symbol", "")}\t{row.get("name", "")}\t{self._p13_format_weight(row.get("weight"))}'
+            )
         QApplication.clipboard().setText('\n'.join(lines))
-        self.set_status_text(self.p13_status_lbl, f'Copied {len(self._p13_rows)} holdings to clipboard.', status='positive')
+        self.set_status_text(self.p13_status_lbl, f'Copied {len(rows)} holdings to clipboard.', status='positive')
+
+    def _p13_export_arbitrage_clipboard(self) -> None:
+        """Copy the basket comparison rows as tab-separated text."""
+        payload = getattr(self, '_p13_arbitrage_payload', {}) or {}
+        rows = [row for row in list(payload.get('rows') or []) if isinstance(row, dict)]
+        if not rows:
+            self._p13_set_arbitrage_status('No basket rows to copy. Refresh arbitrage first.', 'warning')
+            return
+        lines = ['Ticker\tName\tWeight\tPrice\tMove\tContribution']
+        for row in rows:
+            lines.append('\t'.join((
+                str(row.get('symbol') or ''),
+                str(row.get('name') or ''),
+                self._p13_format_weight(row.get('weight')),
+                self._p13_format_money(row.get('price')),
+                self._p13_format_signed_pct(row.get('move_pct')),
+                self._p13_format_signed_pct(row.get('contribution_pct')),
+            )))
+        QApplication.clipboard().setText('\n'.join(lines))
+        self._p13_set_arbitrage_status(f'Copied {len(rows)} basket rows to clipboard.', 'positive')
 
     def _p13_arbitrage_tab_active(self) -> bool:
         """Return whether the ETF Arbitrage subtab is visible."""
@@ -630,6 +796,7 @@ class EtfAnalyserMixin:
 
     def _p13_on_subtab_changed(self, _index: int) -> None:
         """Refresh arbitrage data when its subtab becomes visible."""
+        self._p13_update_export_button()
         if not self._p13_arbitrage_tab_active():
             return
         result = getattr(self, '_p13_last_result', None)
@@ -648,6 +815,8 @@ class EtfAnalyserMixin:
         if hasattr(self, 'p13_arbitrage_refresh_btn'):
             self.p13_arbitrage_refresh_btn.setEnabled(True)
         self._p13_arbitrage_payload = {}
+        if hasattr(self, 'p13_arbitrage_asof_lbl'):
+            self.p13_arbitrage_asof_lbl.setText('')
         self._p13_render_arbitrage_payload()
         self._p13_set_arbitrage_status(status_text, 'muted')
 
@@ -692,6 +861,10 @@ class EtfAnalyserMixin:
         if hasattr(self, 'p13_arbitrage_refresh_btn'):
             self.p13_arbitrage_refresh_btn.setEnabled(True)
         self._p13_arbitrage_payload = payload if isinstance(payload, dict) else {}
+        if hasattr(self, 'p13_arbitrage_asof_lbl'):
+            self.p13_arbitrage_asof_lbl.setText(
+                f'Quotes as of {datetime.datetime.now().strftime("%H:%M:%S")}'
+            )
         self._p13_render_arbitrage_payload()
         coverage = int(self._p13_arbitrage_payload.get('quote_coverage', 0) or 0)
         total = int(self._p13_arbitrage_payload.get('total_holdings', 0) or 0)
@@ -728,6 +901,7 @@ class EtfAnalyserMixin:
                     label.setText('--')
                     self._p13_style_arbitrage_metric_label(label, 'text_muted')
             self.p13_arbitrage_table.setRowCount(0)
+            self._p13_update_export_button()
             return
 
         self._p13_set_arbitrage_metric('etf_price', self._p13_format_money(payload.get('etf_price')), 'text_primary')
@@ -740,13 +914,21 @@ class EtfAnalyserMixin:
         self._p13_set_arbitrage_metric('signal', str(payload.get('signal') or '--'), 'text_primary')
 
         rows = [dict(row) for row in list(payload.get('rows') or []) if isinstance(row, dict)]
+        header = self.p13_arbitrage_table.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+        if sort_column < 0 or sort_column >= self.p13_arbitrage_table.columnCount():
+            sort_column = 5
+            sort_order = Qt.SortOrder.DescendingOrder
         self.p13_arbitrage_table.setSortingEnabled(False)
+        self.p13_arbitrage_table.setUpdatesEnabled(False)
         self.p13_arbitrage_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             symbol_item = QTableWidgetItem(str(row.get('symbol') or ''))
             symbol_item.setForeground(self.theme_qcolor('text_primary'))
             name_item = QTableWidgetItem(str(row.get('name') or ''))
             name_item.setForeground(self.theme_qcolor('text_secondary'))
+            name_item.setToolTip(str(row.get('name') or ''))
             weight_item = self._p13_numeric_table_item(self._p13_format_weight(row.get('weight')), row.get('weight'), 'accent_positive')
             price_item = self._p13_numeric_table_item(self._p13_format_money(row.get('price')), row.get('price'), 'text_primary')
             move_item = self._p13_numeric_table_item(self._p13_format_signed_pct(row.get('move_pct')), row.get('move_pct'), self._p13_value_color_token(row.get('move_pct')))
@@ -762,7 +944,9 @@ class EtfAnalyserMixin:
             self.p13_arbitrage_table.setItem(row_index, 4, move_item)
             self.p13_arbitrage_table.setItem(row_index, 5, contribution_item)
         self.p13_arbitrage_table.setSortingEnabled(True)
-        self.p13_arbitrage_table.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+        self.p13_arbitrage_table.sortByColumn(sort_column, sort_order)
+        self.p13_arbitrage_table.setUpdatesEnabled(True)
+        self._p13_update_export_button()
 
     def _p13_set_arbitrage_metric(self, key: str, text: str, color_token: str) -> None:
         label = getattr(self, 'p13_arbitrage_metric_labels', {}).get(key)
@@ -773,6 +957,17 @@ class EtfAnalyserMixin:
 
     def _p13_style_arbitrage_metric_label(self, label: QLabel, color_token: str) -> None:
         label.setStyleSheet(f'color: {self.theme_color(color_token)}; font-size: 14px; font-weight: bold; border: none;')
+
+    def _p13_update_export_button(self) -> None:
+        """Enable Copy Table only when the active subtab actually has rows."""
+        if not hasattr(self, 'p13_export_btn'):
+            return
+        if self._p13_arbitrage_tab_active():
+            payload = getattr(self, '_p13_arbitrage_payload', {}) or {}
+            has_rows = bool(payload.get('rows'))
+        else:
+            has_rows = bool(getattr(self, '_p13_rows', None))
+        self.p13_export_btn.setEnabled(has_rows)
 
     def _p13_set_arbitrage_status(self, text: Any, status: str='muted') -> None:
         if hasattr(self, 'p13_arbitrage_status_lbl'):
@@ -829,7 +1024,7 @@ class EtfAnalyserMixin:
             return
         self._p13_show_holdings_chart_placeholder('Load ETF', 'Breakdown')
         self._p13_clear_arbitrage_payload('Load ETF holdings before refreshing arbitrage.')
-        self.p13_load_btn.setEnabled(True)
+        self._p13_set_loading(False)
         self.set_status_text(self.p13_status_lbl, f'Failed to load {ticker}: {exc}', status='negative')
         if hasattr(self, '_record_data_health_exception'):
             self._record_data_health_exception('ETF holdings', exc, symbols=[ticker])
@@ -904,8 +1099,15 @@ class EtfAnalyserMixin:
 
         self._p13_aum_refresh_btn = QPushButton('Refresh AUM')
         self._p13_aum_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._p13_aum_refresh_btn.setToolTip('Re-fetch the US ETF universe ranked by net assets.')
         self._p13_aum_refresh_btn.clicked.connect(lambda: self._p13_fetch_aum_universe(force=True))
         vbox.addWidget(self._p13_aum_refresh_btn)
+
+        self._p13_aum_filter_input = QLineEdit()
+        self._p13_aum_filter_input.setPlaceholderText('Search ticker...')
+        self._p13_aum_filter_input.setClearButtonEnabled(True)
+        self._p13_aum_filter_input.textChanged.connect(self._p13_on_aum_filter_changed)
+        vbox.addWidget(self._p13_aum_filter_input)
 
         self._p13_aum_status_lbl = QLabel('')
         self._p13_aum_status_lbl.setWordWrap(True)
@@ -928,6 +1130,7 @@ class EtfAnalyserMixin:
         self._p13_aum_table.setAlternatingRowColors(True)
         self._p13_aum_table.setSortingEnabled(True)
         self._p13_aum_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+        self._p13_aum_table.setToolTip('Click an ETF to load its holdings on the right.')
         self._p13_aum_table.cellClicked.connect(self._p13_on_aum_etf_clicked)
         vbox.addWidget(self._p13_aum_table, 1)
 
@@ -1027,9 +1230,17 @@ class EtfAnalyserMixin:
         self._p13_aum_refresh_btn.setEnabled(True)
         self._p13_aum_status_lbl.setText(f'ETF AUM unavailable: {message}')
 
+    def _p13_on_aum_filter_changed(self, text: Any) -> None:
+        """Re-render the AUM list for a new ticker search string."""
+        self._p13_aum_filter = str(text or '')
+        self._p13_render_aum_table()
+
     def _p13_render_aum_table(self) -> None:
         """Display every loaded US ETF by AUM, largest first."""
+        needle = str(getattr(self, '_p13_aum_filter', '') or '').strip().upper()
         rows = sorted(self._p13_aum_cache.items(), key=lambda x: x[1], reverse=True)
+        if needle:
+            rows = [row for row in rows if needle in row[0]]
         if not self._p13_is_render_surface_visible():
             return
 
@@ -1039,7 +1250,7 @@ class EtfAnalyserMixin:
             t_item.setData(Qt.ItemDataRole.UserRole, ticker)
             t_item.setData(Qt.ItemDataRole.UserRole + 1, aum)
             t_item.setForeground(self.theme_qcolor('text_primary'))
-            a_item = _AumTableWidgetItem(self._p13_format_aum(aum))
+            a_item = _NumericTableWidgetItem(self._p13_format_aum(aum))
             a_item.setData(Qt.ItemDataRole.UserRole, aum)
             a_item.setData(Qt.ItemDataRole.UserRole + 1, ticker)
             a_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1053,15 +1264,18 @@ class EtfAnalyserMixin:
             _apply,
             sort_column=1,
         )
+        loaded = len(self._p13_aum_cache)
         if not self._p13_aum_cache:
             self._p13_aum_status_lbl.setText('No US ETF AUM data returned by Yahoo Finance.')
+        elif needle:
+            self._p13_aum_status_lbl.setText(f'{len(rows)} of {loaded} US ETFs match "{needle}".')
         elif self._p13_aum_missing_count:
             self._p13_aum_status_lbl.setText(
-                f'Loaded AUM for {len(rows)}/{self._p13_aum_total_count} US ETFs; '
+                f'Loaded AUM for {loaded}/{self._p13_aum_total_count} US ETFs; '
                 f'{self._p13_aum_missing_count} unavailable.'
             )
         else:
-            self._p13_aum_status_lbl.setText(f'Loaded AUM for {len(rows)} US ETFs.')
+            self._p13_aum_status_lbl.setText(f'Loaded AUM for {loaded} US ETFs.')
 
     @staticmethod
     def _p13_positive_int(value: Any) -> int | None:
@@ -1118,6 +1332,10 @@ class EtfAnalyserMixin:
         self.p13_arbitrage_summary_frame.setStyleSheet(panel_style)
         self.p13_symbol_lbl.setStyleSheet(f'color: {self.theme_color("text_primary")}; border: none;')
         self.p13_etf_input.setStyleSheet(input_style)
+        self.p13_filter_input.setStyleSheet(input_style)
+        self._p13_aum_filter_input.setStyleSheet(input_style)
+        for muted_label in (self.p13_filter_count_lbl, self.p13_arbitrage_asof_lbl):
+            muted_label.setStyleSheet(f'color: {self.theme_color("text_muted")}; border: none; font-size: 11px;')
         for label in (
             self.p13_name_lbl,
             self.p13_category_lbl,
@@ -1159,6 +1377,7 @@ class EtfAnalyserMixin:
         self.p13_table.setStyleSheet(table_style)
         self.p13_arbitrage_table.setStyleSheet(table_style)
         self._p13_aum_table.setStyleSheet(table_style)
+        self._p13_update_source_label(getattr(self, '_p13_last_result', None))
         self._p13_render_arbitrage_payload()
         for row_index in range(self.p13_table.rowCount()):
             ticker_item = self.p13_table.item(row_index, 0)
@@ -1182,9 +1401,17 @@ class EtfAnalyserMixin:
     def _p13_on_aum_etf_clicked(self, row: int, _col: int) -> None:
         """Load the clicked ETF's holdings in the main view."""
         item = self._p13_aum_table.item(row, 0)
-        if item:
-            self.p13_etf_input.setText(item.text())
-            self._p13_load_etf()
+        if item is None:
+            return
+        ticker = item.text().upper().strip()
+        if not ticker:
+            return
+        self.p13_etf_input.setText(ticker)
+        if not self.p13_load_btn.isEnabled():
+            # A load is already in flight; the input now shows what the next click will fetch.
+            self.set_status_text(self.p13_status_lbl, 'A holdings load is already running. Try again in a moment.', status='warning')
+            return
+        self._p13_load_etf()
 
     @staticmethod
     def _p13_format_aum(value: float) -> str:

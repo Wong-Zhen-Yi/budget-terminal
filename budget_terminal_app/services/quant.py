@@ -3,7 +3,7 @@
 Deliberately Qt-free and presentation-independent so the smoke tests can exercise every
 calculation without a ``QApplication``.
 
-The pinned runtime dependencies are pandas / yfinance / PyQt6 / pyqtgraph — there is no numpy,
+The pinned runtime dependencies are pandas / yfinance / PySide6 / pyqtgraph — there is no numpy,
 scipy or statsmodels available. Every statistic here is therefore closed-form single-regressor
 OLS built on pandas and ``math``, in the same style as
 ``services/relationship_analysis._regression_statistics``. In particular the stationarity check is

@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PyQt6.QtWidgets import QLineEdit, QMessageBox
+from PySide6.QtWidgets import QLineEdit, QMessageBox
 
 from budget_terminal_app.persistence import COMBINED_PORTFOLIO_ID, _normalize_multi_portfolio_state
 from scripts.test_combined_portfolio import _source_state

@@ -8,8 +8,8 @@ from ..dependencies import *
 class PriceScreenWorker(QObject):
     """Fetch the largest major-exchange US equities inside a price range."""
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     _PAGE_SIZE = 250
     _MAJOR_EXCHANGES = ('NYQ', 'NMS', 'NGM', 'NCM', 'ASE')

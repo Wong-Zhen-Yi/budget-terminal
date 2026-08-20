@@ -28,7 +28,7 @@ hiddenimports += collect_submodules('pydantic')
 hiddenimports += collect_submodules('httpx')
 hiddenimports += collect_submodules('yt_dlp')
 hiddenimports += [
-    'PyQt6.QtNetwork',
+    'PySide6.QtNetwork',
     'pandas',
     'pyqtgraph',
     'requests',
@@ -50,7 +50,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['PyQt6'],
     noarchive=False,
     optimize=0,
 )

@@ -40,8 +40,8 @@ def configure_process_dpi_awareness() -> None:
 def configure_qt_high_dpi_policy() -> None:
     """Keep Qt fractional display scaling from being rounded unnecessarily."""
     try:
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QGuiApplication
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
 
         policy = Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         QGuiApplication.setHighDpiScaleFactorRoundingPolicy(policy)

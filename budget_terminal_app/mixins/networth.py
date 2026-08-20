@@ -4,7 +4,7 @@ from ..compat import *
 
 
 class NetWorthFxWorker(QObject):
-    finished = pyqtSignal(dict)
+    finished = Signal(object)
 
     def _rate_from_fast_info(self, ticker_obj: Any) -> float | None:
         fast_info = getattr(ticker_obj, 'fast_info', {}) or {}
@@ -146,8 +146,8 @@ class NetWorthGoalWidget(QWidget):
         self.update()
 
     def paintEvent(self, event: Any) -> None:
-        from PyQt6.QtCore import QRectF
-        from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
