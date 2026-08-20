@@ -1707,11 +1707,16 @@ class PortfolioSetupMixin:
         if isinstance(getattr(self, 'chart_page_state', None), dict):
             self.chart_page_state = {**self.chart_page_state, 'symbol': ticker}
         page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 9
-        self.switch_page(page_index if page_index >= 0 else 9)
-        if hasattr(self, 'p10_symbol_input'):
-            self.p10_symbol_input.setText(ticker)
-        if hasattr(self, '_p10_load_from_input'):
-            self._p10_load_from_input()
+        target_index = page_index if page_index >= 0 else 9
+        self.switch_page(target_index)
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, 'p10_symbol_input'):
+                self.p10_symbol_input.setText(ticker)
+            if hasattr(self, '_p10_load_from_input'):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(target_index, _apply_chart_symbol)
 
     def _apply_portfolio_heatmap_theme(self) -> None:
         """Refresh Portfolio Heatmap colors after a theme change."""

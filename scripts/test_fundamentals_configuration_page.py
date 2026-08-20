@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,7 +14,16 @@ if str(ROOT) not in sys.path:
 from PyQt6.QtTest import QTest
 
 from budget_terminal_app.dependencies import QHBoxLayout, QLabel, QPushButton, QToolTip, Qt, QWidget, pd, pg
-from budget_terminal_app.persistence import _normalize_fundamentals_page_settings
+from budget_terminal_app.persistence import (
+    P2_DEFAULT_GROWTH_BASIS,
+    P2_DEFAULT_PERIODS,
+    P2_GROWTH_BASIS_PRIOR_PERIOD,
+    P2_GROWTH_BASIS_YEAR_AGO,
+    P2_MAX_PERIODS,
+    P2_MIN_PERIODS,
+    _normalize_fundamentals_page_settings,
+    fmt_num,
+)
 
 
 def _build_window():
@@ -191,7 +201,13 @@ def _payload(ticker: str = "NVDA") -> dict[str, object]:
 def test_fundamentals_page() -> None:
     app, window, fundamentals_mixin, original_save = _build_window()
     try:
-        assert window.fundamentals_page_state == {"last_ticker": "NVDA"}
+        assert window.fundamentals_page_state == {
+            "last_ticker": "NVDA",
+            "compare_ticker": "",
+            "period_count": P2_DEFAULT_PERIODS,
+            "indexed": False,
+            "growth_basis": P2_DEFAULT_GROWTH_BASIS,
+        }
         assert not hasattr(window, "p2_configuration_combo")
         assert not hasattr(window, "p2_configuration_buttons")
         assert not hasattr(window, "p2_configuration_group")
@@ -307,14 +323,31 @@ def test_fundamentals_page() -> None:
 
         for plot_index, plot in enumerate(window.p2_simple_charts):
             assert_compact_annotations(plot_index, plot)
+        # Quarterly growth defaults to year-over-year, so 2023-Q1 (29.00) measures against
+        # 2022-Q1 (25.00) rather than the preceding quarter.
         revenue_annotations = window.p2_simple_charts[0]._p2_annotation_items
-        assert revenue_annotations[0]["item"].toPlainText() == "29.00\n+3.6%"
-        assert revenue_annotations[1]["item"].toPlainText() == "30.00\n+3.4%"
+        assert revenue_annotations[0]["item"].toPlainText() == "29.00\n+16.0%"
+        assert revenue_annotations[1]["item"].toPlainText() == "30.00\n+15.4%"
         assert all(button.isEnabled() for button in window.p2_expand_buttons)
 
         first_region, second_region = window.p2_simple_charts[0]._p2_bar_regions[:2]
-        assert window._p2_bar_tooltip_text(first_region) == "2023-Q1\nRevenue: 29.00\nGrowth: +3.6%"
-        assert window._p2_bar_tooltip_text(second_region) == "2023-Q2\nRevenue: 30.00\nGrowth: +3.4%"
+        assert window._p2_bar_tooltip_text(first_region) == "2023-Q1\nRevenue: 29.00\nGrowth vs 2022-Q1: +16.0%"
+        assert window._p2_bar_tooltip_text(second_region) == "2023-Q2\nRevenue: 30.00\nGrowth vs 2022-Q2: +15.4%"
+
+        # Switching to QoQ measures against the preceding quarter instead.
+        window.p2_qoq_btn.click()
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        qoq_annotations = window.p2_simple_charts[0]._p2_annotation_items
+        assert qoq_annotations[0]["item"].toPlainText() == "29.00\n+3.6%"
+        assert qoq_annotations[1]["item"].toPlainText() == "30.00\n+3.4%"
+        qoq_first = window.p2_simple_charts[0]._p2_bar_regions[0]
+        assert window._p2_bar_tooltip_text(qoq_first) == "2023-Q1\nRevenue: 29.00\nGrowth vs 2022-Q4: +3.6%"
+        window.p2_yoy_btn.click()
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        revenue_annotations = window.p2_simple_charts[0]._p2_annotation_items
+        assert revenue_annotations[0]["item"].toPlainText() == "29.00\n+16.0%"
         hover_plot = window.p2_simple_charts[0]
         hover_position = hover_plot.getPlotItem().vb.mapViewToScene(
             pg.QtCore.QPointF(second_region["x"], second_region["value"] / 2.0)
@@ -341,9 +374,13 @@ def test_fundamentals_page() -> None:
                 "color": "#ffffff",
                 "width": 0.7,
             }],
+            # Pinned rather than inherited: these labels carry no year, and the point of the case
+            # is the prior-period edge behavior around zero and negative baselines.
+            growth_basis=P2_GROWTH_BASIS_PRIOR_PERIOD,
         )
         edge_points = edge_model["series"][0]["points"]
         assert [point["growth"] for point in edge_points] == [None, None, 200.0]
+        assert [point["growth_baseline"] for point in edge_points] == ["", "", "Q2"]
         assert window._p2_growth_text(edge_points[0]["growth"]) == "—"
         edge_legend = QWidget()
         QHBoxLayout(edge_legend)
@@ -531,7 +568,13 @@ def test_fundamentals_page() -> None:
         window._p2_apply_runtime_state()
         app.processEvents()
         assert window.p2_ticker_input.text() == "NVDA"
-        assert window.fundamentals_page_state == {"last_ticker": "NVDA"}
+        assert window.fundamentals_page_state == {
+            "last_ticker": "NVDA",
+            "compare_ticker": "",
+            "period_count": P2_DEFAULT_PERIODS,
+            "indexed": False,
+            "growth_basis": P2_DEFAULT_GROWTH_BASIS,
+        }
 
         wrong_typed_data = {
             "ticker": "NVDA",
@@ -625,9 +668,420 @@ def test_cash_and_bonds_series() -> None:
     assert resolver._p2_cash_and_bonds_series(pd.DataFrame(), "annual") == ([], [], [])
 
 
+def _rekey_frame(frame: object, columns: list[str]) -> object:
+    """Move one statement frame onto a different reporting calendar."""
+    original = list(frame.columns)
+    return frame.rename(columns=dict(zip(original, [pd.Timestamp(column) for column in columns])))
+
+
+def _compare_payload(ticker: str = "AMD") -> dict[str, object]:
+    """Build a compare payload on a deliberately different fiscal calendar.
+
+    A June year end and Feb/May/Aug/Nov quarters guarantee that no raw statement column can ever
+    match the primary ticker's, so the charts can only line up if alignment runs on the rendered
+    period label.
+    """
+    payload = _payload(ticker)
+    annual_columns = [f"{year}-06-30" for year in range(2015, 2025)]
+    quarterly_columns = [
+        "2022-02-28", "2022-05-31", "2022-08-31", "2022-11-30",
+        "2023-02-28", "2023-05-31", "2023-08-31", "2023-11-30",
+        "2024-02-29", "2024-05-31", "2024-08-31", "2024-11-30",
+        "2025-02-28", "2025-05-31", "2025-08-31", "2025-11-30",
+    ]
+    for key in ("financials", "cashflow", "balance_sheet"):
+        payload[key] = _rekey_frame(payload[key], annual_columns)
+    for key in ("quarterly_financials", "quarterly_cashflow", "quarterly_balance_sheet"):
+        payload[key] = _rekey_frame(payload[key], quarterly_columns)
+    return payload
+
+
+def test_fundamentals_growth_basis() -> None:
+    app, window, fundamentals_mixin, original_save = _build_window()
+    try:
+        window.update_page2(_payload("NVDA"))
+        app.processEvents()
+
+        # Annual periods are already year-over-year, so the choice is not offered there and the
+        # effective basis stays prior-period regardless of what is selected.
+        assert window._p2_period() == "annual"
+        assert window.p2_qoq_btn.isEnabled() is False
+        assert window.p2_yoy_btn.isEnabled() is False
+        assert window.p2_growth_lbl.isEnabled() is False
+        assert "already year-over-year" in window.p2_qoq_btn.toolTip()
+        assert window._p2_growth_basis() == P2_GROWTH_BASIS_PRIOR_PERIOD
+        assert window._p2_selected_growth_basis() == P2_DEFAULT_GROWTH_BASIS
+        annual_growth = [point["growth"] for point in window.p2_chart_models[0]["series"][0]["points"]]
+        assert window.p2_chart_models[0]["growth_basis"] == P2_GROWTH_BASIS_PRIOR_PERIOD
+        # Annual values are unchanged by the feature: each year against the previous one.
+        assert annual_growth[0] is None
+        assert abs(annual_growth[1] - 1.0) < 1e-9, annual_growth
+
+        window.p2_quarterly_btn.click()
+        app.processEvents()
+        assert window.p2_qoq_btn.isEnabled() is True
+        assert window.p2_yoy_btn.isEnabled() is True
+        assert "seasonality" in window.p2_yoy_btn.toolTip()
+        assert window.p2_yoy_btn.isChecked() is True, "year-over-year is the factory default"
+        assert window._p2_growth_basis() == P2_GROWTH_BASIS_YEAR_AGO
+        assert window.p2_chart_models[0]["growth_basis"] == P2_GROWTH_BASIS_YEAR_AGO
+
+        # The first four visible quarters still have a year-ago baseline because growth is
+        # computed before the period trim.
+        points = window.p2_chart_models[0]["series"][0]["points"]
+        assert points[0]["growth_baseline"] == "2022-Q1"
+        assert all(point["growth"] is not None for point in points), "trimmed-away baselines are still used"
+
+        window.p2_qoq_btn.click()
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        assert window.p2_yoy_btn.isChecked() is False
+        assert window._p2_growth_basis() == P2_GROWTH_BASIS_PRIOR_PERIOD
+        assert window.p2_chart_models[0]["series"][0]["points"][0]["growth_baseline"] == "2022-Q4"
+
+        # A saved preference survives a trip through Annual mode untouched.
+        window.p2_annual_btn.click()
+        app.processEvents()
+        assert window._p2_selected_growth_basis() == P2_GROWTH_BASIS_PRIOR_PERIOD
+        window.p2_quarterly_btn.click()
+        app.processEvents()
+        assert window.p2_qoq_btn.isChecked() is True
+
+        # Changing the basis then expanding must not serve a stale fullscreen chart.
+        window.p2_yoy_btn.click()
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        window._p2_open_fullscreen_chart(0)
+        app.processEvents()
+        dialog = window.p2_fullscreen_dialog
+        fullscreen_first = dialog._p2_plot._p2_bar_regions[0]
+        assert fullscreen_first["growth_baseline"] == "2022-Q1"
+        dialog.close()
+        app.processEvents()
+
+        # Settings and the session snapshot both carry the selection, not the effective basis.
+        assert window._p2_settings_payload()["growth_basis"] == P2_GROWTH_BASIS_YEAR_AGO
+        snapshot = window._p2_session_snapshot()
+        assert snapshot["growth_basis"] == P2_GROWTH_BASIS_YEAR_AGO
+        window._p2_apply_display_controls(
+            P2_DEFAULT_PERIODS, False, "", P2_GROWTH_BASIS_PRIOR_PERIOD
+        )
+        assert window.p2_qoq_btn.isChecked() is True
+        assert window._p2_restore_session_snapshot(snapshot) is True
+        app.processEvents()
+        assert window.p2_yoy_btn.isChecked() is True
+    finally:
+        fundamentals_mixin.save_fundamentals_page_settings = original_save
+        window.close()
+        app.processEvents()
+
+
+def test_fundamentals_normalizer_bounds() -> None:
+    assert _normalize_fundamentals_page_settings({"period_count": 99})["period_count"] == P2_MAX_PERIODS
+    assert _normalize_fundamentals_page_settings({"period_count": 1})["period_count"] == P2_MIN_PERIODS
+    assert _normalize_fundamentals_page_settings({"period_count": "x"})["period_count"] == P2_DEFAULT_PERIODS
+    assert _normalize_fundamentals_page_settings({})["period_count"] == P2_DEFAULT_PERIODS
+    # A stray string must fall back rather than becoming truthy.
+    assert _normalize_fundamentals_page_settings({"indexed": "yes"})["indexed"] is False
+    assert _normalize_fundamentals_page_settings({"indexed": True})["indexed"] is True
+    assert _normalize_fundamentals_page_settings({"indexed": 1})["indexed"] is True
+    assert _normalize_fundamentals_page_settings({"compare_ticker": "amd  "})["compare_ticker"] == "AMD"
+    assert _normalize_fundamentals_page_settings({"compare_ticker": None})["compare_ticker"] == ""
+    assert _normalize_fundamentals_page_settings({})["growth_basis"] == P2_DEFAULT_GROWTH_BASIS
+    assert _normalize_fundamentals_page_settings({"growth_basis": "nonsense"})["growth_basis"] == P2_DEFAULT_GROWTH_BASIS
+    assert _normalize_fundamentals_page_settings({"growth_basis": None})["growth_basis"] == P2_DEFAULT_GROWTH_BASIS
+    assert (
+        _normalize_fundamentals_page_settings({"growth_basis": "  Prior_Period "})["growth_basis"]
+        == P2_GROWTH_BASIS_PRIOR_PERIOD
+    )
+
+
+def test_fundamentals_fetch_slots() -> None:
+    """The two fetch slots must stay independent, and refresh must cover both tickers."""
+    app, window, fundamentals_mixin, original_save = _build_window()
+    try:
+        started: list[tuple[str, str, bool]] = []
+
+        def fake_start(ticker, slot, *, update_collection_info):
+            started.append((ticker, slot, bool(update_collection_info)))
+            window._p2_request_seq += 1
+            window._p2_active_request_ids[slot] = window._p2_request_seq
+            window._p2_request_contexts[window._p2_request_seq] = {
+                "slot": slot,
+                "update_collection_info": bool(update_collection_info),
+            }
+            return None
+
+        window._p2_start_fetch = fake_start
+        window.p2_ticker_input.setText("NVDA")
+
+        # With no compare ticker the wrapper drives only the primary slot.
+        window.analyze_stock_p2()
+        assert started == [("NVDA", "primary", True)], started
+
+        # With one set, a page refresh must cover both tickers, and the compare fetch must never
+        # claim the global data-collection banner.
+        started.clear()
+        window.p2_compare_input.setText("AMD")
+        window.analyze_stock_p2()
+        assert started == [("NVDA", "primary", True), ("AMD", "compare", False)], started
+
+        # A compare ticker equal to the primary is skipped rather than fetched twice.
+        started.clear()
+        window.p2_compare_input.setText("NVDA")
+        window.analyze_stock_p2()
+        assert started == [("NVDA", "primary", True)], started
+
+        # A busy primary slot must still report False so the startup dispatcher does not count the
+        # refresh, while a busy compare slot must not leak that False out of the wrapper.
+        slot_results = {"primary": None, "compare": False}
+
+        def recording_start(ticker, slot, *, update_collection_info):
+            fake_start(ticker, slot, update_collection_info=update_collection_info)
+            return slot_results[slot]
+
+        window._p2_start_fetch = recording_start
+        window.p2_compare_input.setText("AMD")
+        assert window.analyze_stock_p2() is not False, "a busy compare slot must not block the refresh"
+        slot_results["primary"] = False
+        assert window.analyze_stock_p2() is False, "a busy primary slot must still report False"
+
+        # The real guard short-circuits before a worker is ever constructed.
+        del window._p2_start_fetch
+        window.p2_fund_threads["compare"] = _RunningThread()
+        assert window._p2_start_fetch("AMD", "compare", update_collection_info=False) is False
+        window.p2_fund_threads["compare"] = None
+
+        # A compare error must leave the primary status line and Analyze button untouched.
+        window.p2_analyze_btn.setEnabled(True)
+        window.set_status_text(window.p2_status_lbl, "NVDA  |  source: yfinance only", status="positive")
+        compare_request = window._p2_request_seq + 1
+        window._p2_request_seq = compare_request
+        window._p2_active_request_ids["compare"] = compare_request
+        window._p2_request_contexts[compare_request] = {"slot": "compare", "update_collection_info": False}
+        window._page2_error(compare_request, "boom")
+        assert "Compare error: boom" in window.p2_compare_status_lbl.text()
+        assert window.p2_status_lbl.text() == "NVDA  |  source: yfinance only"
+        assert window.p2_analyze_btn.isEnabled() is True
+
+        # A stale response for either slot must be dropped rather than rendered.
+        window.p2_current_data = None
+        window._p2_active_request_ids["primary"] = 999
+        window._p2_handle_result(998, _payload("STALE"))
+        assert window.p2_current_data is None
+    finally:
+        fundamentals_mixin.save_fundamentals_page_settings = original_save
+        window.close()
+        app.processEvents()
+
+
+class _RunningThread:
+    """Stand-in for a QThread that reports itself busy."""
+
+    def isRunning(self) -> bool:
+        return True
+
+
+def test_fundamentals_compare_and_periods() -> None:
+    app, window, fundamentals_mixin, original_save = _build_window()
+    try:
+        window.update_page2(_payload("NVDA"))
+        app.processEvents()
+
+        # Single-ticker defaults must be exactly what the page had before compare existed.
+        assert window.p2_compare_input.text() == ""
+        assert window.p2_compare_metrics_widget.isHidden()
+        assert window.p2_top_frame.height() == 66
+        assert window.p2_periods_spin.value() == P2_DEFAULT_PERIODS
+        assert window.p2_indexed_btn.isChecked() is False
+        assert window.p2_compare_clear_btn.isEnabled() is False
+        assert [series["name"] for series in window.p2_chart_models[0]["series"]] == ["Revenue"]
+        assert window.p2_chart_models[0]["series"][0]["offset"] == 0.0
+        assert window.p2_chart_models[0]["series"][0]["width"] == 0.7
+
+        # A compare ticker matching the primary is rejected without starting a fetch.
+        window.p2_compare_input.setText("NVDA")
+        window._p2_apply_compare()
+        app.processEvents()
+        assert window.p2_compare_data is None
+        assert "different ticker" in window.p2_compare_status_lbl.text()
+
+        # Drive the overlay directly so the test never touches the network.
+        window.p2_compare_input.setText("AMD")
+        window._p2_handle_compare_result(_compare_payload("AMD"))
+        app.processEvents()
+        assert window.p2_compare_data is not None
+        assert not window.p2_compare_metrics_widget.isHidden()
+        assert window.p2_compare_clear_btn.isEnabled() is True
+        assert window.p2_top_frame.height() > 66
+        assert window.p2_metric_ticker_lbl.text() == "NVDA"
+        assert window.p2_compare_metric_ticker_lbl.text() == "AMD"
+        assert window.p2_compare_metric_vals["mktcap"].text() == window.p2_metric_vals["mktcap"].text()
+
+        revenue_model = window.p2_chart_models[0]
+        assert [series["name"] for series in revenue_model["series"]] == ["NVDA Revenue", "AMD Revenue"]
+        assert [series["legend_name"] for series in revenue_model["series"]] == ["NVDA", "AMD"]
+        # Solid primary, hollow compare: same hue, unmistakable fill difference.
+        assert [series["filled"] for series in revenue_model["series"]] == [True, False]
+        offsets = [series["offset"] for series in revenue_model["series"]]
+        widths = [series["width"] for series in revenue_model["series"]]
+        assert abs(sum(offsets)) < 1e-9, offsets
+        assert abs(widths[0] - widths[1]) < 1e-9, widths
+        opex_model = window.p2_chart_models[5]
+        assert [series["name"] for series in opex_model["series"]] == [
+            "NVDA SG&A",
+            "AMD SG&A",
+            "NVDA R&D",
+            "AMD R&D",
+        ], "compare series must interleave primary and compare per metric"
+
+        # Two fiscal calendars that share no raw column still land on one set of period labels.
+        assert revenue_model["labels"] == [str(year) for year in range(2015, 2025)]
+        assert len(revenue_model["columns"]) == 10, "aligned columns must be the union, not the sum"
+        assert len(window.p2_simple_charts[0]._p2_bar_regions) == 20
+
+        # The lone 'Current' shares fallback is suppressed while comparing.
+        shares_model = window.p2_chart_models[3]
+        assert "Current" not in shares_model["labels"]
+
+        # Compare charts must still fit inside the workspace with the second metrics row present.
+        workspace_bottom = window.p2_workspace_stack.contentsRect().bottom()
+        for index, frame in enumerate(window.p2_chart_frames[3:], start=3):
+            frame_bottom = frame.mapTo(window.p2_workspace_stack, frame.rect().bottomRight()).y()
+            assert frame_bottom <= workspace_bottom, f"compare chart {index} is clipped below the workspace"
+
+        # Period count is presentation only: it trims, it never refetches.
+        window.p2_periods_spin.setValue(6)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        assert all(len(model["labels"]) <= 6 for model in window.p2_chart_models)
+        assert window.p2_chart_models[0]["labels"] == [str(year) for year in range(2019, 2025)]
+        assert window.p2_chart_models[0]["period_count"] == 6
+        assert window.p2_chart_models[0]["available_columns"] == 10
+        assert len(window.p2_simple_charts[0]._p2_bar_regions) == 12
+        assert "10 years available" in window.p2_periods_spin.toolTip()
+
+        window.p2_quarterly_btn.click()
+        app.processEvents()
+        window.p2_periods_spin.setValue(P2_MAX_PERIODS)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        assert len(window.p2_chart_models[0]["labels"]) == 16
+        assert window.p2_chart_models[0]["labels"][0] == "2022-Q1"
+        # Four series over sixteen quarters exceeds what a compact card can label legibly, so the
+        # value labels are dropped there and hover carries the detail.
+        cash_flow_plot = window.p2_simple_charts[2]
+        assert len(cash_flow_plot._p2_bar_regions) == 64
+        assert cash_flow_plot._p2_annotation_items == []
+        assert window.p2_simple_charts[0]._p2_annotation_items, "32 bars still fit labels"
+
+        window.p2_annual_btn.click()
+        window.p2_periods_spin.setValue(6)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+
+        # Indexed mode rebases to the oldest visible period and keeps the raw value for hover.
+        raw_first = window.p2_chart_models[0]["series"][0]["points"][0]["value"]
+        raw_annotation = window.p2_simple_charts[0]._p2_annotation_items[0]["item"].toPlainText()
+        window.p2_indexed_btn.setChecked(True)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        indexed_model = window.p2_chart_models[0]
+        assert indexed_model["indexed"] is True
+        for series in indexed_model["series"]:
+            assert series["points"][0]["value"] == 100.0, series["name"]
+            assert series["points"][0]["indexed"] is True
+            assert series["indexed_base_period"] == "2019"
+        assert indexed_model["series"][0]["points"][0]["raw_value"] == raw_first
+        assert window.p2_simple_charts[0].getAxis("left").p2_index_mode is True
+        indexed_annotation = window.p2_simple_charts[0]._p2_annotation_items[0]["item"].toPlainText()
+        assert indexed_annotation.startswith("100\n"), indexed_annotation
+        # Growth is scale invariant, so it must be identical raw and indexed.
+        assert indexed_annotation.split("\n")[1] == raw_annotation.split("\n")[1]
+        tooltip = window._p2_bar_tooltip_text(window.p2_simple_charts[0]._p2_bar_regions[0])
+        assert "Index: 100 (2019 = 100)" in tooltip, tooltip
+        assert str(fmt_num(raw_first)) in tooltip, tooltip
+
+        # Fullscreen names both tickers and carries every series.
+        window._p2_open_fullscreen_chart(5)
+        app.processEvents()
+        dialog = window.p2_fullscreen_dialog
+        assert "NVDA vs AMD" in dialog.windowTitle(), dialog.windowTitle()
+        assert "Indexed" in dialog.windowTitle(), dialog.windowTitle()
+        assert dialog._p2_plot.getAxis("left").p2_index_mode is True
+        assert len({region["series"] for region in dialog._p2_plot._p2_bar_regions}) == 4
+        dialog.close()
+        app.processEvents()
+
+        # Toggling back must leave no indexed state behind in the model.
+        window.p2_indexed_btn.setChecked(False)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        assert window.p2_chart_models[0]["indexed"] is False
+        assert window.p2_chart_models[0]["series"][0]["points"][0]["value"] == raw_first
+        assert window.p2_simple_charts[0].getAxis("left").p2_index_mode is False
+        assert window.p2_simple_charts[0]._p2_annotation_items[0]["item"].toPlainText() == raw_annotation
+
+        # A loss-making compare ticker must index below zero, not above it.
+        losses = _compare_payload("XYZ")
+        losses["financials"] = losses["financials"] * -1.0
+        window._p2_handle_compare_result(losses)
+        window.p2_indexed_btn.setChecked(True)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        loss_series = window.p2_chart_models[1]["series"][1]
+        assert loss_series["name"] == "XYZ Net Income"
+        assert loss_series["points"][0]["value"] == -100.0
+        assert all(point["value"] < 0 for point in loss_series["points"])
+        window.p2_indexed_btn.setChecked(False)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+
+        # The session snapshot carries the compare ticker, never its payload: an oversized
+        # snapshot is discarded whole and would take the primary ticker's restore with it.
+        window._p2_handle_compare_result(_compare_payload("AMD"))
+        app.processEvents()
+        snapshot = window._p2_session_snapshot()
+        assert "compare_data" not in snapshot
+        assert snapshot["compare_ticker"] == "AMD"
+        assert snapshot["period_count"] == 6
+        assert snapshot["indexed"] is False
+        assert len(json.dumps(snapshot, default=str)) < 250_000
+
+        window.p2_periods_spin.setValue(P2_DEFAULT_PERIODS)
+        window.p2_indexed_btn.setChecked(True)
+        window._p2_apply_overview_controls()
+        app.processEvents()
+        assert window._p2_restore_session_snapshot(snapshot) is True
+        app.processEvents()
+        assert window.p2_periods_spin.value() == 6
+        assert window.p2_indexed_btn.isChecked() is False
+        assert window.p2_compare_input.text() == "AMD"
+
+        # Clearing compare returns the page to exactly its single-ticker layout.
+        window._p2_clear_compare()
+        app.processEvents()
+        assert window.p2_compare_data is None
+        assert window.p2_compare_input.text() == ""
+        assert window.p2_compare_metrics_widget.isHidden()
+        assert window.p2_compare_clear_btn.isEnabled() is False
+        assert window.p2_top_frame.height() == 66
+        assert [series["name"] for series in window.p2_chart_models[0]["series"]] == ["Revenue"]
+        assert window.p2_chart_models[0]["series"][0]["width"] == 0.7
+        assert window.p2_metric_ticker_lbl.isHidden()
+    finally:
+        fundamentals_mixin.save_fundamentals_page_settings = original_save
+        window.close()
+        app.processEvents()
+
+
 if __name__ == "__main__":
     test_cash_and_bonds_series()
+    test_fundamentals_normalizer_bounds()
     test_fundamentals_page()
+    test_fundamentals_growth_basis()
+    test_fundamentals_fetch_slots()
+    test_fundamentals_compare_and_periods()
     print("fundamentals page smoke passed")
     sys.stdout.flush()
     os._exit(0)

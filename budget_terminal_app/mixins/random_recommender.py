@@ -2159,10 +2159,14 @@ class RandomRecommenderMixin:
             return
         page_index = self._p18_page_index('page12', 7)
         self.switch_page(page_index)
-        if hasattr(self, 'stocks_symbol_input'):
-            self.stocks_symbol_input.setText(symbol)
-        if hasattr(self, '_stocks_load_from_input'):
-            self._stocks_load_from_input()
+
+        def _apply_stocks_symbol() -> None:
+            if hasattr(self, 'stocks_symbol_input'):
+                self.stocks_symbol_input.setText(symbol)
+            if hasattr(self, '_stocks_load_from_input'):
+                self._stocks_load_from_input()
+
+        self._run_after_page_built(page_index, _apply_stocks_symbol)
 
     def _p18_load_in_charts(self) -> None:
         symbol = self._p18_current_symbol()
@@ -2173,30 +2177,44 @@ class RandomRecommenderMixin:
             self.chart_page_state = {**self.chart_page_state, 'symbol': symbol}
         page_index = self._p18_page_index('page10', 9)
         self.switch_page(page_index)
-        if hasattr(self, 'p10_symbol_input'):
-            self.p10_symbol_input.setText(symbol)
-        if hasattr(self, '_p10_load_from_input'):
-            self._p10_load_from_input()
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, 'p10_symbol_input'):
+                self.p10_symbol_input.setText(symbol)
+            if hasattr(self, '_p10_load_from_input'):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(page_index, _apply_chart_symbol)
 
     def _p18_load_in_fundamentals(self) -> None:
         symbol = self._p18_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._p18_page_index('page2', 8))
-        if hasattr(self, 'p2_ticker_input'):
-            self.p2_ticker_input.setText(symbol)
-        if hasattr(self, 'analyze_stock_p2'):
-            self.analyze_stock_p2()
+        page_index = self._p18_page_index('page2', 8)
+        self.switch_page(page_index)
+
+        def _apply_fundamentals_symbol() -> None:
+            if hasattr(self, 'p2_ticker_input'):
+                self.p2_ticker_input.setText(symbol)
+            if hasattr(self, 'analyze_stock_p2'):
+                self.analyze_stock_p2()
+
+        self._run_after_page_built(page_index, _apply_fundamentals_symbol)
 
     def _p18_load_in_options(self) -> None:
         symbol = self._p18_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._p18_page_index('page5', 11))
-        if hasattr(self, 'p5_shared_ticker_input'):
-            self.p5_shared_ticker_input.setText(symbol)
-        if hasattr(self, '_p5_load_expiries'):
-            self._p5_load_expiries()
+        page_index = self._p18_page_index('page5', 11)
+        self.switch_page(page_index)
+
+        def _apply_options_symbol() -> None:
+            if hasattr(self, 'p5_shared_ticker_input'):
+                self.p5_shared_ticker_input.setText(symbol)
+            if hasattr(self, '_p5_load_expiries'):
+                self._p5_load_expiries()
+
+        self._run_after_page_built(page_index, _apply_options_symbol)
 
     def _p18_save_to_charts_watchlist(self) -> None:
         symbol = self._p18_current_symbol()

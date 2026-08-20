@@ -1,6 +1,14 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from ..services.fundamentals_compare import (
+    align_series_by_label,
+    column_sort_key,
+    compute_growth,
+    index_series_values,
+    series_bar_geometry,
+    trim_columns,
+)
 
 # Balance sheet rows that make up "Cash and Bonds". These are matched exactly rather than by
 # substring: 'short term investments' is contained in the combined row name, and the quarterly
@@ -18,6 +26,21 @@ _P2_LONG_TERM_INVESTMENT_KEYS = [
     'marketable securities noncurrent',
     'long term investments',
 ]
+
+# Above this many bars a compact card cannot fit readable value labels, and the collision layout
+# that places them is superlinear in bar count. Two full series of quarters is the practical edge.
+P2_COMPACT_ANNOTATION_LIMIT = 32
+
+# The six fixed overview charts, as (title, ((series key, series label), ...)). Order matters: it is
+# the order of the chart cards built by init_page2.
+_P2_OVERVIEW_CHARTS = (
+    ('Revenue', (('revenue', 'Revenue'),)),
+    ('Net Income', (('net_income', 'Net Income'),)),
+    ('Cash Flow', (('operating_cf', 'Operating CF'), ('free_cf', 'Free CF'))),
+    ('Shares Outstanding', (('shares', 'Shares Outstanding'),)),
+    ('Cash and Bonds & Total Debt', (('cash', 'Cash and Bonds'), ('debt', 'Total Debt'))),
+    ('Operating Expenses', (('sga', 'SG&A'), ('rd', 'R&D'))),
+)
 
 
 class SimpleChartsMixin:
@@ -435,10 +458,15 @@ class SimpleChartsMixin:
                 widget.setParent(None)
                 widget.deleteLater()
 
-    def _p2_solid_bars(self, x_values: Any, heights: Any, color: Any, width: float=0.7) -> Any:
-        """Build one solid bar series for a Fundamentals plot."""
-        brush = pg.mkBrush(color)
-        pen = pg.mkPen(color, width=1)
+    def _p2_solid_bars(self, x_values: Any, heights: Any, color: Any, width: float=0.7, *, filled: bool=True) -> Any:
+        """Build one bar series for a Fundamentals plot, solid or hollow.
+
+        The hollow variant keeps the metric's hue while marking the compare ticker. Tinting the
+        color instead would lower contrast, which reads as 'less important' rather than
+        'different company' and nearly disappears on the dark themes.
+        """
+        brush = pg.mkBrush(color) if filled else pg.mkBrush(None)
+        pen = pg.mkPen(color, width=1 if filled else 2)
         return pg.BarGraphItem(x=x_values, height=heights, width=width, brush=brush, pen=pen)
 
     def _p2_register_chart_hover(self, plot: Any, *, owner: Any=None) -> None:
@@ -481,15 +509,6 @@ class SimpleChartsMixin:
         plot._p2_hover_key = hover_key
         QToolTip.showText(pg.QtGui.QCursor.pos(), self._p2_bar_tooltip_text(match), plot)
 
-    def _p2_growth_rate(self, current: Any, previous: Any) -> float | None:
-        """Return growth versus the previous valid point in the same series."""
-        if previous in (None, 0):
-            return None
-        try:
-            return (float(current) - float(previous)) / abs(float(previous)) * 100.0
-        except (TypeError, ValueError, ZeroDivisionError):
-            return None
-
     def _p2_growth_text(self, growth: Any) -> str:
         """Format one chart growth value consistently."""
         if growth is None:
@@ -503,28 +522,41 @@ class SimpleChartsMixin:
 
     def _p2_bar_tooltip_text(self, region: Any) -> str:
         """Build the compact-chart hover text for one bar."""
-        return '\n'.join(
-            (
-                str(region.get('period', '') or ''),
-                f'{region.get("series", "Value")}: {fmt_num(region.get("value"))}',
-                f'Growth: {self._p2_growth_text(region.get("growth"))}',
-            )
-        )
+        raw_value = region.get('raw_value', region.get('value'))
+        lines = [
+            str(region.get('period', '') or ''),
+            f'{region.get("series", "Value")}: {fmt_num(raw_value)}',
+        ]
+        if region.get('indexed'):
+            base_period = str(region.get('indexed_base_period', '') or '')
+            suffix = f' ({base_period} = 100)' if base_period else ''
+            lines.append(f'Index: {float(region.get("value", 0.0)):.0f}{suffix}')
+        # Naming the baseline period makes the active growth basis unambiguous without having to
+        # look back at the QoQ/YoY toggle.
+        baseline = str(region.get('growth_baseline', '') or '')
+        label = f'Growth vs {baseline}' if baseline else 'Growth'
+        lines.append(f'{label}: {self._p2_growth_text(region.get("growth"))}')
+        return '\n'.join(lines)
 
     def _p2_chart_model(
         self,
         title: str,
         period: str,
         series_specs: list[dict[str, Any]],
+        *,
+        period_count: int | None=None,
+        indexed: bool=False,
+        growth_basis: str | None=None,
     ) -> dict[str, Any]:
         """Normalize one overview into a shared compact/fullscreen chart model."""
+        limit = self._p2_period_count() if period_count is None else period_count
+        basis = self._p2_growth_basis() if growth_basis is None else growth_basis
         all_columns = []
         labels_by_column = {}
         normalized_specs = []
         for raw_spec in series_specs:
             values, labels, columns = raw_spec.get('data', ([], [], []))
             points = []
-            previous = None
             for point_index, (value, label, column) in enumerate(zip(values, labels, columns)):
                 try:
                     numeric_value = float(value)
@@ -539,30 +571,56 @@ class SimpleChartsMixin:
                     'column': column,
                     'period': str(label),
                     'value': numeric_value,
-                    'growth': self._p2_growth_rate(numeric_value, previous),
+                    'raw_value': numeric_value,
                     'point_index': point_index,
+                    'indexed': False,
                 })
-                previous = numeric_value
+            # Growth needs the whole series and runs before the trim below: a year-ago baseline can
+            # sit several periods before the oldest one the chart ends up showing.
+            growth_pairs = compute_growth(
+                [point['period'] for point in points],
+                [point['value'] for point in points],
+                basis=basis,
+            )
+            for point, (growth, baseline_label) in zip(points, growth_pairs):
+                point['growth'] = growth
+                point['growth_baseline'] = baseline_label
             normalized_specs.append({
                 'name': str(raw_spec.get('name', title) or title),
+                'legend_name': str(raw_spec.get('legend_name', '') or ''),
                 'color': raw_spec.get('color') or self.theme_series_color(0),
                 'label_color': raw_spec.get('label_color') or self.theme_color('text_secondary'),
                 'offset': float(raw_spec.get('offset', 0.0) or 0.0),
                 'width': float(raw_spec.get('width', 0.7) or 0.7),
+                'filled': bool(raw_spec.get('filled', True)),
                 'points': points,
             })
         try:
-            ordered_columns = sorted(all_columns)
+            ordered_columns = sorted(all_columns, key=column_sort_key)
         except TypeError:
             ordered_columns = all_columns
-        if period == 'quarterly' and len(ordered_columns) > 12:
-            ordered_columns = ordered_columns[-12:]
+        available_columns = len(ordered_columns)
+        trimmed_columns = trim_columns(ordered_columns, limit)
+        if len(trimmed_columns) != available_columns:
+            ordered_columns = trimmed_columns
             visible_columns = set(ordered_columns)
             for series in normalized_specs:
                 series['points'] = [
                     point for point in series['points']
                     if point['column'] in visible_columns
                 ]
+        # Rebasing happens after the trim so the base is the oldest *visible* period. Growth stays
+        # as computed above: it is scale-invariant, and the oldest visible bar keeps a real growth
+        # number derived from a now-off-chart period.
+        if indexed:
+            for series in normalized_specs:
+                points = series['points']
+                indexed_values, base = index_series_values([point['value'] for point in points])
+                for point, indexed_value in zip(points, indexed_values):
+                    point['value'] = indexed_value
+                    point['indexed'] = True
+                series['indexed_base'] = base
+                series['indexed_base_period'] = points[0]['period'] if points else ''
         column_positions = {column: index for index, column in enumerate(ordered_columns)}
         for series_index, series in enumerate(normalized_specs):
             for point in series['points']:
@@ -571,10 +629,54 @@ class SimpleChartsMixin:
         return {
             'title': title,
             'period': period,
+            'period_count': limit,
+            'available_columns': available_columns,
+            'indexed': bool(indexed),
+            'growth_basis': basis,
             'columns': ordered_columns,
             'labels': [labels_by_column.get(column, str(column)) for column in ordered_columns],
             'series': normalized_specs,
         }
+
+    def _p2_chart_model_from_entries(
+        self,
+        title: str,
+        period: str,
+        entries: list[dict[str, Any]],
+        *,
+        period_count: int | None=None,
+        indexed: bool=False,
+        growth_basis: str | None=None,
+    ) -> dict[str, Any]:
+        """Lay out N series evenly and build the shared chart model.
+
+        Entries carry no geometry. Empty series are dropped before the layout is computed, so a
+        chart whose second metric has no reported rows draws its remaining bars centred on the
+        period tick instead of leaving a permanent gap.
+        """
+        populated = [entry for entry in entries if list((entry.get('data') or ([], [], []))[0])]
+        geometry = series_bar_geometry(len(populated))
+        text_color = self.theme_color('text_secondary')
+        specs = []
+        for entry, (offset, width) in zip(populated, geometry):
+            specs.append({
+                'name': entry.get('name', title),
+                'legend_name': entry.get('legend_name', ''),
+                'data': entry.get('data', ([], [], [])),
+                'color': entry.get('color'),
+                'label_color': entry.get('label_color') or text_color,
+                'filled': entry.get('filled', True),
+                'offset': offset,
+                'width': width,
+            })
+        return self._p2_chart_model(
+            title,
+            period,
+            specs,
+            period_count=period_count,
+            indexed=indexed,
+            growth_basis=growth_basis,
+        )
 
     def _p2_chart_model_has_data(self, model: Any) -> bool:
         """Return whether a chart model contains at least one visible bar."""
@@ -655,20 +757,33 @@ class SimpleChartsMixin:
         self._p2_clear_legend_bar(legend_bar)
         series_list = list(model.get('series', []))
         labels = list(model.get('labels', []))
+        # Four compare series carry roughly 320px of legend text, which does not fit beside the
+        # title in a compact card. Fall back to the ticker alone there and keep full names
+        # fullscreen, where there is room.
+        compact_legend = not fullscreen and len(series_list) > 2
         if len(series_list) > 1:
             bar_layout = legend_bar.layout()
             if bar_layout is not None:
                 for series in series_list:
                     swatch = QLabel()
                     swatch.setFixedSize(12, 12)
-                    swatch.setStyleSheet(f'background: {series["color"]}; border-radius: 2px;')
-                    text = QLabel(series['name'])
+                    if series.get('filled', True):
+                        swatch.setStyleSheet(f'background: {series["color"]}; border-radius: 2px;')
+                    else:
+                        swatch.setStyleSheet(
+                            f'background: transparent; border: 2px solid {series["color"]}; border-radius: 2px;'
+                        )
+                    label_text = str(series.get('legend_name') or series['name']) if compact_legend else series['name']
+                    text = QLabel(label_text)
                     text.setStyleSheet(
                         f'color: {self.theme_color("text_primary")}; font-size: 11px; background: transparent;'
                     )
                     bar_layout.addWidget(swatch)
                     bar_layout.addWidget(text)
                     bar_layout.addSpacing(12)
+        left_axis = pw.getAxis('left')
+        if left_axis is not None:
+            left_axis.p2_index_mode = bool(model.get('indexed'))
         if not labels:
             pw.getAxis('bottom').setTicks([[]])
             pw.getPlotItem().vb.autoRange()
@@ -680,7 +795,13 @@ class SimpleChartsMixin:
                 continue
             x_values = [point['x'] for point in points]
             values = [point['value'] for point in points]
-            pw.addItem(self._p2_solid_bars(x_values, values, series['color'], width=series['width']))
+            pw.addItem(self._p2_solid_bars(
+                x_values,
+                values,
+                series['color'],
+                width=series['width'],
+                filled=series.get('filled', True),
+            ))
             for point in points:
                 region = {
                     **point,
@@ -688,6 +809,7 @@ class SimpleChartsMixin:
                     'width': series['width'],
                     'label_color': series['label_color'],
                     'series_index': series_index,
+                    'indexed_base_period': series.get('indexed_base_period', ''),
                 }
                 pw._p2_bar_regions.append(region)
             all_values.extend(values)
@@ -703,11 +825,18 @@ class SimpleChartsMixin:
         font = pg.QtGui.QFont('Arial', font_size, pg.QtGui.QFont.Weight.Bold)
         if profile == 'compact':
             font.setStretch(pg.QtGui.QFont.Stretch.Condensed)
+        # Compact label placement is superlinear in bar count and reruns on every resize. Past
+        # roughly two full series of quarters the labels no longer fit anyway, so hover carries
+        # the detail instead. Fullscreen has the room and keeps every label.
+        if profile == 'compact' and len(pw._p2_bar_regions) > P2_COMPACT_ANNOTATION_LIMIT:
+            pw._p2_annotation_items = []
+            pw._p2_annotation_profile = profile
+            return
         annotations = []
         for region in pw._p2_bar_regions:
             if region['value'] == 0:
                 continue
-            value_text = str(fmt_num(region['value']))
+            value_text = f'{region["value"]:.0f}' if region.get('indexed') else str(fmt_num(region['value']))
             growth_text = self._p2_growth_text(region.get('growth'))
             text = f'{value_text}\n{growth_text}'
             anchor = (0.5, 1.0 if region['value'] >= 0 else 0.0)
@@ -948,16 +1077,16 @@ class SimpleChartsMixin:
             if negative:
                 bottom_reserve += row_height
 
-    def _p2_default_chart_models(self, data: Any, period: Any) -> list[dict[str, Any]]:
-        """Build the six fixed overview models from the selected statement period."""
-        fin_df = data['financials'] if period == 'annual' else data['quarterly_financials']
-        bs_df = data['balance_sheet'] if period == 'annual' else data['quarterly_balance_sheet']
-        cf_df = data['cashflow'] if period == 'annual' else data['quarterly_cashflow']
-        info = data['info']
-        text_color = self.theme_color('text_secondary')
+    def _p2_overview_series(self, data: Any, period: Any, *, allow_shares_fallback: bool=True) -> dict[str, tuple]:
+        """Resolve every (values, labels, columns, color) series behind the six overview charts."""
+        payload = data if isinstance(data, dict) else {}
+        fin_df = payload.get('financials') if period == 'annual' else payload.get('quarterly_financials')
+        bs_df = payload.get('balance_sheet') if period == 'annual' else payload.get('quarterly_balance_sheet')
+        cf_df = payload.get('cashflow') if period == 'annual' else payload.get('quarterly_cashflow')
+        info = payload.get('info') if isinstance(payload.get('info'), dict) else {}
 
-        revenue = self._p2_resolve_curated_series(data, period, 'revenue')
-        net_income = self._p2_resolve_curated_series(data, period, 'net_income')
+        revenue = self._p2_resolve_curated_series(payload, period, 'revenue')
+        net_income = self._p2_resolve_curated_series(payload, period, 'net_income')
         operating_cf = self._p2_extract_statement_series(
             cf_df,
             ['operating cash flow', 'cash from operations'],
@@ -969,14 +1098,14 @@ class SimpleChartsMixin:
             ['ordinary shares number', 'shares outstanding', 'common stock shares outstanding'],
             period,
         )
-        if not shares[0]:
+        if not shares[0] and allow_shares_fallback:
             shares_scalar = info.get('sharesOutstanding')
             if shares_scalar is not None:
                 try:
                     shares = ([float(shares_scalar)], ['Current'], ['current'])
                 except (TypeError, ValueError):
                     shares = ([], [], [])
-        cash_series = self._p2_resolve_curated_series(data, period, 'cash')
+        cash_series = self._p2_resolve_curated_series(payload, period, 'cash')
         debt_series = self._p2_total_debt_series(bs_df, period)
         sga_series = self._p2_extract_statement_series(
             fin_df,
@@ -984,55 +1113,72 @@ class SimpleChartsMixin:
             period,
         )
         rd_series = self._p2_extract_statement_series(fin_df, ['research and development'], period)
+        return {
+            'revenue': (revenue[0], revenue[1], revenue[2], revenue[3]),
+            'net_income': (net_income[0], net_income[1], net_income[2], net_income[3]),
+            'operating_cf': (*operating_cf, self.theme_series_color(2)),
+            'free_cf': (*free_cf, self.theme_series_color(3)),
+            'shares': (*shares, self.theme_series_color(4)),
+            'cash': (cash_series[0], cash_series[1], cash_series[2], self.theme_color('accent_positive')),
+            'debt': (*debt_series, self.theme_color('accent_negative')),
+            'sga': (*sga_series, self.theme_series_color(0)),
+            'rd': (*rd_series, self.theme_series_color(1)),
+        }
 
-        def spec(name: str, series: Any, color: Any, *, offset: float=0.0, width: float=0.7) -> dict[str, Any]:
-            return {
-                'name': name,
-                'data': (series[0], series[1], series[2]),
-                'color': color,
-                'label_color': text_color,
-                'offset': offset,
-                'width': width,
-            }
+    def _p2_default_chart_models(self, data: Any, period: Any) -> list[dict[str, Any]]:
+        """Build the six fixed overview models, overlaying the compare ticker when one is loaded."""
+        compare_data = getattr(self, 'p2_compare_data', None)
+        compare_active = isinstance(compare_data, dict) and isinstance(data, dict)
+        period_count = self._p2_period_count()
+        indexed = self._p2_indexed_enabled()
+        growth_basis = self._p2_growth_basis()
+        primary_ticker = str((data if isinstance(data, dict) else {}).get('ticker', '') or '').upper().strip()
+        # A lone 'Current' shares-outstanding bar is an instantaneous value, not a period. Beside a
+        # second ticker's dated bars it reads as one, so the fallback is dropped while comparing.
+        sources = [(primary_ticker, self._p2_overview_series(data, period, allow_shares_fallback=not compare_active), True)]
+        if compare_active:
+            sources.append((
+                str(compare_data.get('ticker', '') or '').upper().strip(),
+                self._p2_overview_series(compare_data, period, allow_shares_fallback=False),
+                False,
+            ))
 
-        return [
-            self._p2_chart_model('Revenue', period, [spec('Revenue', revenue, revenue[3])]),
-            self._p2_chart_model('Net Income', period, [spec('Net Income', net_income, net_income[3])]),
-            self._p2_chart_model(
-                'Cash Flow',
+        models = []
+        for title, metrics in _P2_OVERVIEW_CHARTS:
+            entries = []
+            for metric_key, metric_label in metrics:
+                for ticker, series_map, filled in sources:
+                    values, labels, columns, color = series_map[metric_key]
+                    if compare_active:
+                        # Two companies never share a fiscal calendar, so align on the rendered
+                        # period label rather than the raw statement column.
+                        values, labels, columns = align_series_by_label(values, labels, columns)
+                    entries.append({
+                        'name': f'{ticker} {metric_label}' if compare_active and ticker else metric_label,
+                        'legend_name': ticker if compare_active and ticker else metric_label,
+                        'data': (values, labels, columns),
+                        'color': color,
+                        'filled': filled,
+                    })
+            models.append(self._p2_chart_model_from_entries(
+                title,
                 period,
-                [
-                    spec('Operating CF', operating_cf, self.theme_series_color(2), offset=-0.22, width=0.42),
-                    spec('Free CF', free_cf, self.theme_series_color(3), offset=0.22, width=0.42),
-                ],
-            ),
-            self._p2_chart_model(
-                'Shares Outstanding',
-                period,
-                [spec('Shares Outstanding', shares, self.theme_series_color(4))],
-            ),
-            self._p2_chart_model(
-                'Cash and Bonds & Total Debt',
-                period,
-                [
-                    spec('Cash and Bonds', cash_series, self.theme_color('accent_positive'), offset=-0.25, width=0.42),
-                    spec('Total Debt', debt_series, self.theme_color('accent_negative'), offset=0.25, width=0.42),
-                ],
-            ),
-            self._p2_chart_model(
-                'Operating Expenses',
-                period,
-                [
-                    spec('SG&A', sga_series, self.theme_series_color(0), offset=-0.25, width=0.42),
-                    spec('R&D', rd_series, self.theme_series_color(1), offset=0.25, width=0.42),
-                ],
-            ),
-        ]
+                entries,
+                period_count=period_count,
+                indexed=indexed,
+                growth_basis=growth_basis,
+            ))
+        return models
 
     def _render_simple_charts(self, data: Any, period: Any) -> Any:
         """Render the fixed Default Fundamentals configuration."""
         models = self._p2_default_chart_models(data, period)
         self.p2_chart_models = models
+        self._p2_rendered_compare_ticker = (
+            str(getattr(self, 'p2_compare_ticker', '') or '').upper().strip()
+            if self._p2_compare_active()
+            else ''
+        )
         for index, model in enumerate(models):
             self._p2_render_chart_model(
                 self.p2_simple_charts[index],
@@ -1041,3 +1187,4 @@ class SimpleChartsMixin:
             )
         for button in getattr(self, 'p2_expand_buttons', []):
             button.setEnabled(True)
+        self._p2_sync_periods_availability()

@@ -23,7 +23,7 @@ from budget_terminal_app.persistence import DEFAULT_NAVIGATION_PAGE_ORDER, norma
 
 EXPECTED_DEFAULT_NAVIGATION_ORDER = [
     0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8,
-    22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 17,
+    22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 41, 17,
 ]
 
 
@@ -37,11 +37,21 @@ def test_default_navigation_order_and_normalization() -> None:
     assert 37 in DEFAULT_NAVIGATION_PAGE_ORDER
     assert 38 not in DEFAULT_NAVIGATION_PAGE_ORDER
     assert DEFAULT_NAVIGATION_PAGE_ORDER.index(39) == DEFAULT_NAVIGATION_PAGE_ORDER.index(19) + 1
-    assert DEFAULT_NAVIGATION_PAGE_ORDER[-2] == 40
+    assert DEFAULT_NAVIGATION_PAGE_ORDER[-2] == 41
 
-    # A saved order predating Quant must gain it just before Settings, not appended after it.
+    # A saved order predating Quant must gain it just before Economic, not appended after
+    # Settings. The tail is a chain (Dictionary, Quant, Economic, Settings), so dropping any
+    # subset of it has to restore the same order.
     legacy_order = [index for index in EXPECTED_DEFAULT_NAVIGATION_ORDER if index != 40]
     migrated = normalize_navigation_settings({"page_order": legacy_order, "hidden_pages": []})
+    assert migrated["page_order"] == EXPECTED_DEFAULT_NAVIGATION_ORDER
+
+    pre_economic_order = [index for index in EXPECTED_DEFAULT_NAVIGATION_ORDER if index != 41]
+    migrated = normalize_navigation_settings({"page_order": pre_economic_order, "hidden_pages": []})
+    assert migrated["page_order"] == EXPECTED_DEFAULT_NAVIGATION_ORDER
+
+    pre_tail_order = [index for index in EXPECTED_DEFAULT_NAVIGATION_ORDER if index not in {37, 40, 41}]
+    migrated = normalize_navigation_settings({"page_order": pre_tail_order, "hidden_pages": []})
     assert migrated["page_order"] == EXPECTED_DEFAULT_NAVIGATION_ORDER
 
     partial_order = [0, 25, 1, 5, 26, 27]
@@ -306,6 +316,9 @@ def test_news_page_is_lazy_hydrated_and_refreshable() -> None:
         )
         assert item is not None
         window._activate_tab_picker_item(item)
+        # First pass builds the lazy page, second runs the batched card render
+        # that its hydrate hook queues.
+        app.processEvents()
         app.processEvents()
 
         assert window.stacked_widget.currentIndex() == 33

@@ -65,6 +65,9 @@ class _MainPageWidget(QWidget):
 class WindowSetupMixin:
     _LAZY_WARMUP_INITIAL_DELAY_MS = 350
     _LAZY_WARMUP_STEP_MS = 150
+    # Warmup builds run on the GUI thread, so they must stand aside while the
+    # user is navigating; a click landing mid-build waits for that whole build.
+    _LAZY_WARMUP_QUIET_MS = 400
     _INTERACTION_LOG_BOUND_PROPERTY = 'bt_interaction_log_bound'
     _PAGE_LABELS = {
         0: 'Dashboard',
@@ -98,6 +101,7 @@ class WindowSetupMixin:
         37: 'Dictionary',
         39: 'Signals',
         40: 'Quant',
+        41: 'Economic',
     }
 
     @staticmethod
@@ -222,6 +226,8 @@ class WindowSetupMixin:
         self.btn_page21.setCheckable(True)
         self.btn_page41 = QPushButton('Quant')
         self.btn_page41.setCheckable(True)
+        self.btn_page42 = QPushButton('Economic')
+        self.btn_page42.setCheckable(True)
         self._nav_buttons = [
             self.btn_page1,
             self.btn_page26,
@@ -253,6 +259,7 @@ class WindowSetupMixin:
             self.btn_page16,
             self.btn_page38,
             self.btn_page41,
+            self.btn_page42,
             self.btn_page9,
         ]
         self._top_refresh_default_text = 'Reload (F5)'
@@ -992,6 +999,7 @@ class WindowSetupMixin:
             {'index': 38, 'page_attr': '_retired_page38', 'placeholder_only': True},
             {'index': 39, 'page_attr': 'page40', 'init_method': 'init_page40', 'theme_hook': '_apply_signal_scanner2_theme'},
             {'index': 40, 'page_attr': 'page41', 'init_method': 'init_page41', 'theme_hook': '_apply_quant_theme'},
+            {'index': 41, 'page_attr': 'page42', 'init_method': 'init_page42', 'theme_hook': '_apply_economic_theme'},
         )
 
     def _startup_page_labels(self) -> tuple[tuple[int, str], ...]:
@@ -1004,6 +1012,16 @@ class WindowSetupMixin:
         )
         return tuple(labels)
 
+    def _decorate_lazy_placeholder(self, placeholder: Any, index: Any) -> None:
+        """Give a lazy placeholder a visible loading state for deferred navigation."""
+        layout = QVBoxLayout(placeholder)
+        label = QLabel(f'Loading {self._page_label(index)}...')
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(label, 'status_muted')
+        layout.addStretch(1)
+        layout.addWidget(label)
+        layout.addStretch(1)
+
     def _register_lazy_pages(self) -> None:
         """Insert placeholders for secondary pages so they can be built on demand."""
         self._startup_progress_begin('lazy_registry', 'Page registry')
@@ -1014,6 +1032,7 @@ class WindowSetupMixin:
             self.stacked_widget.addWidget(placeholder)
             if spec.get('placeholder_only'):
                 continue
+            self._decorate_lazy_placeholder(placeholder, spec['index'])
             self._lazy_page_registry[int(spec['index'])] = {
                 **spec,
                 'widget': placeholder,
@@ -1151,8 +1170,12 @@ class WindowSetupMixin:
         finally:
             entry['building'] = False
             show_after_build = bool(entry.pop('show_after_build', False))
+            if getattr(self, '_pending_page_switch_index', None) == page_index:
+                self._pending_page_switch_index = None
             if succeeded and show_after_build:
-                QTimer.singleShot(0, lambda page=page_index: self.switch_page(page))
+                # Finish the deferred navigation in this call rather than through
+                # another zero-timer so one event-loop pass completes a switch.
+                self.switch_page(page_index)
 
     def _hydrate_lazy_page4(self) -> None:
         """Populate the Portfolio workspace with the current runtime state after lazy init."""

@@ -35,6 +35,8 @@ jobs:
           python scripts/test_backend_analysis_services.py
           python scripts/test_cache_identifiers.py
           python scripts/test_data_service_transport.py
+          python scripts/test_economic_service.py
+          python scripts/test_fundamentals_compare_service.py
           python scripts/test_market_data_foundation.py
           python scripts/test_persistence_safety.py
           python scripts/test_portfolio_margin_settlement.py
@@ -49,6 +51,7 @@ jobs:
           python scripts/test_refresh_hidden_result_deferral.py
           python scripts/test_refresh_route_inventory.py
           python scripts/test_refresh_responsiveness.py
+          python scripts/test_navigation_responsiveness.py
           python scripts/test_bulk_render_responsiveness.py
           python scripts/test_networth_fx_hidden_render.py
           python scripts/test_portfolio_positions_row_stability.py

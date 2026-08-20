@@ -549,6 +549,12 @@ class StartupLoadingScreen(QDialog):
         self._center_on_screen()
 
     def _pump_events(self) -> None:
+        # Only pump while this screen is actually on-screen. The reporter stays
+        # attached to the window for the whole session, so every post-startup
+        # lazy page build would otherwise re-enter the event loop mid-build and
+        # deliver queued navigation clicks against a half-constructed page.
+        if not self.isVisible():
+            return
         app = QApplication.instance()
         if app is not None:
             app.processEvents()

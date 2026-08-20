@@ -915,6 +915,8 @@ class WindowBootstrapMixin:
             self._lazy_warmup_started = False
             self._lazy_warmup_finished = False
             self._lazy_warmup_queue = []
+            self._last_navigation_at = 0.0
+            self._pending_page_switch_index = None
             self._lazy_page_warmup_timer = QTimer(self)
             self._lazy_page_warmup_timer.setSingleShot(True)
             self._lazy_page_warmup_timer.timeout.connect(self._warm_next_page)

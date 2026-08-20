@@ -276,7 +276,6 @@ class SettingsMixin:
         )
         clear_btn = self._settings_action_button('Clear All User Data and Cards', 'danger', self._on_clear_user_data)
         reset_cache_btn = self._settings_action_button('Reset Cache', 'danger', self._on_reset_cache)
-        reset_paper_btn = self._settings_action_button('Reset Virtual Trading', 'danger', self._on_reset_paper_trading)
         action_grid = QGridLayout()
         action_grid.setContentsMargins(0, 0, 0, 0)
         action_grid.setHorizontalSpacing(8)
@@ -285,7 +284,6 @@ class SettingsMixin:
         action_grid.addWidget(import_btn, 1, 0, 1, 2)
         action_grid.addWidget(clear_btn, 2, 0)
         action_grid.addWidget(reset_cache_btn, 2, 1)
-        action_grid.addWidget(reset_paper_btn, 3, 0, 1, 2)
         actions_layout.addLayout(action_grid)
         return actions_box
 
@@ -1690,27 +1688,6 @@ class SettingsMixin:
             'Import Complete',
             f'Virtual Trading imported successfully.\n\nRollback database: {rollback}',
         )
-
-    def _on_reset_paper_trading(self) -> None:
-        """Clear all Virtual Trading accounts after creating a rollback database."""
-        reply = QMessageBox.question(
-            self,
-            'Reset Virtual Trading',
-            'This will remove every Virtual Trading account, order, fill, position, journal entry, and performance snapshot. A rollback database will be created. Continue?',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            self._set_settings_status('Virtual Trading reset cancelled.')
-            return
-        try:
-            rollback = PaperTradingStore().reset()
-        except Exception as exc:
-            self._set_settings_status(f'Virtual Trading reset failed: {exc}', 'negative')
-            QMessageBox.critical(self, 'Reset Failed', f'Unable to reset Virtual Trading.\n\n{exc}')
-            return
-        self._set_settings_status('Virtual Trading reset complete.', 'positive')
-        QMessageBox.information(self, 'Reset Complete', f'Virtual Trading was reset.\n\nRollback database: {rollback}')
 
     def _on_import_user_data(self) -> None:
         """Import user data from a single JSON backup file."""

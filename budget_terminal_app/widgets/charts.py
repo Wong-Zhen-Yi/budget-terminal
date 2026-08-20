@@ -93,8 +93,15 @@ class DateAxisItem(pg.AxisItem):
 
 class FmtAxisItem(pg.AxisItem):
 
+    # Set per instance (never on the class) to render plain integers instead of magnitude-suffixed
+    # numbers. Only the Fundamentals overview uses it, for its rebased-to-100 mode; this axis is
+    # shared app-wide, so a class-level assignment would reformat every other page.
+    p2_index_mode = False
+
     def tickStrings(self, values: Any, scale: Any, spacing: Any) -> Any:
         """Handle tickStrings."""
+        if getattr(self, 'p2_index_mode', False):
+            return [f'{float(v):.0f}' for v in values]
         return [fmt_num(v) for v in values]
 
 

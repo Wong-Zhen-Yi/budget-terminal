@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from typing import Any
 from ..compat import *
 from ..widgets.batched_render import cancel_all_batched
@@ -36,10 +37,11 @@ REFRESH_ROUTE_ARCHITECTURE = {
     37: 'local-only',
     39: 'background-single-flight',
     40: 'background-active-subtab',
+    41: 'background-active-subtab',
 }
 
 _MIGRATED_REFRESH_ROUTES = {
-    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33, 39, 40,
+    0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 33, 39, 40, 41,
 }
 REFRESH_ROUTE_CLASSIFICATION = {
     page_index: (
@@ -146,6 +148,7 @@ class WindowLifecycleMixin:
         self._register_page(18, self.btn_page18, on_show=self._p18_on_show if hasattr(self, '_p18_on_show') else None)
         self._register_page(20, self.btn_page21, on_show=self._p21_on_show if hasattr(self, '_p21_on_show') else None)
         self._register_page(40, self.btn_page41, on_show=self._p41_on_show if hasattr(self, '_p41_on_show') else None)
+        self._register_page(41, self.btn_page42, on_show=self._p42_on_show if hasattr(self, '_p42_on_show') else None)
         self._register_page(17, self.btn_page9)
         self._apply_navigation_settings_to_shell()
         self._startup_progress_complete('navigation', 'Navigation')
@@ -958,8 +961,34 @@ class WindowLifecycleMixin:
         initial_delay = 0 if mode == 'full_blocking_with_skip' and not getattr(self, '_startup_show_completed', False) else getattr(self, '_LAZY_WARMUP_INITIAL_DELAY_MS', 500)
         timer.start(initial_delay)
 
+    def _note_navigation_activity(self) -> None:
+        """Record a navigation so GUI-thread warmup builds keep out of the way."""
+        self._last_navigation_at = time.perf_counter()
+        timer = getattr(self, '_lazy_page_warmup_timer', None)
+        if timer is not None and timer.isActive():
+            timer.start(int(getattr(self, '_LAZY_WARMUP_QUIET_MS', 400)))
+
+    def _navigation_quiet_remaining_ms(self) -> int:
+        """Return how long warmup must wait for the user to stop navigating."""
+        if getattr(self, '_pending_page_switch_index', None) is not None:
+            return int(getattr(self, '_LAZY_WARMUP_QUIET_MS', 400))
+        last_navigation = float(getattr(self, '_last_navigation_at', 0.0) or 0.0)
+        if last_navigation <= 0.0:
+            return 0
+        quiet_ms = int(getattr(self, '_LAZY_WARMUP_QUIET_MS', 400))
+        elapsed_ms = (time.perf_counter() - last_navigation) * 1000.0
+        return int(max(0.0, quiet_ms - elapsed_ms))
+
     def _warm_next_page(self) -> None:
         """Initialize one pending lazy page and reschedule the next warmup step."""
+        quiet_remaining_ms = self._navigation_quiet_remaining_ms()
+        if quiet_remaining_ms > 0 and getattr(self, '_lazy_warmup_queue', []):
+            # Each warmup step is a synchronous page build; running one now would
+            # stall the click the user is in the middle of making.
+            timer = getattr(self, '_lazy_page_warmup_timer', None)
+            if timer is not None:
+                timer.start(quiet_remaining_ms)
+                return
         while getattr(self, '_lazy_warmup_queue', []):
             page_index = self._lazy_warmup_queue.pop(0)
             if self._page_initialized(index=page_index):
@@ -1071,15 +1100,23 @@ class WindowLifecycleMixin:
         previous_label = self._page_label(previous_index)
         target_label = self._page_label(numeric_index)
         logger.info('Page navigation requested: %s (index %s) -> %s (index %s).', previous_label, previous_index, target_label, numeric_index)
-        if not self._ensure_page_initialized(numeric_index):
-            entry = self._lazy_page_entry(index=numeric_index)
-            if entry is not None and entry.get('building'):
-                entry['show_after_build'] = True
-                logger.info(
-                    'Page navigation deferred until initialization completes: %s (index %s).',
-                    target_label,
-                    numeric_index,
-                )
+        self._note_navigation_activity()
+        entry = self._lazy_page_entry(index=numeric_index)
+        deferred_build = False
+        if entry is not None and not self._page_initialized(index=numeric_index):
+            # Show the placeholder that already occupies this stack index first so
+            # the window paints within one frame, then build on the next event-loop
+            # pass. Without this the whole init_pageN runs before setCurrentIndex.
+            self._clear_pending_page_switch(except_index=numeric_index)
+            entry['show_after_build'] = True
+            self._pending_page_switch_index = numeric_index
+            deferred_build = not bool(entry.get('building'))
+            logger.info(
+                'Page navigation deferred until initialization completes: %s (index %s).',
+                target_label,
+                numeric_index,
+            )
+        elif not self._ensure_page_initialized(numeric_index):
             return
         previous_page = self._pages.get(previous_index, {}) if hasattr(self, '_pages') else {}
         hide_callback = previous_page.get('on_hide') if isinstance(previous_page, dict) else None
@@ -1093,10 +1130,67 @@ class WindowLifecycleMixin:
         QTimer.singleShot(0, self._ensure_current_navigation_button_visible)
         self._page_switch_sequence = int(getattr(self, '_page_switch_sequence', 0) or 0) + 1
         switch_sequence = int(self._page_switch_sequence)
-        QTimer.singleShot(0, lambda idx=numeric_index, seq=switch_sequence: self._run_page_show_callback(idx, seq))
         if preserve_height:
             QTimer.singleShot(0, lambda height=preserve_height: self._restore_window_height_after_page_switch(height))
+        if entry is not None and not self._page_initialized(index=numeric_index):
+            # The page is still a placeholder, so its on_show would run against
+            # widgets that do not exist yet. The build epilogue re-enters
+            # switch_page once it is ready and schedules on_show from there.
+            if deferred_build:
+                QTimer.singleShot(0, lambda idx=numeric_index: self._build_pending_page(idx))
+            logger.info('Page placeholder shown while loading: %s (index %s).', target_label, numeric_index)
+            return
+        QTimer.singleShot(0, lambda idx=numeric_index, seq=switch_sequence: self._run_page_show_callback(idx, seq))
+        self._run_page_ready_actions(numeric_index)
         logger.info('Page shown: %s (index %s).', target_label, numeric_index)
+
+    def _run_after_page_built(self, index: Any, callback: Any) -> None:
+        """Run a callback against a page's widgets, waiting for a deferred build."""
+        if not callable(callback):
+            return
+        if self._page_initialized(index=index):
+            callback()
+            return
+        actions = getattr(self, '_page_ready_actions', None)
+        if not isinstance(actions, dict):
+            actions = {}
+            self._page_ready_actions = actions
+        actions.setdefault(index, []).append(callback)
+
+    def _run_page_ready_actions(self, index: Any) -> None:
+        """Drain callbacks that were waiting for this page to finish building."""
+        actions = getattr(self, '_page_ready_actions', None)
+        if not isinstance(actions, dict):
+            return
+        for callback in actions.pop(index, []):
+            try:
+                callback()
+            except Exception:
+                logger.exception('Deferred page-ready action failed for index %s.', index)
+
+    def _clear_pending_page_switch(self, *, except_index: Any = None) -> None:
+        """Drop any superseded deferred navigation so a later build cannot steal focus.
+
+        A page whose ``show_after_build`` flag survives an abandoned navigation would
+        jump the user back to it whenever warmup eventually builds it.
+        """
+        pending = getattr(self, '_pending_page_switch_index', None)
+        if pending is None or pending == except_index:
+            return
+        stale_entry = self._lazy_page_entry(index=pending)
+        if stale_entry is not None:
+            stale_entry.pop('show_after_build', None)
+        actions = getattr(self, '_page_ready_actions', None)
+        if isinstance(actions, dict):
+            actions.pop(pending, None)
+        self._pending_page_switch_index = None
+
+    def _build_pending_page(self, index: Any) -> None:
+        """Build a deferred navigation target, unless the user has moved on."""
+        if getattr(self, '_pending_page_switch_index', None) != index:
+            logger.info('Deferred page build skipped; navigation moved on from index %s.', index)
+            return
+        self._build_page_now(index, reason='before show')
 
     def _refresh_main_tab_picker_items(self) -> None:
         """Sync the top-bar picker with visible pages and known first-level subtabs."""
@@ -1211,6 +1305,13 @@ class WindowLifecycleMixin:
                 {'tab_widget_attr': 'p41_tabs', 'tab_text': 'Screener', 'aliases': ('Quant Screener', 'Factors')},
                 {'tab_widget_attr': 'p41_tabs', 'tab_text': 'Pairs', 'aliases': ('Stat Arb', 'Cointegration', 'Spread')},
             ),
+            41: (
+                {'tab_widget_attr': 'p42_tabs', 'tab_text': 'Overview', 'aliases': ('Macro', 'Indicators', 'FRED')},
+                {'tab_widget_attr': 'p42_tabs', 'tab_text': 'Inflation', 'aliases': ('CPI', 'PCE', 'Breakeven')},
+                {'tab_widget_attr': 'p42_tabs', 'tab_text': 'Labor', 'aliases': ('Jobs', 'Payrolls', 'Unemployment', 'Claims')},
+                {'tab_widget_attr': 'p42_tabs', 'tab_text': 'Growth', 'aliases': ('GDP', 'Retail Sales', 'Housing')},
+                {'tab_widget_attr': 'p42_tabs', 'tab_text': 'Rates', 'aliases': ('Yield Curve', 'Treasury', 'Fed Funds')},
+            ),
         }
 
     def _make_tab_picker_entry(
@@ -1315,7 +1416,9 @@ class WindowLifecycleMixin:
         logger.info('Tab picker activated: %s -> %s page.', self._safe_log_text(label), self._page_label(page_index))
         self.switch_page(page_index)
         if entry.get('tab_widget_attr') and entry.get('tab_text'):
-            self._select_tab_picker_subpage(entry)
+            # The page may still be a placeholder while its build is deferred,
+            # so the subtab can only be selected once its widgets exist.
+            self._run_after_page_built(page_index, lambda spec=entry: self._select_tab_picker_subpage(spec))
         self._hide_tab_picker()
 
     def _select_tab_picker_subpage(self, entry: dict[str, Any]) -> bool:
@@ -1716,6 +1819,14 @@ class WindowLifecycleMixin:
             if hasattr(self, '_p41_refresh_screen'):
                 self._p41_refresh_screen(force=True)
             return
+        if current_index == 41:
+            active_key = self._p42_active_subtab_key() if hasattr(self, '_p42_active_subtab_key') else 'overview'
+            if active_key == 'rates' and hasattr(self, '_p42_refresh_curve'):
+                self._p42_refresh_curve(force=True)
+                return
+            if hasattr(self, '_p42_refresh_series'):
+                self._p42_refresh_series(force=True)
+            return
 
     def _handle_tab_picker_shortcut(self) -> None:
         """Open or refocus the popup tab picker from the global shortcut."""
@@ -1963,6 +2074,9 @@ class WindowLifecycleMixin:
         quant_stop = getattr(self, '_p41_stop_controller', None)
         if callable(quant_stop):
             quant_stop()
+        economic_stop = getattr(self, '_p42_stop_controller', None)
+        if callable(economic_stop):
+            economic_stop()
         handler = getattr(self, '_session_log_handler', None)
         if handler is not None:
             logger.removeHandler(handler)

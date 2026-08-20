@@ -104,6 +104,13 @@ QPushButton:checked, QPushButton[bt_checked="true"] {{
     color: {theme.text_primary};
     font-weight: 700;
 }}
+/* Listed after :checked so a disabled toggle reads as unavailable rather than active. */
+QPushButton:disabled, QPushButton:checked:disabled {{
+    background: {theme.button_bg};
+    border-color: {theme.panel_border};
+    color: {theme.text_muted};
+    font-weight: 400;
+}}
 QPushButton[bt_variant="accent"] {{
     background: {theme.accent_soft};
     color: {theme.accent};

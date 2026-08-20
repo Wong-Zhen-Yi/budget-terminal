@@ -86,9 +86,36 @@ DEFAULT_QUANT_PAGE_SETTINGS = {
 QUANT_PAGE_TABS = ('screener', 'pairs')
 QUANT_SCREEN_FILTERS = ('all', 'top_quartile', 'momentum', 'oversold', 'overbought', 'low_volatility')
 QUANT_PAIR_FILTERS = ('all', 'stationary', 'stretched', 'fast')
+DEFAULT_ECONOMIC_PAGE_SETTINGS = {
+    'active_tab': 'overview',
+    'lookback_key': '5y',
+    'group_filter': 'all',
+    'search': '',
+    'hide_unavailable': True,
+}
+ECONOMIC_PAGE_TABS = ('overview', 'inflation', 'labor', 'growth', 'rates')
+ECONOMIC_PAGE_LOOKBACKS = ('1y', '3y', '5y', '10y')
+ECONOMIC_PAGE_GROUP_FILTERS = ('all', 'inflation', 'labor', 'growth', 'rates')
 SIGNALS_PAGE_FILTERS = ('all', 'strong', 'long', 'watch', 'blocked', 'too_new', 'error')
 DEFAULT_UP_DOWN_PAGE_SETTINGS = {'active_source': 'portfolio', 'interval_key': '1d', 'custom_symbols': []}
-DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {'last_ticker': ''}
+P2_MIN_PERIODS = 3
+P2_MAX_PERIODS = 16
+P2_DEFAULT_PERIODS = 12
+# What each bar's growth figure is measured against. Year-over-year is the default because it is
+# the basis that survives seasonality on quarterly statements. These mirror the GROWTH_BASIS_*
+# constants in services/fundamentals_compare.py, which owns the math and must stay importable
+# without dragging in this module; test_fundamentals_compare_service.py pins the two together.
+P2_GROWTH_BASIS_PRIOR_PERIOD = 'prior_period'
+P2_GROWTH_BASIS_YEAR_AGO = 'year_ago'
+P2_GROWTH_BASES = (P2_GROWTH_BASIS_PRIOR_PERIOD, P2_GROWTH_BASIS_YEAR_AGO)
+P2_DEFAULT_GROWTH_BASIS = P2_GROWTH_BASIS_YEAR_AGO
+DEFAULT_FUNDAMENTALS_PAGE_SETTINGS = {
+    'last_ticker': '',
+    'compare_ticker': '',
+    'period_count': P2_DEFAULT_PERIODS,
+    'indexed': False,
+    'growth_basis': P2_DEFAULT_GROWTH_BASIS,
+}
 DEFAULT_DASHBOARD_CHART_SETTINGS = {
     'symbol': 'SPY',
     'timeframe_label': '1 Day',
@@ -128,7 +155,7 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
-DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 17]
+DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8, 22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 41, 17]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': []}
 DEFAULT_PRIVACY_SETTINGS = {'obscured_pages': [2]}
@@ -809,6 +836,19 @@ def _normalize_up_down_page_settings(settings: Any) -> dict[str, Any]:
     }
 
 
+def _first_present(order: Any, *candidates: Any) -> Any:
+    """Return the first candidate page index already present in *order*.
+
+    The tail of the navigation bar is a chain of pages that each sit immediately before the
+    next one, so a missing page has to fall through to the following anchor rather than jumping
+    straight to Settings.
+    """
+    for candidate in candidates:
+        if candidate in order:
+            return candidate
+    return candidates[-1]
+
+
 def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
     """Normalize main-window navigation order and hidden page settings."""
     saved = settings if isinstance(settings, dict) else {}
@@ -842,11 +882,14 @@ def normalize_navigation_settings(settings: Any) -> dict[str, Any]:
                 order.insert(order.index(5) + 1, page_index)
             elif page_index == 39 and 19 in order:
                 order.insert(order.index(19) + 1, page_index)
-            elif page_index == 37 and (40 in order or SETTINGS_PAGE_INDEX in order):
-                # Dictionary sits ahead of Quant, which in turn sits immediately before Settings.
-                # Anchoring both to Settings alone would reverse them whenever only one is missing.
-                order.insert(order.index(40 if 40 in order else SETTINGS_PAGE_INDEX), page_index)
-            elif page_index == 40 and SETTINGS_PAGE_INDEX in order:
+            elif page_index == 37 and (40 in order or 41 in order or SETTINGS_PAGE_INDEX in order):
+                # Dictionary, Quant and Economic sit in that order immediately before Settings.
+                # Anchoring them all to Settings alone would reverse them whenever only some are
+                # missing, so each one anchors to the next page along the chain.
+                order.insert(order.index(_first_present(order, 40, 41, SETTINGS_PAGE_INDEX)), page_index)
+            elif page_index == 40 and (41 in order or SETTINGS_PAGE_INDEX in order):
+                order.insert(order.index(_first_present(order, 41, SETTINGS_PAGE_INDEX)), page_index)
+            elif page_index == 41 and SETTINGS_PAGE_INDEX in order:
                 order.insert(order.index(SETTINGS_PAGE_INDEX), page_index)
             else:
                 order.append(page_index)
@@ -945,6 +988,7 @@ def _default_user_data_document() -> Any:
         'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
         'signals_page': DEFAULT_SIGNALS_PAGE_SETTINGS.copy(),
         'quant_page': DEFAULT_QUANT_PAGE_SETTINGS.copy(),
+        'economic_page': DEFAULT_ECONOMIC_PAGE_SETTINGS.copy(),
         'up_down_page': _normalize_up_down_page_settings(DEFAULT_UP_DOWN_PAGE_SETTINGS),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -995,6 +1039,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'global_page': _normalize_global_page_settings(saved.get('global_page', default['global_page'])),
         'signals_page': _normalize_signals_page_settings(saved.get('signals_page', default['signals_page'])),
         'quant_page': _normalize_quant_page_settings(saved.get('quant_page', default['quant_page'])),
+        'economic_page': _normalize_economic_page_settings(saved.get('economic_page', default['economic_page'])),
         'up_down_page': _normalize_up_down_page_settings(saved.get('up_down_page', default['up_down_page'])),
         'dashboard_chart': _normalize_dashboard_chart_settings(dashboard_chart_payload),
         'stocks_page': _normalize_stocks_page_settings(saved.get('stocks_page', default['stocks_page'])),
@@ -1366,6 +1411,7 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'global_page': DEFAULT_GLOBAL_PAGE_SETTINGS.copy(),
         'signals_page': DEFAULT_SIGNALS_PAGE_SETTINGS.copy(),
         'quant_page': DEFAULT_QUANT_PAGE_SETTINGS.copy(),
+        'economic_page': DEFAULT_ECONOMIC_PAGE_SETTINGS.copy(),
         'up_down_page': _normalize_up_down_page_settings(DEFAULT_UP_DOWN_PAGE_SETTINGS),
         'dashboard_chart': DEFAULT_DASHBOARD_CHART_SETTINGS.copy(),
         'stocks_page': DEFAULT_STOCKS_PAGE_SETTINGS.copy(),
@@ -1401,6 +1447,7 @@ def load_app_config() -> Any:
         'global_page': dict(document.get('global_page', DEFAULT_GLOBAL_PAGE_SETTINGS)),
         'signals_page': _normalize_signals_page_settings(document.get('signals_page', DEFAULT_SIGNALS_PAGE_SETTINGS)),
         'quant_page': _normalize_quant_page_settings(document.get('quant_page', DEFAULT_QUANT_PAGE_SETTINGS)),
+        'economic_page': _normalize_economic_page_settings(document.get('economic_page', DEFAULT_ECONOMIC_PAGE_SETTINGS)),
         'up_down_page': _normalize_up_down_page_settings(document.get('up_down_page', DEFAULT_UP_DOWN_PAGE_SETTINGS)),
         'dashboard_chart': dict(document.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)),
         'stocks_page': dict(document.get('stocks_page', DEFAULT_STOCKS_PAGE_SETTINGS)),
@@ -1457,6 +1504,8 @@ def save_app_config(data: Any) -> None:
         current['signals_page'] = _normalize_signals_page_settings(saved.get('signals_page'))
     if 'quant_page' in saved:
         current['quant_page'] = _normalize_quant_page_settings(saved.get('quant_page'))
+    if 'economic_page' in saved:
+        current['economic_page'] = _normalize_economic_page_settings(saved.get('economic_page'))
     if 'up_down_page' in saved:
         current['up_down_page'] = _normalize_up_down_page_settings(saved.get('up_down_page'))
     if 'dashboard_chart' in saved:
@@ -1997,7 +2046,28 @@ def _normalize_fundamentals_page_settings(settings: Any) -> dict[str, Any]:
     """Normalize persisted state for the Fundamentals page."""
     saved = settings if isinstance(settings, dict) else {}
     last_ticker = str(saved.get('last_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['last_ticker']) or '').upper().strip()
-    return {'last_ticker': last_ticker}
+    compare_ticker = str(
+        saved.get('compare_ticker', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['compare_ticker']) or ''
+    ).upper().strip()[:12]
+    try:
+        period_count = int(saved.get('period_count', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['period_count']))
+    except (TypeError, ValueError):
+        period_count = int(DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['period_count'])
+    period_count = max(P2_MIN_PERIODS, min(P2_MAX_PERIODS, period_count))
+    indexed_value = saved.get('indexed', DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['indexed'])
+    indexed = bool(indexed_value) if isinstance(indexed_value, bool | int) else bool(
+        DEFAULT_FUNDAMENTALS_PAGE_SETTINGS['indexed']
+    )
+    growth_basis = str(saved.get('growth_basis', P2_DEFAULT_GROWTH_BASIS) or '').lower().strip()
+    if growth_basis not in P2_GROWTH_BASES:
+        growth_basis = P2_DEFAULT_GROWTH_BASIS
+    return {
+        'last_ticker': last_ticker,
+        'compare_ticker': compare_ticker,
+        'period_count': period_count,
+        'indexed': indexed,
+        'growth_basis': growth_basis,
+    }
 
 
 def _normalize_stocks_page_settings(settings: Any) -> Any:
@@ -2431,6 +2501,44 @@ def save_signals_page_settings(settings: Any) -> Any:
     current = load_app_config()
     state = _normalize_signals_page_settings(settings)
     current['signals_page'] = state
+    save_app_config(current)
+    return state
+
+
+def _normalize_economic_page_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted state for the Economic page."""
+    saved = settings if isinstance(settings, dict) else {}
+    active_tab = str(saved.get('active_tab', DEFAULT_ECONOMIC_PAGE_SETTINGS['active_tab']) or '').lower().strip()
+    if active_tab not in ECONOMIC_PAGE_TABS:
+        active_tab = DEFAULT_ECONOMIC_PAGE_SETTINGS['active_tab']
+    lookback_key = str(saved.get('lookback_key', DEFAULT_ECONOMIC_PAGE_SETTINGS['lookback_key']) or '').lower().strip()
+    if lookback_key not in ECONOMIC_PAGE_LOOKBACKS:
+        lookback_key = DEFAULT_ECONOMIC_PAGE_SETTINGS['lookback_key']
+    group_filter = str(saved.get('group_filter', DEFAULT_ECONOMIC_PAGE_SETTINGS['group_filter']) or '').lower().strip()
+    if group_filter not in ECONOMIC_PAGE_GROUP_FILTERS:
+        group_filter = DEFAULT_ECONOMIC_PAGE_SETTINGS['group_filter']
+    search = str(saved.get('search', DEFAULT_ECONOMIC_PAGE_SETTINGS['search']) or '').strip()[:32]
+    hide_unavailable = saved.get('hide_unavailable', DEFAULT_ECONOMIC_PAGE_SETTINGS['hide_unavailable'])
+    return {
+        'active_tab': active_tab,
+        'lookback_key': lookback_key,
+        'group_filter': group_filter,
+        'search': search,
+        'hide_unavailable': bool(hide_unavailable),
+    }
+
+
+def load_economic_page_settings() -> Any:
+    """Load persisted state for the Economic page."""
+    config = load_app_config()
+    return _normalize_economic_page_settings(config.get('economic_page', {}))
+
+
+def save_economic_page_settings(settings: Any) -> Any:
+    """Persist state for the Economic page."""
+    current = load_app_config()
+    state = _normalize_economic_page_settings(settings)
+    current['economic_page'] = state
     save_app_config(current)
     return state
 

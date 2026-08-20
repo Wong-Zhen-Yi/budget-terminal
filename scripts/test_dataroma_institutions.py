@@ -132,6 +132,9 @@ def assert_export_buttons_exist() -> None:
             page['on_show'] = None
             page['on_hide'] = None
         window.switch_page(23)
+        # Lazy pages build on the event loop pass after navigation so the switch
+        # itself never blocks the GUI thread.
+        app.processEvents()
         assert hasattr(window, 'p24_export_activity_btn'), 'Expected Export Buys/Sells button.'
         assert hasattr(window, 'p24_export_managers_btn'), 'Expected Export Superinvestors button.'
         assert window.p24_export_activity_btn.text() == 'Export Buys/Sells'

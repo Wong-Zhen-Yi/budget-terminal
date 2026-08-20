@@ -1141,30 +1141,44 @@ class StocksPageMixin:
         page_index = self._stocks_page_index('page10', 9)
         page_ready = self._page_initialized(index=page_index)
         self.switch_page(page_index)
-        if hasattr(self, 'p10_symbol_input'):
-            self.p10_symbol_input.setText(symbol)
-        if page_ready and hasattr(self, '_p10_load_from_input'):
-            self._p10_load_from_input()
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, 'p10_symbol_input'):
+                self.p10_symbol_input.setText(symbol)
+            if page_ready and hasattr(self, '_p10_load_from_input'):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(page_index, _apply_chart_symbol)
 
     def _stocks_go_to_fundamentals(self) -> None:
         symbol = self._stocks_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._stocks_page_index('page2', 8))
-        if hasattr(self, 'p2_ticker_input'):
-            self.p2_ticker_input.setText(symbol)
-        if hasattr(self, 'analyze_stock_p2'):
-            self.analyze_stock_p2()
+        page_index = self._stocks_page_index('page2', 8)
+        self.switch_page(page_index)
+
+        def _apply_fundamentals_symbol() -> None:
+            if hasattr(self, 'p2_ticker_input'):
+                self.p2_ticker_input.setText(symbol)
+            if hasattr(self, 'analyze_stock_p2'):
+                self.analyze_stock_p2()
+
+        self._run_after_page_built(page_index, _apply_fundamentals_symbol)
 
     def _stocks_go_to_options(self) -> None:
         symbol = self._stocks_current_symbol()
         if not symbol:
             return
-        self.switch_page(self._stocks_page_index('page5', 11))
-        if hasattr(self, 'p5_shared_ticker_input'):
-            self.p5_shared_ticker_input.setText(symbol)
-        if hasattr(self, '_p5_load_expiries'):
-            self._p5_load_expiries()
+        page_index = self._stocks_page_index('page5', 11)
+        self.switch_page(page_index)
+
+        def _apply_options_symbol() -> None:
+            if hasattr(self, 'p5_shared_ticker_input'):
+                self.p5_shared_ticker_input.setText(symbol)
+            if hasattr(self, '_p5_load_expiries'):
+                self._p5_load_expiries()
+
+        self._run_after_page_built(page_index, _apply_options_symbol)
 
     def _stocks_go_to_valuation(self) -> None:
         symbol = self._stocks_current_symbol()
@@ -1179,10 +1193,14 @@ class StocksPageMixin:
         if hasattr(self, 'valuation_ticker_input'):
             self.valuation_ticker_input.setText(symbol)
         self.switch_page(page_index)
-        if hasattr(self, 'valuation_ticker_input'):
-            self.valuation_ticker_input.setText(symbol)
-        if hasattr(self, 'load_valuation_data'):
-            self.load_valuation_data(update_collection_info=True)
+
+        def _apply_valuation_symbol() -> None:
+            if hasattr(self, 'valuation_ticker_input'):
+                self.valuation_ticker_input.setText(symbol)
+            if hasattr(self, 'load_valuation_data'):
+                self.load_valuation_data(update_collection_info=True)
+
+        self._run_after_page_built(page_index, _apply_valuation_symbol)
 
     def _stocks_export_escape(self, value: Any) -> str:
         text = str(value or '').replace('\r', ' ').replace('\n', ' ').strip()

@@ -65,8 +65,9 @@ class _FundamentalsProbe(_VisibilityProbe, FundamentalsSetupMixin):
     def __init__(self) -> None:
         super().__init__()
         self.page2 = object()
-        self._p2_active_request_id = 1
-        self._p2_request_contexts = {1: {"update_collection_info": True}}
+        self._p2_active_request_ids = {"primary": 1, "compare": 0}
+        self._p2_request_contexts = {1: {"slot": "primary", "update_collection_info": True}}
+        self._p2_pending_results = {}
         self.p2_analyze_btn = _Button()
 
     def update_page2(self, *_args, **_kwargs) -> None:

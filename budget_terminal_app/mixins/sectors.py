@@ -868,7 +868,11 @@ class SectorsMixin:
         target_index = page_index if page_index >= 0 else 9
         page_ready = self._page_initialized(index=target_index)
         self.switch_page(target_index)
-        if hasattr(self, 'p10_symbol_input'):
-            self.p10_symbol_input.setText(symbol)
-        if page_ready and hasattr(self, '_p10_load_from_input'):
-            self._p10_load_from_input()
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, 'p10_symbol_input'):
+                self.p10_symbol_input.setText(symbol)
+            if page_ready and hasattr(self, '_p10_load_from_input'):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(target_index, _apply_chart_symbol)

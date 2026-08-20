@@ -343,10 +343,14 @@ class SpyHeatmapMixin:
         page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, "stacked_widget") and hasattr(self, "page10") else 9
         target_index = page_index if page_index >= 0 else 9
         self.switch_page(target_index)
-        if hasattr(self, "p10_symbol_input"):
-            self.p10_symbol_input.setText(ticker)
-        if hasattr(self, "_p10_load_from_input"):
-            self._p10_load_from_input()
+
+        def _apply_chart_symbol() -> None:
+            if hasattr(self, "p10_symbol_input"):
+                self.p10_symbol_input.setText(ticker)
+            if hasattr(self, "_p10_load_from_input"):
+                self._p10_load_from_input()
+
+        self._run_after_page_built(target_index, _apply_chart_symbol)
 
     def _p17_handle_error(self, error: str, requested_symbol: Any = None) -> None:
         """Show a failed heatmap refresh state."""
