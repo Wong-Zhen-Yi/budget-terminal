@@ -1012,15 +1012,85 @@ class WindowSetupMixin:
         )
         return tuple(labels)
 
+    @staticmethod
+    def _reset_placeholder_layout(placeholder: Any) -> Any:
+        """Return the placeholder's layout, emptied.
+
+        Qt ignores a second ``setLayout`` on the same widget, so the failure and retry states
+        have to reuse whatever layout the loading state already installed rather than build
+        their own.
+        """
+        layout = placeholder.layout()
+        if layout is None:
+            return QVBoxLayout(placeholder)
+        WindowSetupMixin._clear_layout(layout)
+        return layout
+
+    @staticmethod
+    def _clear_layout(layout: Any) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            child_layout = item.layout()
+            if child_layout is not None:
+                WindowSetupMixin._clear_layout(child_layout)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
     def _decorate_lazy_placeholder(self, placeholder: Any, index: Any) -> None:
         """Give a lazy placeholder a visible loading state for deferred navigation."""
-        layout = QVBoxLayout(placeholder)
+        layout = self._reset_placeholder_layout(placeholder)
         label = QLabel(f'Loading {self._page_label(index)}...')
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.set_theme_role(label, 'status_muted')
         layout.addStretch(1)
         layout.addWidget(label)
         layout.addStretch(1)
+
+    def _mark_lazy_placeholder_failed(self, placeholder: Any, index: Any, error: Any) -> None:
+        """Turn a loading placeholder into a visible failure the user can retry.
+
+        Without this, a page whose initializer raised keeps its "Loading ..." label forever: the
+        rollback in ``_build_page_now`` puts the placeholder back and nothing ever rewrites it,
+        so a crash during construction is indistinguishable from a slow fetch.
+        """
+        layout = self._reset_placeholder_layout(placeholder)
+        label = QLabel(f'{self._page_label(index)} failed to load.')
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_theme_role(label, 'status_negative')
+        detail = QLabel(str(error).strip() or error.__class__.__name__)
+        detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        detail.setWordWrap(True)
+        self.set_theme_role(detail, 'status_muted')
+        retry_btn = QPushButton('Retry')
+        retry_btn.setMaximumWidth(160)
+        self.set_theme_variant(retry_btn, 'accent')
+        retry_btn.clicked.connect(lambda _checked=False, idx=index: self._retry_lazy_page(idx))
+        retry_row = QHBoxLayout()
+        retry_row.addStretch(1)
+        retry_row.addWidget(retry_btn)
+        retry_row.addStretch(1)
+        layout.addStretch(1)
+        layout.addWidget(label)
+        layout.addWidget(detail)
+        layout.addLayout(retry_row)
+        layout.addStretch(1)
+
+    def _retry_lazy_page(self, index: Any) -> None:
+        """Rebuild a page whose initializer failed, from the failure placeholder's Retry button."""
+        entry = self._lazy_page_entry(index=index)
+        if entry is None or entry.get('building') or entry.get('initialized'):
+            return
+        placeholder = entry.get('widget')
+        if placeholder is not None:
+            self._decorate_lazy_placeholder(placeholder, index)
+        try:
+            self._build_page_now(index, reason='retry')
+        except Exception:
+            # `_build_page_now` has already redrawn the failure state, and re-raising from a
+            # button slot would only reach Qt's uncaught handler again.
+            logger.exception('Retry of lazy page %s (index %s) failed.', self._page_label(index), index)
 
     def _register_lazy_pages(self) -> None:
         """Insert placeholders for secondary pages so they can be built on demand."""
@@ -1149,7 +1219,7 @@ class WindowSetupMixin:
             self._startup_progress_finish_if_complete()
             succeeded = True
             return page
-        except Exception:
+        except Exception as exc:
             rollback_hook = getattr(self, str(entry.get('rollback_hook', '') or ''), None)
             if callable(rollback_hook):
                 try:
@@ -1159,6 +1229,11 @@ class WindowSetupMixin:
             entry['widget'] = placeholder
             entry['initialized'] = False
             setattr(self, page_attr, placeholder)
+            if placeholder is not None:
+                try:
+                    self._mark_lazy_placeholder_failed(placeholder, page_index, exc)
+                except Exception:
+                    logger.exception('Could not mark placeholder failed: %s (index %s).', page_label, page_index)
             if page is not None and self.stacked_widget.indexOf(page) >= 0:
                 self.stacked_widget.removeWidget(page)
             if page is not None:

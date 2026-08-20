@@ -258,7 +258,21 @@ def _test_monthly_event_pipeline() -> None:
         calendar_module._get_economic_events_for_year = original_year_fetch
 
 
+def _test_user_agent_is_not_browser_spoofed() -> None:
+    """A browser user-agent here costs the two providers this worker depends on.
+
+    bls.gov answers a spoofed Chrome string with 403, and fred.stlouisfed.org (behind Akamai)
+    tarpits it to roughly 18s against a 20s timeout, because a request claiming to be Chrome
+    without Chrome's TLS fingerprint reads as a bot. An honest token gets 200 from both.
+    """
+    agent = calendar_module._HTTP_HEADERS['User-Agent']
+    for token in ('Mozilla', 'Chrome', 'AppleWebKit', 'Safari'):
+        _assert(token not in agent, f'calendar user-agent must not spoof a browser: {agent!r}')
+    _assert(agent.startswith('BudgetTerminal/'), f'calendar user-agent must identify the app: {agent!r}')
+
+
 def main() -> None:
+    _test_user_agent_is_not_browser_spoofed()
     _test_source_parsers()
     _test_cache_version_and_stale_category_merge()
     _test_bls_fred_fallback_routing()

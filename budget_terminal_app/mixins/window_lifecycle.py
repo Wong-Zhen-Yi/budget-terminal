@@ -1812,6 +1812,8 @@ class WindowLifecycleMixin:
                 self._p25_run_backtest()
             return
         if current_index == 40:
+            if not self._page_initialized(index=40):
+                return
             active_key = self._p41_active_subtab_key() if hasattr(self, '_p41_active_subtab_key') else 'screener'
             if active_key == 'pairs' and hasattr(self, '_p41_refresh_pairs'):
                 self._p41_refresh_pairs(force=True)
@@ -1820,6 +1822,8 @@ class WindowLifecycleMixin:
                 self._p41_refresh_screen(force=True)
             return
         if current_index == 41:
+            if not self._page_initialized(index=41):
+                return
             active_key = self._p42_active_subtab_key() if hasattr(self, '_p42_active_subtab_key') else 'overview'
             if active_key == 'rates' and hasattr(self, '_p42_refresh_curve'):
                 self._p42_refresh_curve(force=True)

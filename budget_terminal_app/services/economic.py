@@ -63,13 +63,13 @@ NYFED_RATE_URL_TEMPLATE = (
 
 UMICH_SENTIMENT_URL = 'https://www.sca.isr.umich.edu/files/tbmics.csv'
 
-#: A plain client occasionally trips a bot filter on these hosts, and the same browser
-#: user-agent the economic-calendar scraper uses keeps every call site consistent.
+#: Identify the client honestly. Do NOT put a browser user-agent here: FRED sits behind Akamai,
+#: which reads a request claiming to be Chrome without Chrome's TLS fingerprint as a bot and
+#: tarpits it until the client times out. A spoofed UA loses every FRED series (20 of the 49 in
+#: the catalog); a plain product token answers in well under a second. Treasury, BLS, NY Fed and
+#: UMich were each checked against both and return identical responses, so none of them needs one.
 REQUEST_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/122.0 Safari/537.36'
-    ),
+    'User-Agent': 'BudgetTerminal/1.0 (personal finance research tool)',
     'Accept': 'text/csv,application/json,text/plain,*/*',
 }
 
@@ -100,6 +100,12 @@ FRED_BLACKOUT_THRESHOLD = PROVIDER_BLACKOUT_THRESHOLD
 ECONOMIC_PAYLOAD_CACHE_NAMESPACE = 'economic_payload'
 ECONOMIC_PAYLOAD_CACHE_TTL_SECONDS = 6 * 60 * 60
 ECONOMIC_STALE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+#: Stamped into every payload and checked on the way back out of the cache. Bump it whenever the
+#: payload shape changes: an entry written by an older shape is then dropped instead of being
+#: rendered, because a cached payload is read during page construction and a bad one there takes
+#: the whole page down before any code that could refresh it gets to run.
+ECONOMIC_PAYLOAD_SCHEMA = 1
 
 #: History retained per series in the cached payload, and how many yearly treasury CSVs the
 #: curve provider pulls. Ten years keeps the charts useful while holding the serialized JSON
@@ -943,13 +949,32 @@ def format_change(value: Any, units: Any, decimals: Any = 1) -> str:
     return f'{"-" if number < 0 else "+"}{body}'
 
 
+def normalize_name_list(value: Any) -> list[str]:
+    """Coerce a payload field that should hold a list of names into one.
+
+    Anything else becomes an empty list rather than raising. ``bool`` needs its own check
+    because it is an ``int`` and so fails the iteration its truthiness suggests, and a bare
+    ``str`` needs one because iterating it would yield characters instead of names.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    try:
+        items = list(value)
+    except TypeError:
+        return []
+    return [str(item).strip() for item in items if item is not None and str(item).strip()]
+
+
 def describe_freshness(payload: Any) -> tuple[str, str]:
     """Return the status-bar line and severity token for a payload."""
     if not isinstance(payload, dict) or not payload.get('rows'):
         return 'No economic data loaded yet. Press Refresh to pull the latest releases.', 'muted'
     rows = [row for row in payload.get('rows') or [] if isinstance(row, dict)]
     loaded = [row for row in rows if row.get('available')]
-    missing = [str(item) for item in payload.get('missing') or []]
+    missing = normalize_name_list(payload.get('missing'))
     parts = [f'{len(loaded)} of {len(rows)} series loaded']
     generated = _parse_iso_date(payload.get('generated_at'))
     if generated is not None:
@@ -960,7 +985,7 @@ def describe_freshness(payload: Any) -> tuple[str, str]:
             parts.append('refreshed yesterday')
         else:
             parts.append(f'refreshed {age_days} days ago')
-    down = [PROVIDER_LABELS.get(name, name) for name in payload.get('unreachable') or []]
+    down = [PROVIDER_LABELS.get(name, name) for name in normalize_name_list(payload.get('unreachable'))]
     if down:
         parts.append(f'unreachable: {", ".join(sorted(set(down)))}')
         return ' · '.join(parts), 'warning'
@@ -984,6 +1009,32 @@ def normalize_groups(groups: Any) -> tuple[str, ...]:
     requested = {str(item).strip() for item in candidates}
     wanted = [name for name in ECONOMIC_GROUPS if name in requested]
     return tuple(wanted) if wanted else tuple(ECONOMIC_GROUPS)
+
+
+def normalize_payload(payload: Any) -> dict[str, Any] | None:
+    """Return a payload safe to render, or ``None`` when the entry cannot be trusted.
+
+    The cache is the one place a payload arrives without having just been built, which makes it
+    the place worth validating: the page paints from the cache during ``init_page42``, so a
+    payload written by an older schema reaches the render path before any code that could
+    refresh it, and taking that render down takes the whole page build down with it.
+    """
+    if not isinstance(payload, dict):
+        return None
+    schema = payload.get('schema')
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema != ECONOMIC_PAYLOAD_SCHEMA:
+        return None
+    rows = payload.get('rows')
+    if not isinstance(rows, list):
+        return None
+    curve = payload.get('yield_curve')
+    document = dict(payload)
+    document['rows'] = [row for row in rows if isinstance(row, dict)]
+    document['groups'] = normalize_name_list(payload.get('groups'))
+    document['missing'] = normalize_name_list(payload.get('missing'))
+    document['unreachable'] = normalize_name_list(payload.get('unreachable'))
+    document['yield_curve'] = curve if isinstance(curve, dict) else {}
+    return document
 
 
 # ----------------------------------------------------------------------- service
@@ -1018,7 +1069,8 @@ class EconomicDataService:
             return None
         payload, metadata = cached
         age_seconds = float((metadata or {}).get('cache_age_seconds', 0.0) or 0.0)
-        if not isinstance(payload, dict) or age_seconds > ECONOMIC_STALE_CACHE_TTL_SECONDS:
+        payload = normalize_payload(payload)
+        if payload is None or age_seconds > ECONOMIC_STALE_CACHE_TTL_SECONDS:
             return None
         return payload, {
             'cache_age_seconds': age_seconds,
@@ -1184,6 +1236,7 @@ class EconomicDataService:
         rows.sort(key=lambda row: order.get(str(row.get('series_id')), 10_000))
         loaded = [row for row in rows if row.get('available')]
         payload = {
+            'schema': ECONOMIC_PAYLOAD_SCHEMA,
             'generated_at': dt.datetime.now().isoformat(timespec='seconds'),
             'source': 'US Treasury, BLS, NY Fed, UMich and FRED',
             'groups': list(wanted),

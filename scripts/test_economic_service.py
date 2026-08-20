@@ -437,6 +437,85 @@ def test_describe_freshness_reports_missing_series() -> None:
     assert status == 'warning' and 'unreachable: FRED' in text
 
 
+def test_a_payload_from_an_older_schema_is_discarded() -> None:
+    """The exact shape that hung the Economic page: a dev-era payload with `unreachable` as a bool.
+
+    It reached the render path through `init_page42`, raised `TypeError: 'bool' object is not
+    iterable`, and left the page on its loading placeholder forever - the crash happened before
+    any code that could have refreshed the cache.
+    """
+    poisoned = {
+        'generated_at': '2026-08-20T14:18:02',
+        'source': 'FRED (Federal Reserve Bank of St. Louis)',
+        'groups': ['Inflation', 'Labor', 'Growth', 'Rates'],
+        'rows': [{'series_id': 'UNRATE', 'available': False, 'provider': economic.PROVIDER_FRED}],
+        'missing': ['UNRATE'],
+        'unreachable': True,
+        'yield_curve': {'tenors': []},
+    }
+    # No schema stamp, so it is dropped at the cache boundary rather than coerced and shown.
+    assert economic.normalize_payload(poisoned) is None
+    assert economic.normalize_payload(dict(poisoned, schema=99)) is None
+    assert economic.normalize_payload(None) is None
+    assert economic.normalize_payload({'schema': economic.ECONOMIC_PAYLOAD_SCHEMA}) is None
+
+    # Even reached directly, neither reader may raise on the bad field.
+    assert 'unreachable' not in economic.describe_freshness(poisoned)[1]
+    assert isinstance(presenters.missing_summary(poisoned), str)
+
+    # A current payload survives, with the bad-shape fields coerced rather than trusted.
+    salvaged = economic.normalize_payload(dict(poisoned, schema=economic.ECONOMIC_PAYLOAD_SCHEMA))
+    assert salvaged is not None
+    assert salvaged['unreachable'] == [] and salvaged['missing'] == ['UNRATE']
+    assert salvaged['rows'] == poisoned['rows']
+
+    with tempfile.TemporaryDirectory(prefix='budget-terminal-economic-schema-') as tmp:
+        cache = CacheManager(db_path=str(Path(tmp) / 'cache.db'))
+        service = economic.EconomicDataService(cache)
+        cache.save_json_payload(
+            economic.ECONOMIC_PAYLOAD_CACHE_NAMESPACE,
+            economic.EconomicDataService._payload_cache_key(None),
+            poisoned,
+        )
+        # The page must paint from nothing rather than from an entry it cannot render.
+        assert service.load_latest_payload() is None
+
+        # And the next fetch overwrites it, so the page heals itself with no manual cleanup.
+        service.fetch(groups=['Labor'], force=True, fetcher=lambda sid: [('2024-08-01', 4.2)])
+        healed = service.load_latest_payload(['Labor'])
+        assert healed is not None
+        assert healed['schema'] == economic.ECONOMIC_PAYLOAD_SCHEMA
+        assert healed['unreachable'] == []
+
+
+def test_normalize_name_list_rejects_non_lists() -> None:
+    assert economic.normalize_name_list(True) == []
+    assert economic.normalize_name_list(False) == []
+    assert economic.normalize_name_list(None) == []
+    assert economic.normalize_name_list(3) == []
+    assert economic.normalize_name_list('FRED') == ['FRED']
+    assert economic.normalize_name_list('') == []
+    assert economic.normalize_name_list(['FRED', ' BLS ', '', None]) == ['FRED', 'BLS']
+    assert economic.normalize_name_list(('FRED',)) == ['FRED']
+
+
+def test_user_agent_is_not_browser_spoofed() -> None:
+    """A browser user-agent here loses every FRED series - 20 of the 49 in the catalog.
+
+    FRED sits behind Akamai, which reads a request claiming to be Chrome without Chrome's TLS
+    fingerprint as a bot and tarpits it until the client times out. The fetch then trips its own
+    blackout breaker and reports `unreachable: FRED`, which looks like a network block rather
+    than a header the app chose. A plain product token answers in under a second, and Treasury,
+    BLS, NY Fed and UMich all return identical responses under it.
+    """
+    agent = economic.REQUEST_HEADERS['User-Agent']
+    for token in ('Mozilla', 'Chrome', 'AppleWebKit', 'Safari'):
+        assert token not in agent, f'economic user-agent must not spoof a browser: {agent!r}'
+    assert agent.startswith('BudgetTerminal/'), f'economic user-agent must identify the app: {agent!r}'
+    # The BLS POST builds its headers from the same dict, so it inherits the fix.
+    assert economic.FRED_REQUEST_HEADERS is economic.REQUEST_HEADERS
+
+
 if __name__ == '__main__':
     test_parse_fred_csv_drops_missing_sentinels()
     test_parse_treasury_csv_by_column_name()
@@ -455,4 +534,7 @@ if __name__ == '__main__':
     test_presenters_build_rows_without_qt()
     test_history_series_respects_the_lookback()
     test_describe_freshness_reports_missing_series()
+    test_a_payload_from_an_older_schema_is_discarded()
+    test_normalize_name_list_rejects_non_lists()
+    test_user_agent_is_not_browser_spoofed()
     print('Economic service tests passed.')

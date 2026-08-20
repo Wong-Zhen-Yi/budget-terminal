@@ -20,6 +20,7 @@ for path in (ROOT, SCRIPTS):
         sys.path.insert(0, str(path))
 
 from PyQt6.QtCore import QEventLoop, QTimer
+from PyQt6.QtWidgets import QLabel, QPushButton
 
 from test_tab_picker_search import _build_window
 
@@ -28,12 +29,26 @@ from test_tab_picker_search import _build_window
 # constructs the Multi Charts page too, so its first build costs hundreds of
 # milliseconds. That is exactly the cost that must not block navigation.
 CHARTS_INDEX = 9
+# Economic (stacked index 41 / page42) is the page whose initializer actually crashed on a
+# cached payload from an older schema, so it stands in for "any builder can raise".
+ECONOMIC_INDEX = 41
 SWITCH_BUDGET_SECONDS = 0.35 if os.environ.get("CI") else 0.15
 
 
 def _drain(app, passes: int = 8) -> None:
     for _ in range(passes):
         app.processEvents()
+
+
+def _placeholder_text(widget) -> str:
+    return " ".join(child.text() for child in widget.findChildren(QLabel))
+
+
+def _retry_button(widget):
+    for button in widget.findChildren(QPushButton):
+        if button.text() == "Retry":
+            return button
+    return None
 
 
 def test_first_visit_to_heavy_page_paints_before_building() -> None:
@@ -167,9 +182,61 @@ def test_navigating_to_a_built_page_is_not_stalled_by_queued_warmup() -> None:
         app.processEvents()
 
 
+def test_a_failed_page_build_is_visible_and_retryable() -> None:
+    """A builder that raises must not leave the page on its loading label forever.
+
+    Before this, the rollback in `_build_page_now` restored the placeholder untouched, so a
+    crash during construction looked exactly like a slow fetch — and recurred on every launch,
+    because nothing on that screen could trigger another attempt.
+    """
+    app, window = _build_window()
+    try:
+        entry = window._lazy_page_entry(index=ECONOMIC_INDEX)
+        placeholder = entry["widget"]
+        assert not window._page_initialized(index=ECONOMIC_INDEX)
+        assert "Loading" in _placeholder_text(placeholder)
+
+        def exploding_init() -> None:
+            raise RuntimeError("boom during init")
+
+        window.init_page42 = exploding_init
+        try:
+            window._build_page_now(ECONOMIC_INDEX, reason="test")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("_build_page_now swallowed the initializer failure")
+
+        # The placeholder is back in the stack, and now names the failure instead of pretending
+        # to still be loading.
+        assert not window._page_initialized(index=ECONOMIC_INDEX)
+        assert window._lazy_page_entry(index=ECONOMIC_INDEX)["widget"] is placeholder
+        text = _placeholder_text(placeholder)
+        assert "failed to load" in text, text
+        assert "boom during init" in text, text
+        assert "Loading" not in text, text
+
+        # Reload on a page that never built must not reach the widgets the failed attempt
+        # destroyed. setCurrentIndex rather than switch_page, so no rebuild is scheduled.
+        window.stacked_widget.setCurrentIndex(ECONOMIC_INDEX)
+        window._refresh_current_page()
+
+        # Retry rebuilds the page once the fault is gone.
+        retry = _retry_button(placeholder)
+        assert retry is not None, "the failure state offered no way to try again"
+        del window.init_page42
+        retry.click()
+        _drain(app)
+        assert window._page_initialized(index=ECONOMIC_INDEX)
+    finally:
+        window.close()
+        app.processEvents()
+
+
 if __name__ == "__main__":
     test_first_visit_to_heavy_page_paints_before_building()
     test_rapid_switching_builds_only_the_final_page()
     test_warmup_stands_aside_while_navigating()
     test_navigating_to_a_built_page_is_not_stalled_by_queued_warmup()
+    test_a_failed_page_build_is_visible_and_retryable()
     print("Navigation responsiveness smoke tests passed.")

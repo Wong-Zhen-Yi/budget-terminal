@@ -7,7 +7,7 @@ calling these again with the new palette. Mirrors ``mixins/quant_presenters``.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from ..services.economic import (
     ECONOMIC_GROUPS,
@@ -16,6 +16,7 @@ from ..services.economic import (
     SERIES_BY_ID,
     format_change,
     format_value,
+    normalize_name_list,
 )
 from ..table_cells import TableCell
 
@@ -316,8 +317,7 @@ def _shift_years(iso_date: Any, years: float) -> str | None:
 def missing_summary(payload: Any) -> str:
     """Describe which series came back empty and which provider owed them."""
     document = payload if isinstance(payload, dict) else {}
-    missing: Sequence[Any] = document.get('missing', []) or []
-    names = {str(item) for item in missing if str(item).strip()}
+    names = set(normalize_name_list(document.get('missing')))
     if not names:
         return ''
     owners: dict[str, list[str]] = {}
@@ -329,6 +329,6 @@ def missing_summary(payload: Any) -> str:
     if not owners:
         return f'{len(names)} series unavailable.'
     parts = [f'{name} ({len(labels)})' for name, labels in sorted(owners.items())]
-    down = {PROVIDER_LABELS.get(item, item) for item in document.get('unreachable', []) or []}
+    down = {PROVIDER_LABELS.get(item, item) for item in normalize_name_list(document.get('unreachable'))}
     tail = f' Unreachable from this network: {", ".join(sorted(down))}.' if down else ''
     return f'{len(names)} series unavailable — {", ".join(parts)}.{tail}'

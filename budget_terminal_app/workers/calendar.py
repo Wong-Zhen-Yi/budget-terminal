@@ -27,8 +27,12 @@ _FRED_BLS_RELEASE_SPECS = (
     (50, 'Employment Situation', 'Jobs Report', 'high'),
     (192, 'Job Openings and Labor Turnover Survey', 'JOLTS Report', 'medium'),
 )
+#: Identify the client honestly. Do NOT put a browser user-agent here: bls.gov answers a spoofed
+#: Chrome string with 403, and fred.stlouisfed.org tarpits it to roughly 18s against the 20s
+#: timeout below. A plain product token gets 200 from both in under a second. The federalreserve,
+#: bea and census hosts return identical bytes either way, so none of them needs one.
 _HTTP_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'User-Agent': 'BudgetTerminal/1.0 (personal finance research tool)',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
     'Connection': 'keep-alive',
