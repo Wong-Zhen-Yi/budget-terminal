@@ -1512,8 +1512,22 @@ class DashboardMixin:
             refresh_reason=refresh_reason,
             allow_non_chart_reuse=allow_non_chart_reuse,
         )
-        worker.finished.connect(self.update_ui)
-        worker.error.connect(lambda message, req=request_id: self.handle_error(message, request_id=req))
+        # run() is called synchronously on the pool thread, so the worker's thread affinity is this
+        # pool thread. A plain-callable slot has no QObject receiver for Qt to queue through, so it
+        # would run handle_error right here -- touching dashboard widgets off the GUI thread. Both
+        # results go through _invoke_main instead, the same way the data-service path above does.
+        def _deliver(fn: Any) -> None:
+            try:
+                self._invoke_main.emit(fn)
+            except RuntimeError:
+                logger.debug('Window closed before a dashboard worker result could be delivered.')
+
+        worker.finished.connect(lambda payload: _deliver(lambda data=payload: self.update_ui(data)))
+        worker.error.connect(
+            lambda message, req=request_id: _deliver(
+                lambda text=message, request=req: self.handle_error(text, request_id=request)
+            )
+        )
         worker.run()
 
     def handle_error(self, error_msg: Any, *, request_id: int | None = None) -> None:

@@ -66,4 +66,5 @@ jobs:
           python scripts/test_youtube_refresh_responsiveness.py
           python scripts/test_launch_stability.py
           python scripts/test_crash_reporting.py
+          python scripts/test_data_health_thread_safety.py
           python scripts/test_startup_profile.py --offscreen

@@ -6,6 +6,14 @@ from budget_terminal_app.compat import *
 from budget_terminal_app.data_service.results import market_data_errors, market_data_meta
 
 
+def _on_gui_thread() -> bool:
+    """Return whether the caller is running on the thread that owns the widgets."""
+    app = QApplication.instance()
+    if app is None:
+        return True
+    return QThread.currentThread() is app.thread()
+
+
 class DataHealthMixin:
     """Track market-data freshness and failures for the current app session."""
 
@@ -286,7 +294,27 @@ class DataHealthMixin:
         return 'Data health: OK', 'positive'
 
     def _refresh_data_health_views(self) -> None:
-        """Refresh footer and Settings health widgets if they exist."""
+        """Refresh footer and Settings health widgets if they exist.
+
+        This is the only place data-health touches widgets, so the GUI-thread guard lives here
+        rather than at each caller. Background fetches reach it through
+        ``_record_data_health_payload`` -> ``_resolve_data_health_events`` /
+        ``_record_data_health_missing_prices``, from pool threads and the startup warmup threads.
+        ``set_status_text`` calls ``setStyleSheet``, which re-polishes and repaints the widget --
+        doing that off the GUI thread corrupts Qt's state and aborts the process later, with the
+        access violation surfacing inside ``app.exec()`` and no Python frame to blame.
+        """
+        if not _on_gui_thread():
+            invoke_main = getattr(self, '_invoke_main', None)
+            if invoke_main is not None:
+                try:
+                    invoke_main.emit(self._refresh_data_health_views)
+                except RuntimeError:
+                    logger.debug('Window closed before a data-health refresh could be marshalled.')
+                return
+            # Without the marshalling channel, skipping the repaint is the only safe option.
+            logger.debug('Skipping off-thread data-health refresh; no main-thread channel.')
+            return
         summary, status = self._data_health_summary()
         self._data_health_last_refresh_ts = self._data_health_now()
         if hasattr(self, 'data_health_label'):

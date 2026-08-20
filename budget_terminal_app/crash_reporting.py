@@ -27,6 +27,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from .error_logging import QT_LOGGER_NAME
 from .paths import user_data_dir
 
 CRASH_DIR_NAME = 'crashes'
@@ -347,7 +348,7 @@ def install_qt_message_handler() -> bool:
         QtMsgType.QtCriticalMsg: logging.ERROR,
         QtMsgType.QtFatalMsg: logging.CRITICAL,
     }
-    qt_logger = logging.getLogger('budget_terminal_app.qt')
+    qt_logger = logging.getLogger(QT_LOGGER_NAME)
 
     def _handler(message_type: Any, context: Any, message: Any) -> None:
         text = str(message or '').strip()

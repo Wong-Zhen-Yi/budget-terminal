@@ -18,6 +18,8 @@ ERROR_LOG_FILE_NAME_FORMAT = 'errors-{month}.log'
 ERROR_LOG_MAX_BYTES = 1024 * 1024
 ERROR_LOG_BACKUP_COUNT = 5
 ERROR_LOG_FORMAT = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+# Must match the logger name used by crash_reporting.install_qt_message_handler.
+QT_LOGGER_NAME = 'budget_terminal_app.qt'
 _ERROR_LOG_HANDLER_ATTR = '_budget_terminal_error_log_path'
 _ERROR_LOG_HANDLER_DIR_ATTR = '_budget_terminal_error_log_dir'
 
@@ -107,6 +109,22 @@ def _has_error_file_handler(root_logger: logging.Logger, log_dir: Path) -> bool:
     return False
 
 
+class _ErrorOrQtWarningFilter(logging.Filter):
+    """Admit every error, plus Qt's own warnings.
+
+    Qt announces the conditions that precede a native abort -- "Cannot set parent, new parent is in
+    a different thread", "QWidget::paintEngine: Should no longer be called" -- at warning level and
+    then keeps running until something dereferences the damage. Those lines are the only breadcrumbs
+    for a crash that leaves no Python frame, so they belong on disk even though ordinary warnings
+    (yfinance retries and the like) would just bury the log.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR:
+            return True
+        return record.levelno >= logging.WARNING and str(record.name).startswith(QT_LOGGER_NAME)
+
+
 def _attach_error_file_handler(path: Path) -> None:
     root_logger = logging.getLogger()
     log_dir = path.parent
@@ -118,7 +136,10 @@ def _attach_error_file_handler(path: Path) -> None:
         backup_count=ERROR_LOG_BACKUP_COUNT,
         encoding='utf-8',
     )
-    handler.setLevel(logging.ERROR)
+    # WARNING + the filter below, rather than ERROR: the handler level is checked before filters
+    # run, so a filter alone could never admit Qt's warnings.
+    handler.setLevel(logging.WARNING)
+    handler.addFilter(_ErrorOrQtWarningFilter())
     handler.setFormatter(logging.Formatter(ERROR_LOG_FORMAT))
     setattr(handler, _ERROR_LOG_HANDLER_ATTR, str(path.resolve(strict=False)))
     setattr(handler, _ERROR_LOG_HANDLER_DIR_ATTR, str(log_dir.resolve(strict=False)))
