@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,17 @@ def _bullish_frames(*, extended: bool = False) -> dict[str, pd.DataFrame]:
     }
 
 
+def _benchmark_frame(close: np.ndarray | None = None) -> pd.DataFrame:
+    """A daily benchmark sharing the trend frame's index.
+
+    It falls while ``_bullish_frames`` rallies, so relative strength is unambiguously full credit.
+    The strong fixture must not depend on where the momentum sine happens to land on its last bar.
+    """
+
+    values = close if close is not None else np.linspace(100.0, 70.0, 240)
+    return _frame(np.asarray(values, dtype=float), frequency="1D")
+
+
 def _weak_frames() -> dict[str, pd.DataFrame]:
     trend_close = np.linspace(170.0, 100.0, 240)
     momentum_close = np.linspace(130.0, 110.0, 90)
@@ -78,21 +90,29 @@ def _weak_frames() -> dict[str, pd.DataFrame]:
 
 
 def test_strong_bullish_setup() -> None:
-    result = evaluate_signal("TEST", _bullish_frames())
+    result = evaluate_signal(
+        "TEST",
+        _bullish_frames(),
+        benchmark_frame=_benchmark_frame(),
+        benchmark_symbol="BENCH",
+    )
     assert result.error == "", result.error
+    assert result.max_score == SignalConfig().max_score
     assert result.trend_score == result.trend_max_score
     assert result.volume_score == result.volume_max_score
     assert result.entry_score == result.entry_max_score
-    assert result.raw_score >= 8.0, result
+    assert result.relative_score == result.relative_max_score
+    assert result.raw_score / result.max_score >= 0.8, result.raw_score
     assert result.signal is SignalClass.STRONG_LONG
     assert result.trade_status is TradeStatus.VALID_LONG
     assert all(reason.description for reason in result.reasons)
+    assert all(reason.weight > 0.0 for reason in result.reasons)
 
 
 def test_weak_setup() -> None:
     result = evaluate_signal("WEAK", _weak_frames())
     assert result.error == ""
-    assert result.raw_score <= 3.0, result.raw_score
+    assert result.raw_score / result.max_score <= 0.3, result.raw_score
     assert result.signal is SignalClass.NONE
     assert result.trade_status is TradeStatus.NONE
 
@@ -130,11 +150,18 @@ def test_rsi_and_score_boundaries() -> None:
     assert rsi_in_bullish_range(config.rsi_max, config)
     assert not rsi_in_bullish_range(config.rsi_min - 0.01, config)
     assert not rsi_in_bullish_range(config.rsi_max + 0.01, config)
-    assert classify_score(3.999, 3.0, config) is SignalClass.NONE
-    assert classify_score(4.0, 3.0, config) is SignalClass.WATCH
-    assert classify_score(6.0, 3.0, config) is SignalClass.LONG
-    assert classify_score(8.0, 3.0, config) is SignalClass.STRONG_LONG
-    assert classify_score(10.0, 1.0, config) is SignalClass.WATCH
+    trend_full = config.trend_max_score
+    assert classify_score(39.99, trend_full, config) is SignalClass.NONE
+    assert classify_score(40.0, trend_full, config) is SignalClass.WATCH
+    assert classify_score(60.0, trend_full, config) is SignalClass.LONG
+    assert classify_score(80.0, trend_full, config) is SignalClass.STRONG_LONG
+    # A qualified score with an unqualified higher-timeframe trend is still capped at WATCH.
+    assert classify_score(100.0, trend_full / 3.0, config) is SignalClass.WATCH
+    # A smaller available maximum lowers the bar with the ceiling: 68 of 84 is the same strength as
+    # 81 of 100, and must classify the same way.
+    reduced = config.max_score - config.relative_max_score
+    assert classify_score(68.0, trend_full, config, max_score=reduced) is SignalClass.STRONG_LONG
+    assert classify_score(66.0, trend_full, config, max_score=reduced) is SignalClass.LONG
 
 
 def test_breakout_uses_previous_completed_bars() -> None:
@@ -259,6 +286,158 @@ def test_young_symbol_is_not_reported_as_a_data_error() -> None:
     assert evaluate_signal("MIXED", mixed).trade_status is TradeStatus.DATA_ERROR
 
 
+def _breakout_reason(result: Any) -> Any:
+    return next(item for item in result.reasons if item.group == "entry" and "Breakout" in item.name)
+
+
+def _volume_reason(result: Any) -> Any:
+    return next(item for item in result.reasons if item.group == "volume")
+
+
+def _frames_with_breakout_margin(margin: float) -> dict[str, pd.DataFrame]:
+    frames = _bullish_frames()
+    setup = frames["setup"]
+    prior_high = float(setup["High"].iloc[-21:-1].max())
+    close = prior_high + margin
+    setup.loc[setup.index[-1], ["Open", "High", "Low", "Close"]] = [
+        close - 0.08, close + 0.12, close - 0.18, close,
+    ]
+    return frames
+
+
+def _frames_with_relative_volume(multiple: float) -> dict[str, pd.DataFrame]:
+    frames = _bullish_frames()
+    setup = frames["setup"]
+    setup.loc[setup.index[-1], "Volume"] = 1_000.0 * multiple
+    return frames
+
+
+def test_partial_credit_scales_with_evidence() -> None:
+    """The point of grading: clearing a level by a hair must not score like clearing it decisively."""
+
+    slight = _breakout_reason(evaluate_signal("TEST", _frames_with_breakout_margin(0.01)))
+    decisive = _breakout_reason(evaluate_signal("TEST", _frames_with_breakout_margin(0.05)))
+    assert 0.0 < slight.points < decisive.points < slight.weight
+    assert slight.passed and decisive.passed
+
+    quiet = _volume_reason(evaluate_signal("TEST", _frames_with_relative_volume(1.1)))
+    busy = _volume_reason(evaluate_signal("TEST", _frames_with_relative_volume(1.3)))
+    assert 0.0 < quiet.points < busy.points < quiet.weight
+
+    # At and beyond the configured threshold the check is simply full.
+    saturated = _volume_reason(evaluate_signal("TEST", _frames_with_relative_volume(2.0)))
+    assert saturated.points == saturated.weight
+
+
+def test_failed_checks_score_nothing() -> None:
+    below = _volume_reason(evaluate_signal("TEST", _frames_with_relative_volume(0.9)))
+    assert below.points == 0.0
+    assert not below.passed
+
+
+def test_missing_atr_falls_back_to_pass_fail() -> None:
+    """A frame too short for ATR still scores its conditions rather than silently zeroing them."""
+
+    frames = _bullish_frames()
+    frames["entry"] = _frame(np.linspace(100.0, 101.0, 5), frequency="1min")
+    result = evaluate_signal("TEST", frames)
+    assert result.indicators["atr_entry"] is None
+    vwap_reason = next(item for item in result.reasons if item.name == "Price above VWAP")
+    assert vwap_reason.points == vwap_reason.weight
+    assert result.trade_status is not TradeStatus.DATA_ERROR
+
+
+def test_relative_strength_rewards_leaders() -> None:
+    frames = _bullish_frames()
+    leader = evaluate_signal(
+        "LEAD", frames, benchmark_frame=_benchmark_frame(), benchmark_symbol="BENCH"
+    )
+    laggard = evaluate_signal(
+        "LAG",
+        frames,
+        benchmark_frame=_benchmark_frame(np.linspace(100.0, 300.0, 240)),
+        benchmark_symbol="BENCH",
+    )
+    assert leader.relative_score == leader.relative_max_score
+    assert laggard.relative_score == 0.0
+    # The laggard is measured against the same maximum; only its score falls.
+    assert laggard.relative_max_score == leader.relative_max_score
+    assert laggard.raw_score < leader.raw_score
+    assert leader.indicators["relative_strength_long_pct"] > 0.0
+    assert laggard.indicators["relative_strength_long_pct"] < 0.0
+
+
+def test_absent_benchmark_shrinks_the_maximum_without_failing() -> None:
+    """A throttled benchmark must cost the component, not the scan."""
+
+    config = SignalConfig()
+    result = evaluate_signal("TEST", _bullish_frames())
+    assert result.relative_max_score == 0.0
+    assert result.relative_score == 0.0
+    assert result.max_score == config.max_score - config.relative_max_score
+    assert result.trade_status is not TradeStatus.DATA_ERROR
+    assert result.timeframe_status["relative"] == "Benchmark history unavailable"
+    assert any("Relative strength was not scored" in item for item in result.warnings)
+    # A short benchmark is the same as no benchmark: it cannot cover the lookback.
+    short = evaluate_signal(
+        "TEST",
+        _bullish_frames(),
+        benchmark_frame=_benchmark_frame().iloc[-10:],
+        benchmark_symbol="BENCH",
+    )
+    assert short.relative_max_score == 0.0
+
+
+def _entry_frame_with_spread(spread: float) -> pd.DataFrame:
+    """A 30-bar entry frame whose bar range — and so its ATR — is set by ``spread``."""
+
+    closes = np.full(30, 100.0)
+    closes[-1] = 103.0
+    index = pd.date_range("2025-01-02 09:30", periods=len(closes), freq="1min")
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": closes + spread,
+            "Low": closes - spread,
+            "Close": closes,
+            "Volume": np.full(len(closes), 1_000.0),
+        },
+        index=index,
+    )
+
+
+def test_vwap_extension_is_measured_in_atr() -> None:
+    """Two names the same percentage above VWAP are not equally extended.
+
+    Both end 2.9% above VWAP, which the old percentage rule waved through. Judged against their
+    own ATR, the quiet name is stretched nine bar-ranges beyond VWAP and the volatile one barely
+    over one.
+    """
+
+    config = SignalConfig()
+
+    def _scored(spread: float) -> Any:
+        frames = _bullish_frames()
+        frames["entry"] = _entry_frame_with_spread(spread)
+        return evaluate_signal(
+            "TEST", frames, benchmark_frame=_benchmark_frame(), benchmark_symbol="BENCH"
+        )
+
+    quiet = _scored(0.05)
+    volatile = _scored(1.0)
+    for result in (quiet, volatile):
+        assert result.signal is SignalClass.STRONG_LONG
+        assert result.indicators["vwap_distance_pct"] < config.max_vwap_extension_pct
+
+    quiet_atr = quiet.indicators["vwap_distance"] / quiet.indicators["atr_entry"]
+    volatile_atr = volatile.indicators["vwap_distance"] / volatile.indicators["atr_entry"]
+    assert quiet_atr > config.max_vwap_extension_atr > volatile_atr
+    assert quiet.trade_status is TradeStatus.TOO_EXTENDED
+    assert volatile.trade_status is TradeStatus.VALID_LONG
+    # Blocking an entry never touches the technical score.
+    assert quiet.raw_score == volatile.raw_score
+
+
 def main() -> None:
     tests = [
         test_strong_bullish_setup,
@@ -276,6 +455,12 @@ def main() -> None:
         test_stale_frames_are_not_treated_as_forming,
         test_timeframe_bars_report_as_of_per_role,
         test_young_symbol_is_not_reported_as_a_data_error,
+        test_partial_credit_scales_with_evidence,
+        test_failed_checks_score_nothing,
+        test_missing_atr_falls_back_to_pass_fail,
+        test_relative_strength_rewards_leaders,
+        test_absent_benchmark_shrinks_the_maximum_without_failing,
+        test_vwap_extension_is_measured_in_atr,
     ]
     for test in tests:
         test()

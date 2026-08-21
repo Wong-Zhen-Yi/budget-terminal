@@ -26,7 +26,13 @@ from budget_terminal_app.services.options_analysis import (
     implied_volatility,
 )
 from budget_terminal_app.services.portfolio_analysis import filtered_summary, filtered_weights, returns_cache_key
-from budget_terminal_app.services.technical_analysis import calculate_macd, calculate_mfi, calculate_rsi
+from budget_terminal_app.services.technical_analysis import (
+    calculate_atr,
+    calculate_macd,
+    calculate_mfi,
+    calculate_rsi,
+    calculate_true_range,
+)
 
 
 def test_dashboard_payload_helpers() -> None:
@@ -69,6 +75,18 @@ def test_technical_indicators() -> None:
         }
     )
     assert calculate_mfi(frame).dropna().between(0, 100).all()
+
+    # True range spans the wider of the bar and the gap from the previous close.
+    true_range = calculate_true_range(frame)
+    assert pd.isna(true_range.iloc[0]) or true_range.iloc[0] == 2.0
+    assert float(true_range.iloc[-1]) == 2.0
+    atr = calculate_atr(frame, period=14)
+    assert len(atr) == len(closes)
+    # No back-fill: the warm-up window stays empty rather than borrowing a later reading.
+    assert atr.iloc[:13].isna().all()
+    assert float(atr.iloc[-1]) > 0.0
+    assert calculate_atr(pd.DataFrame(), period=14).empty
+    assert calculate_true_range(frame.drop(columns=["High"])).isna().all()
 
 
 def _black_scholes_call(spot: float, strike: float, years: float, rate: float, volatility: float) -> float:

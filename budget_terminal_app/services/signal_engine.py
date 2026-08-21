@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from .technical_analysis import calculate_macd
+from .technical_analysis import calculate_atr, calculate_macd
 from .signal_models import (
     RiskFilter,
     SignalClass,
@@ -39,18 +39,36 @@ __all__ = [
 
 
 class VwapExtensionRiskFilter:
-    """Keep the technical score visible while blocking an extended entry."""
+    """Keep the technical score visible while blocking an extended entry.
+
+    Extension is measured in ATR of the entry timeframe, so the same rule blocks a quiet name and
+    a volatile one at the point each is genuinely stretched. A fixed percentage cannot: 3% is an
+    exceptional move in one and an ordinary hour in the other. The percentage rule survives only
+    as the fallback for when the entry ATR has not warmed up.
+    """
 
     def apply(self, result: SignalResult, config: SignalConfig) -> None:
         if result.signal not in {SignalClass.LONG, SignalClass.STRONG_LONG}:
             return
-        extension = _finite_float(result.indicators.get("vwap_distance_pct"))
-        if extension is None or extension <= config.max_vwap_extension_pct:
+        distance = _finite_float(result.indicators.get("vwap_distance"))
+        atr = _finite_float(result.indicators.get("atr_entry"))
+        extension_pct = _finite_float(result.indicators.get("vwap_distance_pct"))
+        if distance is not None and atr is not None and atr > 0.0:
+            extension_atr = distance / atr
+            if extension_atr <= config.max_vwap_extension_atr:
+                return
+            result.trade_status = TradeStatus.TOO_EXTENDED
+            result.warnings.append(
+                f"Price is {extension_atr:.2f} ATR above VWAP; maximum configured extension is "
+                f"{config.max_vwap_extension_atr:.2f} ATR."
+            )
+            return
+        if extension_pct is None or extension_pct <= config.max_vwap_extension_pct:
             return
         result.trade_status = TradeStatus.TOO_EXTENDED
         result.warnings.append(
-            f"Price is {extension:.2f}% above VWAP; maximum configured extension is "
-            f"{config.max_vwap_extension_pct:.2f}%."
+            f"Price is {extension_pct:.2f}% above VWAP; maximum configured extension is "
+            f"{config.max_vwap_extension_pct:.2f}% (entry ATR unavailable)."
         )
 
 
@@ -60,6 +78,76 @@ def _finite_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return numeric if math.isfinite(numeric) else None
+
+
+def _ramp(value: Any, lower: float, upper: float) -> float:
+    """Grade ``value`` between two bounds: 0.0 at or below ``lower``, 1.0 at or above ``upper``.
+
+    This is what separates two candidates that both satisfy a condition. An all-or-nothing check
+    scores a breakout that clears resistance by a cent exactly like one that clears it by 5%, so a
+    shortlist of similar names collapses onto a handful of identical totals.
+    """
+
+    numeric = _finite_float(value)
+    if numeric is None:
+        return 0.0
+    low = float(lower)
+    high = float(upper)
+    if high <= low:
+        return 1.0 if numeric > low else 0.0
+    if numeric <= low:
+        return 0.0
+    if numeric >= high:
+        return 1.0
+    return (numeric - low) / (high - low)
+
+
+def _atr_fraction(distance: Any, atr: Any, full_atr: float) -> float:
+    """Grade a price distance in ATR units, degrading to pass/fail when ATR is unavailable.
+
+    The fallback matters: ATR needs a warm-up window, and a frame that is long enough to score but
+    too short for ATR must not have every distance check silently zeroed.
+    """
+
+    numeric = _finite_float(distance)
+    if numeric is None:
+        return 0.0
+    unit = _finite_float(atr)
+    if unit is None or unit <= 0.0:
+        return 1.0 if numeric > 0.0 else 0.0
+    return _ramp(numeric / unit, 0.0, full_atr)
+
+
+def _rsi_fraction(value: Any, config: SignalConfig) -> float:
+    """Full credit inside the bullish band, tapering out instead of falling off a cliff."""
+
+    numeric = _finite_float(value)
+    if numeric is None:
+        return 0.0
+    if config.rsi_min <= numeric <= config.rsi_max:
+        return 1.0
+    if numeric < config.rsi_min:
+        return _ramp(numeric, config.rsi_min - config.rsi_taper, config.rsi_min)
+    return 1.0 - _ramp(numeric, config.rsi_max, config.rsi_max + config.rsi_taper)
+
+
+def _macd_rising_fraction(frame: Any, bars: int) -> float:
+    """Fraction of the last ``bars`` histogram deltas that rose.
+
+    A single bar of uptick is noise; requiring the whole window is too strict to ever fire on real
+    data. Grading the run lets a two-of-three recovery score proportionally.
+    """
+
+    if frame is None or "MACD_HISTOGRAM" not in getattr(frame, "columns", ()):
+        return 0.0
+    values = pd.to_numeric(frame["MACD_HISTOGRAM"], errors="coerce").dropna()
+    window = values.iloc[-(max(1, int(bars)) + 1):]
+    if len(window) < 2:
+        return 0.0
+    deltas = window.diff().dropna()
+    if deltas.empty:
+        return 0.0
+    return float((deltas > 0.0).sum()) / float(len(deltas))
 
 
 def _normalize_ohlcv(frame: Any) -> pd.DataFrame:
@@ -161,6 +249,7 @@ def calculate_indicators(
         )
     else:
         calculated["BREAKOUT_LEVEL"] = float("nan")
+    calculated["ATR"] = calculate_atr(calculated, cfg.atr_period)
     calculated["VWAP"] = _calculate_session_vwap(calculated) if include_vwap else float("nan")
     return calculated
 
@@ -175,16 +264,35 @@ def classify_score(
     score: Any,
     trend_score: Any,
     config: SignalConfig | None = None,
+    *,
+    max_score: Any = None,
+    trend_max_score: Any = None,
 ) -> SignalClass:
+    """Classify a score as a fraction of the points that were actually available.
+
+    ``max_score`` and ``trend_max_score`` default to the configured budget but are passed in
+    explicitly when a component could not be evaluated, so dropping the benchmark lowers the bar
+    along with the ceiling instead of making every classification stricter.
+    """
+
     cfg = config or SignalConfig()
-    numeric_score = _finite_float(score) or 0.0
-    numeric_trend = _finite_float(trend_score) or 0.0
+    available = _finite_float(max_score)
+    if available is None or available <= 0.0:
+        available = cfg.max_score
+    trend_available = _finite_float(trend_max_score)
+    if trend_available is None or trend_available <= 0.0:
+        trend_available = cfg.trend_max_score
+    score_fraction = (_finite_float(score) or 0.0) / available
+    trend_fraction = (_finite_float(trend_score) or 0.0) / trend_available
     classification = SignalClass.NONE
-    for threshold in sorted(cfg.thresholds, key=lambda item: item.minimum_score, reverse=True):
-        if numeric_score >= threshold.minimum_score:
+    for threshold in sorted(cfg.thresholds, key=lambda item: item.minimum_fraction, reverse=True):
+        if score_fraction >= threshold.minimum_fraction:
             classification = threshold.signal
             break
-    if classification in {SignalClass.LONG, SignalClass.STRONG_LONG} and numeric_trend < cfg.minimum_trend_score_for_long:
+    if (
+        classification in {SignalClass.LONG, SignalClass.STRONG_LONG}
+        and trend_fraction < cfg.minimum_trend_fraction_for_long
+    ):
         return SignalClass.WATCH
     return classification
 
@@ -303,24 +411,62 @@ def _timeframe_row(
     return _TimeframeRead(row, status, timestamp_value, scored, partial=partial, dropped=dropped)
 
 
+def _relative_strength_excess(ticker_close: Any, benchmark_close: Any, lookback: int) -> float | None:
+    """Percentage return of the ticker minus the benchmark over ``lookback`` shared bars.
+
+    The two series are joined on their index rather than positionally, so a holiday the benchmark
+    trades through and the ticker does not can never shift the two windows against each other.
+    """
+
+    if ticker_close is None or benchmark_close is None:
+        return None
+    try:
+        aligned = pd.concat(
+            {
+                "ticker": pd.to_numeric(ticker_close, errors="coerce"),
+                "benchmark": pd.to_numeric(benchmark_close, errors="coerce"),
+            },
+            axis=1,
+            join="inner",
+        ).dropna()
+    except Exception:
+        return None
+    span = max(1, int(lookback))
+    if len(aligned) < span + 1:
+        return None
+    start_ticker = _finite_float(aligned["ticker"].iloc[-1 - span])
+    start_benchmark = _finite_float(aligned["benchmark"].iloc[-1 - span])
+    end_ticker = _finite_float(aligned["ticker"].iloc[-1])
+    end_benchmark = _finite_float(aligned["benchmark"].iloc[-1])
+    if None in (start_ticker, start_benchmark, end_ticker, end_benchmark):
+        return None
+    if start_ticker <= 0.0 or start_benchmark <= 0.0:
+        return None
+    return ((end_ticker / start_ticker) - (end_benchmark / start_benchmark)) * 100.0
+
+
 def _reason(
     name: str,
     group: str,
-    passed: bool,
+    fraction: float,
     weight: float,
     description: str,
     *,
     value: Any = None,
     reference: Any = None,
 ) -> SignalReason:
+    """Award ``fraction`` of ``weight``. ``passed`` means the check earned anything at all."""
+
+    share = min(max(_finite_float(fraction) or 0.0, 0.0), 1.0)
     return SignalReason(
         name=name,
         group=group,
-        passed=bool(passed),
-        points=float(weight) if passed else 0.0,
+        passed=share > 0.0,
+        points=float(weight) * share,
         description=description,
         value=_finite_float(value),
         reference=_finite_float(reference),
+        weight=float(weight),
     )
 
 
@@ -346,6 +492,8 @@ class TrendBreakoutStrategy:
         indices: Mapping[str, Any] | None = None,
         role_bar_seconds: Mapping[str, Any] | None = None,
         now: datetime | None = None,
+        benchmark_frame: Any = None,
+        benchmark_symbol: str = "",
     ) -> SignalResult:
         cfg = self.config
         requested_indices = dict(indices or {})
@@ -428,16 +576,62 @@ class TrendBreakoutStrategy:
         warnings: list[str] = []
 
         trend_score = 0.0
+        trend_atr = None
         if trend is not None:
             close = _finite_float(trend.get("Close"))
             ema_fast = _finite_float(trend.get("EMA_FAST"))
             ema_medium = _finite_float(trend.get("EMA_MEDIUM"))
             ema_long = _finite_float(trend.get("EMA_LONG"))
-            indicators.update({"ema20": ema_fast, "ema50": ema_medium, "ema200": ema_long})
+            trend_atr = _finite_float(trend.get("ATR"))
+            indicators.update({
+                "ema20": ema_fast,
+                "ema50": ema_medium,
+                "ema200": ema_long,
+                "atr": trend_atr,
+            })
             trend_reasons = (
-                _reason("Price above EMA20", "trend", close is not None and ema_fast is not None and close > ema_fast, cfg.price_above_ema_fast_weight, "Daily close is above the fast trend average.", value=close, reference=ema_fast),
-                _reason("EMA20 above EMA50", "trend", ema_fast is not None and ema_medium is not None and ema_fast > ema_medium, cfg.ema_alignment_weight, "Daily fast and medium averages are aligned bullishly.", value=ema_fast, reference=ema_medium),
-                _reason("Price above EMA200", "trend", close is not None and ema_long is not None and close > ema_long, cfg.price_above_ema_long_weight, "Daily close is above the long-term trend average.", value=close, reference=ema_long),
+                _reason(
+                    "Price above EMA20",
+                    "trend",
+                    _atr_fraction(
+                        close - ema_fast if close is not None and ema_fast is not None else None,
+                        trend_atr,
+                        cfg.trend_fast_full_atr,
+                    ),
+                    cfg.price_above_ema_fast_weight,
+                    f"Daily close is above the fast trend average; full credit at "
+                    f"{cfg.trend_fast_full_atr:g} ATR above it.",
+                    value=close,
+                    reference=ema_fast,
+                ),
+                _reason(
+                    "EMA20 above EMA50",
+                    "trend",
+                    _atr_fraction(
+                        ema_fast - ema_medium if ema_fast is not None and ema_medium is not None else None,
+                        trend_atr,
+                        cfg.trend_alignment_full_atr,
+                    ),
+                    cfg.ema_alignment_weight,
+                    f"Daily fast and medium averages are aligned bullishly; full credit at "
+                    f"{cfg.trend_alignment_full_atr:g} ATR of separation.",
+                    value=ema_fast,
+                    reference=ema_medium,
+                ),
+                _reason(
+                    "Price above EMA200",
+                    "trend",
+                    _atr_fraction(
+                        close - ema_long if close is not None and ema_long is not None else None,
+                        trend_atr,
+                        cfg.trend_long_full_atr,
+                    ),
+                    cfg.price_above_ema_long_weight,
+                    f"Daily close is above the long-term trend average; full credit at "
+                    f"{cfg.trend_long_full_atr:g} ATR above it.",
+                    value=close,
+                    reference=ema_long,
+                ),
             )
             reasons.extend(trend_reasons)
             trend_score = sum(item.points for item in trend_reasons)
@@ -448,17 +642,51 @@ class TrendBreakoutStrategy:
             macd = _finite_float(momentum.get("MACD"))
             macd_signal = _finite_float(momentum.get("MACD_SIGNAL"))
             histogram = _finite_float(momentum.get("MACD_HISTOGRAM"))
+            momentum_atr = _finite_float(momentum.get("ATR"))
             previous_histogram = _finite_float(momentum_frame["MACD_HISTOGRAM"].iloc[-2]) if len(momentum_frame) >= 2 else None
+            rising_fraction = _macd_rising_fraction(momentum_frame, cfg.macd_slope_bars)
             indicators.update({
                 "rsi": rsi,
                 "macd": macd,
                 "macd_signal": macd_signal,
                 "macd_histogram": histogram,
                 "macd_histogram_previous": previous_histogram,
+                "macd_rising_fraction": rising_fraction,
             })
             momentum_reasons = (
-                _reason("RSI in bullish range", "momentum", rsi_in_bullish_range(rsi, cfg), cfg.rsi_weight, f"Hourly RSI is between {cfg.rsi_min:g} and {cfg.rsi_max:g}.", value=rsi, reference=cfg.rsi_min),
-                _reason("MACD histogram increasing", "momentum", histogram is not None and previous_histogram is not None and histogram > previous_histogram, cfg.macd_histogram_weight, "Hourly MACD histogram is rising from the prior completed bar.", value=histogram, reference=previous_histogram),
+                _reason(
+                    "RSI in bullish range",
+                    "momentum",
+                    _rsi_fraction(rsi, cfg),
+                    cfg.rsi_weight,
+                    f"Hourly RSI is between {cfg.rsi_min:g} and {cfg.rsi_max:g}, tapering to zero "
+                    f"{cfg.rsi_taper:g} points outside that band.",
+                    value=rsi,
+                    reference=cfg.rsi_min,
+                ),
+                _reason(
+                    "MACD histogram increasing",
+                    "momentum",
+                    rising_fraction,
+                    cfg.macd_histogram_weight,
+                    f"Share of the last {cfg.macd_slope_bars:g} hourly MACD histogram changes that rose.",
+                    value=histogram,
+                    reference=previous_histogram,
+                ),
+                _reason(
+                    "MACD above signal line",
+                    "momentum",
+                    _atr_fraction(
+                        macd - macd_signal if macd is not None and macd_signal is not None else None,
+                        momentum_atr,
+                        cfg.macd_signal_full_atr,
+                    ),
+                    cfg.macd_signal_weight,
+                    f"Hourly MACD leads its signal line; full credit at "
+                    f"{cfg.macd_signal_full_atr:g} ATR of separation.",
+                    value=macd,
+                    reference=macd_signal,
+                ),
             )
             reasons.extend(momentum_reasons)
             momentum_score = sum(item.points for item in momentum_reasons)
@@ -470,26 +698,36 @@ class TrendBreakoutStrategy:
             relative_volume = _finite_float(setup.get("RELATIVE_VOLUME"))
             average_volume = _finite_float(setup.get("AVERAGE_VOLUME"))
             breakout_level = _finite_float(setup.get("BREAKOUT_LEVEL"))
+            setup_atr = _finite_float(setup.get("ATR"))
             indicators.update({
                 "relative_volume": relative_volume,
                 "average_volume": average_volume,
                 "breakout_level": breakout_level,
+                "atr_setup": setup_atr,
             })
             volume_reason = _reason(
                 "Relative volume elevated",
                 "volume",
-                relative_volume is not None and relative_volume > cfg.relative_volume_threshold,
+                _ramp(relative_volume, cfg.relative_volume_floor, cfg.relative_volume_threshold),
                 cfg.relative_volume_weight,
-                f"Setup-bar volume exceeds {cfg.relative_volume_threshold:g}x its prior {cfg.volume_lookback}-bar average.",
+                f"Setup-bar volume against its prior {cfg.volume_lookback}-bar average, scored from "
+                f"{cfg.relative_volume_floor:g}x up to {cfg.relative_volume_threshold:g}x.",
                 value=relative_volume,
                 reference=cfg.relative_volume_threshold,
             )
             breakout_reason = _reason(
                 f"Breakout above prior {cfg.breakout_lookback}-bar high",
                 "entry",
-                setup_close is not None and breakout_level is not None and setup_close > breakout_level,
+                _atr_fraction(
+                    setup_close - breakout_level
+                    if setup_close is not None and breakout_level is not None
+                    else None,
+                    setup_atr,
+                    cfg.breakout_full_atr,
+                ),
                 cfg.breakout_weight,
-                "Setup close is above resistance calculated from prior completed bars only.",
+                f"Setup close is above resistance calculated from prior completed bars only; full "
+                f"credit at {cfg.breakout_full_atr:g} ATR beyond it.",
                 value=setup_close,
                 reference=breakout_level,
             )
@@ -501,6 +739,7 @@ class TrendBreakoutStrategy:
         if entry is not None:
             price = _finite_float(entry.get("Close"))
             vwap = _finite_float(entry.get("VWAP"))
+            entry_atr = _finite_float(entry.get("ATR"))
             distance = price - vwap if price is not None and vwap is not None else None
             distance_pct = distance / vwap * 100.0 if distance is not None and vwap not in (None, 0.0) else None
             indicators.update({
@@ -508,25 +747,109 @@ class TrendBreakoutStrategy:
                 "vwap": vwap,
                 "vwap_distance": distance,
                 "vwap_distance_pct": distance_pct,
+                "atr_entry": entry_atr,
             })
             vwap_reason = _reason(
                 "Price above VWAP",
                 "entry",
-                price is not None and vwap is not None and price > vwap,
+                _atr_fraction(distance, entry_atr, cfg.vwap_full_atr),
                 cfg.price_above_vwap_weight,
-                "Entry-timeframe price is above session VWAP.",
+                f"Entry-timeframe price is above session VWAP; full credit at "
+                f"{cfg.vwap_full_atr:g} ATR above it.",
                 value=price,
                 reference=vwap,
             )
             reasons.append(vwap_reason)
             entry_score += vwap_reason.points
 
-        raw_score = trend_score + momentum_score + volume_score + entry_score
+        # Relative strength is context, not a fetched role: without it the component is dropped for
+        # the whole scan and the maximum shrinks with it, so scores stay comparable row to row. It
+        # deliberately stays out of ``availability`` — a benchmark the feed throttled must never
+        # turn 25 healthy results into data errors.
+        relative_score = 0.0
+        relative_max_score = 0.0
+        benchmark_label = str(benchmark_symbol or "").upper().strip() or "the benchmark"
+        benchmark_close = None
+        if benchmark_frame is not None:
+            normalized_benchmark = _normalize_ohlcv(benchmark_frame)
+            if not normalized_benchmark.empty:
+                benchmark_close = normalized_benchmark["Close"]
+        ticker_close = trend_read.calculated["Close"] if not trend_read.calculated.empty else None
+        long_excess = _relative_strength_excess(
+            ticker_close, benchmark_close, cfg.relative_strength_lookback
+        )
+        short_excess = _relative_strength_excess(
+            ticker_close, benchmark_close, cfg.relative_strength_short_lookback
+        )
+        # Both windows or neither: scoring one and ramping the other from a missing value would
+        # charge a ticker ten points for a gap in the benchmark's history rather than for
+        # underperforming.
+        if long_excess is not None and short_excess is not None:
+            relative_max_score = cfg.relative_max_score
+            indicators.update({
+                "benchmark": benchmark_label,
+                "relative_strength_long_pct": long_excess,
+                "relative_strength_short_pct": short_excess,
+            })
+            relative_reasons = (
+                _reason(
+                    f"Outperforming {benchmark_label} over {cfg.relative_strength_lookback} days",
+                    "relative",
+                    _ramp(long_excess, 0.0, cfg.relative_strength_full_excess_pct),
+                    cfg.relative_strength_weight,
+                    f"Excess return against {benchmark_label}; full credit at "
+                    f"{cfg.relative_strength_full_excess_pct:g}% ahead.",
+                    value=long_excess,
+                    reference=cfg.relative_strength_full_excess_pct,
+                ),
+                _reason(
+                    f"Outperforming {benchmark_label} over {cfg.relative_strength_short_lookback} days",
+                    "relative",
+                    _ramp(short_excess, 0.0, cfg.relative_strength_short_full_excess_pct),
+                    cfg.relative_strength_short_weight,
+                    f"Recent excess return against {benchmark_label}; full credit at "
+                    f"{cfg.relative_strength_short_full_excess_pct:g}% ahead.",
+                    value=short_excess,
+                    reference=cfg.relative_strength_short_full_excess_pct,
+                ),
+            )
+            reasons.extend(relative_reasons)
+            relative_score = sum(item.points for item in relative_reasons)
+            timeframe_status["relative"] = f"Available (vs {benchmark_label})"
+        else:
+            timeframe_status["relative"] = "Benchmark history unavailable"
+            warnings.append(
+                f"Relative strength was not scored: no usable {benchmark_label} history. "
+                f"This result is scored out of {cfg.max_score - cfg.relative_max_score:g}."
+            )
+
+        raw_score = trend_score + momentum_score + volume_score + entry_score + relative_score
+        max_score = (
+            cfg.trend_max_score
+            + cfg.momentum_max_score
+            + cfg.volume_max_score
+            + cfg.entry_max_score
+            + relative_max_score
+        )
         missing = [
             f"{role}: {timeframe_status[role]}" for role, ok in availability.items() if not ok
         ]
-        signal = classify_score(raw_score, trend_score, cfg) if not missing else SignalClass.NONE
-        if not missing and raw_score >= cfg.long_minimum_score and trend_score < cfg.minimum_trend_score_for_long:
+        signal = (
+            classify_score(
+                raw_score,
+                trend_score,
+                cfg,
+                max_score=max_score,
+                trend_max_score=cfg.trend_max_score,
+            )
+            if not missing
+            else SignalClass.NONE
+        )
+        if (
+            not missing
+            and raw_score >= cfg.long_minimum_fraction * max_score
+            and trend_score < cfg.minimum_trend_fraction_for_long * cfg.trend_max_score
+        ):
             warnings.append("Lower-timeframe strength is capped at WATCH because the higher-timeframe trend is not qualified.")
         if missing:
             warnings.extend(missing)
@@ -552,7 +875,7 @@ class TrendBreakoutStrategy:
             timestamp=timestamp,
             price=price,
             raw_score=raw_score,
-            max_score=cfg.max_score,
+            max_score=max_score,
             trend_score=trend_score,
             trend_max_score=cfg.trend_max_score,
             momentum_score=momentum_score,
@@ -561,6 +884,8 @@ class TrendBreakoutStrategy:
             volume_max_score=cfg.volume_max_score,
             entry_score=entry_score,
             entry_max_score=cfg.entry_max_score,
+            relative_score=relative_score,
+            relative_max_score=relative_max_score,
             signal=signal,
             trade_status=trade_status,
             reasons=reasons,
@@ -583,9 +908,16 @@ def evaluate_signal(
     *,
     role_bar_seconds: Mapping[str, Any] | None = None,
     now: datetime | None = None,
+    benchmark_frame: Any = None,
+    benchmark_symbol: str = "",
 ) -> SignalResult:
     return TrendBreakoutStrategy(config).evaluate(
-        ticker, frames, role_bar_seconds=role_bar_seconds, now=now
+        ticker,
+        frames,
+        role_bar_seconds=role_bar_seconds,
+        now=now,
+        benchmark_frame=benchmark_frame,
+        benchmark_symbol=benchmark_symbol,
     )
 
 
@@ -614,7 +946,9 @@ def data_error_result(
         timestamp=datetime.now(),
         price=None,
         raw_score=0.0,
-        max_score=cfg.max_score,
+        # Scored out of the budget minus the benchmark component, matching what an evaluated
+        # result reports when no benchmark was available.
+        max_score=cfg.max_score - cfg.relative_max_score,
         trend_score=0.0,
         trend_max_score=cfg.trend_max_score,
         momentum_score=0.0,
@@ -623,6 +957,8 @@ def data_error_result(
         volume_max_score=cfg.volume_max_score,
         entry_score=0.0,
         entry_max_score=cfg.entry_max_score,
+        relative_score=0.0,
+        relative_max_score=0.0,
         signal=SignalClass.NONE,
         trade_status=TradeStatus.DATA_ERROR,
         warnings=[error],
