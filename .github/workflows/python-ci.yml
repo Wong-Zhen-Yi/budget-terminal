@@ -49,6 +49,7 @@ jobs:
           python scripts/test_thread_shutdown.py
           python scripts/test_portfolio_margin_settlement.py
           python scripts/test_quant_analytics.py
+          python scripts/test_signal_engine.py
           python scripts/test_yahoo_rate_limit.py
       - name: Desktop smokes
         run: |
@@ -59,6 +60,7 @@ jobs:
           python scripts/test_dashboard_hidden_page_updates.py
           python scripts/test_refresh_hidden_result_deferral.py
           python scripts/test_refresh_route_inventory.py
+          python scripts/test_signal_scanner2.py
           python scripts/test_refresh_responsiveness.py
           python scripts/test_navigation_responsiveness.py
           python scripts/test_bulk_render_responsiveness.py

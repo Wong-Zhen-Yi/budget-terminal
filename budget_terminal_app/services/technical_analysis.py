@@ -62,3 +62,39 @@ def calculate_macd(
     macd = fast - slow
     signal = macd.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean()
     return macd, signal, macd - signal
+
+
+def calculate_true_range(frame: Any) -> pd.Series:
+    """Calculate the per-bar true range from an OHLC frame."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.Series(dtype=float)
+    required = ("High", "Low", "Close")
+    if any(column not in frame.columns for column in required):
+        return pd.Series(index=getattr(frame, "index", pd.Index([])), dtype=float)
+    high = pd.to_numeric(frame["High"], errors="coerce")
+    low = pd.to_numeric(frame["Low"], errors="coerce")
+    close = pd.to_numeric(frame["Close"], errors="coerce")
+    previous_close = close.shift(1)
+    return pd.concat(
+        [
+            (high - low).abs(),
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+
+def calculate_atr(frame: Any, period: int = 14) -> pd.Series:
+    """Calculate Wilder-style ATR without back-filling the warm-up window.
+
+    Unlike ``calculate_rsi`` this never calls ``bfill``: a back-filled warm-up value is a future
+    reading copied backwards, and callers that normalize distances by ATR would silently score
+    early bars against a range that had not happened yet.
+    """
+
+    true_range = calculate_true_range(frame)
+    if true_range.empty:
+        return true_range
+    span = max(1, int(period))
+    return true_range.ewm(alpha=1 / span, min_periods=span, adjust=False).mean()

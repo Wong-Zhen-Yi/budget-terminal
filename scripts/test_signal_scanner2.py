@@ -32,7 +32,7 @@ from budget_terminal_app.services.automatic_signal_scanner import (
     AutomaticTickerUniverseService,
 )
 from budget_terminal_app.services.signal_engine import evaluate_signal
-from budget_terminal_app.services.signal_models import SignalClass, TradeStatus
+from budget_terminal_app.services.signal_models import SignalClass, SignalResult, TradeStatus
 from budget_terminal_app.services.signal_scanner import SignalScanRequest, SignalScannerService
 
 
@@ -142,6 +142,10 @@ def test_payload_round_trip() -> None:
     assert restored.passed_filter_count == 7
     assert set(restored.results[0].timeframe_bars) == {"trend", "momentum", "setup", "entry"}
     assert restored.results[0].timeframe_bars["trend"]["as_of"] == result.timeframe_bars["trend"]["as_of"]
+    # Every field must survive, not just the ones spelled out above. A new SignalResult field that
+    # nobody adds to the serializer would otherwise vanish into the cache silently.
+    for name in SignalResult.__dataclass_fields__:
+        assert getattr(restored.results[0], name) == getattr(result, name), name
 
 
 def test_presenters_handle_mixed_timezone_payload_stamps() -> None:

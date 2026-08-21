@@ -9,6 +9,7 @@ from concurrent.futures import FIRST_COMPLETED, wait as wait_futures
 from typing import Any
 
 from ..dependencies import *
+from ..services.technical_analysis import calculate_true_range
 
 
 class _RandomStockCancelled(RuntimeError):
@@ -919,15 +920,7 @@ class RandomStockWorker(QObject):
         close = pd.to_numeric(frame['Close'], errors='coerce')
         volume = pd.to_numeric(frame['Volume'], errors='coerce')
         open_series = pd.to_numeric(frame['Open'], errors='coerce') if 'Open' in frame.columns else close.shift(1)
-        prev_close = close.shift(1)
-        true_range = pd.concat(
-            [
-                (high - low).abs(),
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
+        true_range = calculate_true_range(frame)
         rsi = self._calculate_rsi(close)
         macd_line, macd_signal, macd_histogram = self._calculate_macd(close)
         swing_low_indexes = []
