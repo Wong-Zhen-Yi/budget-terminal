@@ -21,10 +21,13 @@ from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
 class SpyHeatmapMixin:
     _P17_REFRESH_TTL_SECONDS = 120
     _P17_FETCH_MAX_WORKERS = 1
+    #: (internal key, button label, ETF ticker actually fetched). The label names the index while
+    #: the fetch symbol stays the ETF that proxies it; ``_p17_etf_ticker`` keeps the ticker visible
+    #: in status text so it is always clear whose holdings are on screen.
     _P17_ETFS = (
-        ("SPY", "SPY", "SPY"),
-        ("NDX", "QQQ", "QQQ"),
-        ("DJI", "DIA", "DIA"),
+        ("SPY", "S&P 500", "SPY"),
+        ("NDX", "Nasdaq 100", "QQQ"),
+        ("DJI", "Dow 30", "DIA"),
     )
     _P17_INTERVALS = (
         ("live", "Live"),
@@ -46,6 +49,7 @@ class SpyHeatmapMixin:
         self._p17_selected_row: dict[str, Any] | None = None
         self._p17_result: Any = None
         self._p17_results: dict[str, Any] = {}
+        self._p17_render_pending = False
         self._p17_etf_symbol = "SPY"
         self._p17_etf_buttons: dict[str, QPushButton] = {}
         self._p17_interval_key = "live"
@@ -61,11 +65,13 @@ class SpyHeatmapMixin:
         title_row.addWidget(self.p17_title_lbl)
         self.p17_etf_group = QButtonGroup(self.page17)
         self.p17_etf_group.setExclusive(True)
-        for symbol, label, _fetch_symbol in self._P17_ETFS:
-            button = QPushButton(label)
+        for symbol, label, fetch_symbol in self._P17_ETFS:
+            # Qt reads a lone '&' as a mnemonic, which would render "S&P 500" as "SP 500".
+            button = QPushButton(label.replace("&", "&&"))
             button.setCheckable(True)
             button.setMinimumHeight(24)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(f"{label} holdings, via {fetch_symbol}")
             button.clicked.connect(lambda _checked=False, etf_symbol=symbol: self._p17_select_etf(etf_symbol))
             title_row.addWidget(button)
             self.p17_etf_group.addButton(button)
@@ -128,6 +134,7 @@ class SpyHeatmapMixin:
         layout.addWidget(self.p17_status_lbl)
 
         self.p17_heatmap = EtfHeatmapWidget()
+        self.p17_heatmap.set_empty_message("Loading index holdings - pick an index above or press Refresh")
         self.p17_heatmap.holdingSelected.connect(self._p17_on_holding_selected)
         self.p17_heatmap.holdingActivated.connect(self._p17_open_symbol_in_charts)
         layout.addWidget(self.p17_heatmap, 1)
@@ -160,6 +167,12 @@ class SpyHeatmapMixin:
     def _p17_on_show(self) -> None:
         """Warm every configured ETF heatmap when the tab is shown."""
         self._p17_request_all_etfs()
+        # A payload that landed while the page was hidden set _p17_render_pending and returned
+        # without painting. Within the TTL the request above already re-rendered it and cleared the
+        # flag; past the TTL nothing did, and the deferred result would be dropped on the floor.
+        # Flushing only when the flag survives covers that case without double-painting.
+        if getattr(self, '_p17_render_pending', False) and self._p17_current_result() is not None:
+            self._p17_render_interval_result(reset_view=True)
 
     def _p17_page_is_visible(self) -> bool:
         page = getattr(self, 'page17', None)
@@ -286,10 +299,15 @@ class SpyHeatmapMixin:
         self._p17_update_summary(result)
         self._p17_on_holding_selected(select_heatmap_row(rows, self._p17_selected_row, etf_symbol))
         issuer = str(getattr(result, "issuer", "") or "ETF holdings source").strip()
-        status_text, status_type = describe_market_data_status(
-            result,
-            f"Loaded {len(rows)} {etf_label} holdings from {issuer} - {interval_label}.",
+        loaded_text = (
+            f"Loaded {len(rows)} {etf_label} holdings ({self._p17_etf_ticker(etf_symbol)}) "
+            f"from {issuer} - {interval_label}."
         )
+        status_text, status_type = describe_market_data_status(result, loaded_text)
+        if status_type != "positive" and loaded_text not in status_text:
+            # describe_market_data_status returns only the failure reason for a degraded payload.
+            # Keep the loaded count too: "356 quotes unavailable" alone hides how much did work.
+            status_text = f"{loaded_text} {status_text}"
         self.set_status_text(self.p17_status_lbl, status_text, status=status_type if rows else "warning")
         self._set_data_collection_info(data_sources_from_meta(result, issuer or "ETF holdings source"))
 
@@ -299,10 +317,39 @@ class SpyHeatmapMixin:
         summary = build_heatmap_summary(result, getattr(self, "_p17_interval_key", "live"))
         self.p17_summary_labels["updated"].setText(now_str)
         self.p17_summary_labels["holdings"].setText(str(summary.holdings_loaded))
-        self.p17_summary_labels["coverage"].setText(f"{summary.quote_coverage}/{summary.holdings_loaded}" if summary.holdings_loaded else "--")
+        self._p17_set_coverage_label(summary.quote_coverage, summary.holdings_loaded)
         self._p17_set_change_label(self.p17_summary_labels["weighted"], summary.weighted_move, large=False)
         self._p17_set_holding_summary(self.p17_summary_labels["strongest"], summary.strongest)
         self._p17_set_holding_summary(self.p17_summary_labels["weakest"], summary.weakest)
+
+    def _p17_set_coverage_label(self, coverage: Any, holdings_loaded: Any) -> None:
+        """Show quote coverage, flagged when it falls short of the holdings that were loaded.
+
+        A bare "147/503" is easy to read past; colouring the shortfall makes a degraded load
+        obvious without having to parse the status line.
+        """
+        label = getattr(self, "p17_summary_labels", {}).get("coverage")
+        if label is None:
+            return
+        try:
+            quoted = int(coverage or 0)
+            total = int(holdings_loaded or 0)
+        except (TypeError, ValueError):
+            quoted = total = 0
+        if total <= 0:
+            label.setText("--")
+            label.setToolTip("")
+            label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 14px; font-weight: bold; border: none;')
+            return
+        label.setText(f"{quoted}/{total}")
+        missing = max(0, total - quoted)
+        if missing:
+            color = self.theme_color("accent_negative" if quoted * 2 < total else "warning")
+            label.setToolTip(f"{missing} of {total} holdings have no quote and render as no-data tiles.")
+        else:
+            color = self.theme_color("text_primary")
+            label.setToolTip(f"All {total} holdings are quoted.")
+        label.setStyleSheet(f"color: {color}; font-size: 14px; font-weight: bold; border: none;")
 
     def _p17_set_holding_summary(self, label: QLabel, holding: Any) -> None:
         if label is None:
@@ -381,7 +428,7 @@ class SpyHeatmapMixin:
                 label.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px; border: none;')
             elif key.endswith("_sep"):
                 label.setStyleSheet(f'background: {self.theme_color("panel_border")};')
-            elif key not in ("weighted", "strongest", "weakest"):
+            elif key not in ("weighted", "strongest", "weakest", "coverage"):
                 label.setStyleSheet(f'color: {self.theme_color("text_primary")}; font-size: 14px; font-weight: bold; border: none;')
         for label in (
             self.p17_detail_symbol_lbl,
@@ -546,6 +593,10 @@ class SpyHeatmapMixin:
     def _p17_etf_label(self, symbol: Any = None) -> str:
         key = self._p17_normalize_etf_symbol(symbol or getattr(self, "_p17_etf_symbol", "SPY"))
         return self._p17_etf_options().get(key, {}).get("label", "SPY")
+
+    def _p17_etf_ticker(self, symbol: Any = None) -> str:
+        """The ETF ticker behind an index label, so status text still names what was fetched."""
+        return self._p17_etf_fetch_symbol(symbol)
 
     def _p17_etf_fetch_symbol(self, symbol: Any = None) -> str:
         key = self._p17_normalize_etf_symbol(symbol or getattr(self, "_p17_etf_symbol", "SPY"))

@@ -162,7 +162,14 @@ class EtfHeatmapWidget(QWidget):
                     continue
                 self._tile_rects.append((draw_rect, row))
                 color = self._heat_color(row.get("change_pct"), row)
-                painter.setPen(QPen(QColor(self._colors["background"]), 1))
+                if self._is_unquoted(row):
+                    # A tile with no quote is otherwise painted the same neutral as a genuine
+                    # 0.00% mover, so missing data reads as "flat". Outline it instead.
+                    pen = QPen(QColor(self._colors["muted"]), 1)
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                    painter.setPen(pen)
+                else:
+                    painter.setPen(QPen(QColor(self._colors["background"]), 1))
                 painter.setBrush(color)
                 painter.drawRoundedRect(draw_rect, 3, 3)
                 if str(row.get("symbol") or "") == self._selected_symbol:
@@ -457,6 +464,20 @@ class EtfHeatmapWidget(QWidget):
         except (TypeError, ValueError):
             return "--"
         return f"{number:.2f}%"
+
+    @staticmethod
+    def _is_unquoted(row: Any) -> bool:
+        """Whether this row has no usable change value, as opposed to a real flat move.
+
+        Distinct from the ``neutral_heat`` flag, which marks a tile the caller deliberately does
+        not want heat-coloured (the Portfolio page uses it) rather than one that is missing data.
+        """
+        if not isinstance(row, dict) or row.get("neutral_heat"):
+            return False
+        change = row.get("change_pct")
+        if not isinstance(change, (int, float)):
+            return True
+        return not math.isfinite(float(change))
 
     def _heat_color(self, change_pct: Any, row: Any = None) -> Any:
         from PySide6.QtGui import QColor

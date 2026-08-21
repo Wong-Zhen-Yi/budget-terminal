@@ -222,12 +222,57 @@ def test_offscreen_widget_row_smoke() -> None:
     widget.deleteLater()
 
 
+def test_unquoted_tiles_are_distinguished_from_flat_ones() -> None:
+    """A holding with no quote must not look identical to one that genuinely moved 0.00%."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
+
+    _app = QApplication.instance() or QApplication([])
+    widget = EtfHeatmapWidget()
+
+    assert widget._is_unquoted({"symbol": "A", "change_pct": None}) is True
+    assert widget._is_unquoted({"symbol": "A", "change_pct": float("nan")}) is True
+    assert widget._is_unquoted({"symbol": "A", "change_pct": 0.0}) is False, (
+        "a real 0.00% move is data, not a gap"
+    )
+    assert widget._is_unquoted({"symbol": "A", "change_pct": -2.5}) is False
+    # neutral_heat marks a tile the caller does not want heat-coloured (Portfolio uses it),
+    # which is a different thing from missing data and must keep its solid border.
+    assert widget._is_unquoted({"symbol": "A", "change_pct": None, "neutral_heat": True}) is False
+    assert widget._is_unquoted(None) is False
+
+
+def test_offscreen_widget_paints_mixed_quote_coverage() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+
+    from budget_terminal_app.widgets.etf_heatmap import EtfHeatmapWidget
+
+    _app = QApplication.instance() or QApplication([])
+    widget = EtfHeatmapWidget()
+    widget.resize(640, 360)
+    widget.set_data([
+        {"symbol": "AAA", "sector": "Technology", "weight": 0.4, "price": 10.0, "change_pct": 0.0},
+        {"symbol": "BBB", "sector": "Technology", "weight": 0.3, "price": None, "change_pct": None},
+        {"symbol": "CCC", "sector": "Energy", "weight": 0.3, "price": 5.0, "change_pct": 2.5},
+    ])
+    image = QImage(640, 360, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    widget.render(image)
+    assert len(widget._tile_rects) == 3, "an unpriced holding still gets a weight-sized tile"
+
+
 def main() -> None:
     test_empty_result_rows_summary_and_detail()
     test_live_fallback_and_row_contract()
     test_non_live_interval_change_and_summary()
     test_formatting_detail_selection_and_weighted_change()
     test_offscreen_widget_row_smoke()
+    test_unquoted_tiles_are_distinguished_from_flat_ones()
+    test_offscreen_widget_paints_mixed_quote_coverage()
     print("spy heatmap presenter smoke tests passed")
 
 

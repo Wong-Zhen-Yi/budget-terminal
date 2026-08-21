@@ -66,22 +66,29 @@ class _LazyModuleProxy:
 # import order. Loading a second Qt binding into this process would be fatal.
 os.environ.setdefault('PYQTGRAPH_QT_LIB', 'PySide6')
 
-def _install_yahoo_rate_limit(_module: Any) -> None:
-    """Pace every Yahoo request as soon as yfinance is first imported.
+def _configure_yahoo_client(_module: Any) -> None:
+    """Prepare yfinance as soon as it is first imported, before any request goes out.
 
     Hooked onto the lazy proxy rather than called from startup: yfinance must stay lazily imported,
-    but the limiter has to be installed before the first request goes out, and the proxy's load is
-    the one point that is both. See ``services/yahoo_rate_limit.py``.
+    but both of these have to be in place before the first request, and the proxy's load is the one
+    point that is both.
+
+    Order matters. The timezone cache is repaired first because yfinance resolves a ticker's
+    timezone through it before returning any history -- a corrupt cache fails every symbol no matter
+    how well paced the requests are. Pacing goes on afterwards. See ``services/yahoo_tz_cache.py``
+    and ``services/yahoo_rate_limit.py``.
     """
     from .services.yahoo_rate_limit import install_yahoo_rate_limit
+    from .services.yahoo_tz_cache import install_yahoo_tz_cache
 
+    install_yahoo_tz_cache()
     install_yahoo_rate_limit()
 
 
 pd = _LazyModuleProxy('pandas')
 pg = _LazyModuleProxy('pyqtgraph')
 requests = _LazyModuleProxy('requests')
-yf = _LazyModuleProxy('yfinance', on_load=_install_yahoo_rate_limit)
+yf = _LazyModuleProxy('yfinance', on_load=_configure_yahoo_client)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)

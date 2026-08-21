@@ -52,7 +52,11 @@ class _RefreshProbe(SpyHeatmapMixin):
         return None
 
     def _p17_render_interval_result(self, *, reset_view: bool = False) -> None:
+        self._p17_render_pending = False
         self.render_count += 1
+
+    def _p17_page_is_visible(self) -> bool:
+        return getattr(self, "visible", True)
 
 
 class _LifecycleProbe(WindowLifecycleMixin):
@@ -141,6 +145,47 @@ def test_selecting_cached_etf_renders_without_scheduling_fetch() -> None:
     assert probe._p17_fetch_executor.tasks == []
 
 
+def test_result_arriving_while_hidden_renders_once_on_show() -> None:
+    """Within the TTL the refresh request re-renders, so the flush must not paint a second time."""
+    probe = _RefreshProbe()
+    probe.visible = False
+    probe._p17_etf_buttons = {}
+
+    probe._p17_apply_result(object(), "SPY")
+    assert probe.render_count == 0, "a hidden page must not paint"
+    assert probe._p17_render_pending is True
+
+    probe.visible = True
+    probe._p17_on_show()
+
+    assert probe.render_count == 1
+    assert probe._p17_render_pending is False
+
+
+def test_stale_deferred_result_still_renders_on_show() -> None:
+    """Past the TTL nothing re-renders the cached payload, so the deferred render must be flushed.
+
+    This was the actual gap: _p17_render_pending was written in three places and read nowhere, so
+    a result that landed while hidden was dropped once its cache entry aged out.
+    """
+    probe = _RefreshProbe()
+    probe.visible = False
+    probe._p17_etf_buttons = {}
+
+    probe._p17_apply_result(object(), "SPY")
+    assert probe.render_count == 0
+    # Age the cache past _P17_REFRESH_TTL_SECONDS so the refresh path fetches instead of rendering.
+    probe._p17_last_fetch_by_etf["SPY"] = (
+        datetime.datetime.now().timestamp() - SpyHeatmapMixin._P17_REFRESH_TTL_SECONDS - 60
+    )
+
+    probe.visible = True
+    probe._p17_on_show()
+
+    assert probe.render_count == 1, "a stale deferred result must still be painted on show"
+    assert probe._p17_render_pending is False
+
+
 def test_startup_paths_preload_all_etfs() -> None:
     prefetch_probe = _LifecycleProbe()
     prefetch_probe._run_startup_heatmap_prefetch()
@@ -179,6 +224,8 @@ if __name__ == "__main__":
     test_repeated_load_waves_use_inflight_and_fresh_cache_guards()
     test_page_show_preloads_all_etfs()
     test_selecting_cached_etf_renders_without_scheduling_fetch()
+    test_result_arriving_while_hidden_renders_once_on_show()
+    test_stale_deferred_result_still_renders_on_show()
     test_startup_paths_preload_all_etfs()
     test_manual_refresh_remains_selected_etf_only()
     test_heatmap_executor_is_serial()

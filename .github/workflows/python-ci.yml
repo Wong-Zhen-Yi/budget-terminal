@@ -44,6 +44,7 @@ jobs:
           python scripts/test_quant_analytics.py
           python scripts/test_signal_engine.py
           python scripts/test_yahoo_rate_limit.py
+          python scripts/test_yahoo_tz_cache.py
       - name: Desktop smokes
         run: |
           python scripts/test_tab_picker_search.py

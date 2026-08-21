@@ -57,7 +57,14 @@ class EtfHeatmapWorker:
     _QUOTE_CACHE_TTL_SECONDS = 120.0
     _QUOTE_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
     _QUOTE_CACHE_LOCK = threading.Lock()
+    #: Floor on per-ticker recovery attempts after a batch miss, used for small funds like DIA.
     _QUOTE_FALLBACK_LIMIT = 12
+    #: Share of the requested universe that may be recovered one ticker at a time. A flat floor of
+    #: 12 was pinning SPY's recovery at 2% of its holdings, so a degraded batch left the heatmap
+    #: mostly blank. Proportional instead, and still capped, because each recovery is a separate
+    #: request through the rate gate.
+    _QUOTE_FALLBACK_FRACTION = 0.25
+    _QUOTE_FALLBACK_CEILING = 160
 
     def __init__(self, holdings_service: EtfHoldingsService | None = None) -> None:
         self._holdings_service = holdings_service or EtfHoldingsService()
@@ -71,8 +78,6 @@ class EtfHeatmapWorker:
         for holding in list(getattr(result, "holdings", []) or []):
             holding_symbol = str(getattr(holding, "symbol", "") or "").upper().strip()
             if not self._is_usable_symbol(holding_symbol):
-                continue
-            if symbol == "SPY" and sector_map and holding_symbol not in sector_map and holding_symbol.replace("-", ".") not in sector_map:
                 continue
             holdings.append(
                 EtfHeatmapHolding(
@@ -148,10 +153,18 @@ class EtfHeatmapWorker:
 
     @staticmethod
     def _is_usable_symbol(value: Any) -> bool:
+        """Reject the non-tradeable rows issuer holdings files carry alongside real tickers.
+
+        SSGA's SPY file lists a ``-`` cash line and Bloomberg-style placeholders for unlisted
+        positions (``2602335D``). Requiring merely *one* letter let those through, and a placeholder
+        that reaches Yahoo comes back empty and paints a permanently dead tile. Real tickers are
+        letters plus an optional ``.``/``-`` share-class suffix, so require every character to fit
+        that shape and insist the symbol starts with a letter.
+        """
         text = str(value or "").upper().strip()
-        if text in {"", "-", "--"}:
+        if not text or not text[0].isalpha():
             return False
-        return any(ch.isalpha() for ch in text)
+        return all(ch.isalpha() or ch in {".", "-"} for ch in text)
 
     @staticmethod
     def _positive_float(value: Any) -> float | None:
@@ -174,6 +187,8 @@ class EtfHeatmapWorker:
         if not symbol_pairs:
             return {}
         quotes: dict[str, dict[str, float]] = {}
+        #: Symbols fetched this call, as opposed to served from cache. Only these get re-stamped.
+        fetched: set[str] = set()
         now = time.time()
         with self._QUOTE_CACHE_LOCK:
             for original, _yahoo_symbol in symbol_pairs:
@@ -203,21 +218,40 @@ class EtfHeatmapWorker:
             for yahoo_symbol, payload in yahoo_quotes.items():
                 for original in yahoo_to_originals.get(yahoo_symbol, []):
                     quotes[original] = payload
+                    fetched.add(original)
         except Exception as exc:
-            logger.info("ETF heatmap batch quote fetch failed for %s symbols: %s", len(yahoo_symbols), exc)
+            # WARNING, not INFO: a batch that dies here takes out every symbol at once, and the
+            # page reports that as an ordinary partial load. It needs to be visible by default.
+            logger.warning("ETF heatmap batch quote fetch failed for all %s symbols: %s", len(yahoo_symbols), exc)
         missing = [(original, yahoo_symbol) for original, yahoo_symbol in uncached_pairs if original not in quotes]
         if missing:
-            bounded_missing = missing[: self._QUOTE_FALLBACK_LIMIT]
+            bounded_missing = missing[: self._fallback_budget(len(symbol_pairs))]
+            if len(missing) > len(bounded_missing):
+                logger.warning(
+                    "ETF heatmap recovering %s of %s missing quotes; the rest stay unpriced this cycle.",
+                    len(bounded_missing),
+                    len(missing),
+                )
             with ThreadPoolExecutor(max_workers=1) as executor:
                 for symbol, payload in executor.map(lambda pair: self._fetch_quote_fallback(pair[0], pair[1]), bounded_missing):
                     if payload:
                         quotes[symbol] = payload
-        if quotes:
+                        fetched.add(symbol)
+        if fetched:
+            # Only stamp what this call actually fetched. Re-stamping cache hits kept refreshing
+            # their TTL on every refresh, so a price could stay frozen for the life of the process.
             cached_at = time.time()
             with self._QUOTE_CACHE_LOCK:
-                for symbol, payload in quotes.items():
-                    self._QUOTE_CACHE[symbol] = (cached_at, dict(payload))
+                for symbol in fetched:
+                    payload = quotes.get(symbol)
+                    if payload:
+                        self._QUOTE_CACHE[symbol] = (cached_at, dict(payload))
         return quotes
+
+    def _fallback_budget(self, universe_size: int) -> int:
+        """How many missing symbols may be re-fetched one at a time after a batch miss."""
+        proportional = int(max(0, universe_size) * self._QUOTE_FALLBACK_FRACTION)
+        return max(self._QUOTE_FALLBACK_LIMIT, min(proportional, self._QUOTE_FALLBACK_CEILING))
 
     def _quotes_from_batch(self, batch: Any, symbols: list[str]) -> dict[str, dict[str, float]]:
         quotes: dict[str, dict[str, float]] = {}
