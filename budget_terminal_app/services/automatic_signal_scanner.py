@@ -281,7 +281,9 @@ class AutomaticSignalScannerService:
     """Run universe selection and the reusable signal engine as one scan."""
 
     _RESULT_NAMESPACE = "signal_scanner2_results"
-    _RESULT_CACHE_KEY = "latest_v1"
+    #: Bumped when the scoring scale changed from 0-10 to 0-100. A cached v1 payload holds scores
+    #: that would render as if they were out of 100, so the old key must not be read back.
+    _RESULT_CACHE_KEY = "latest_v2"
 
     def __init__(
         self,
@@ -413,6 +415,8 @@ class AutomaticSignalScannerService:
             "volume_max_score": result.volume_max_score,
             "entry_score": result.entry_score,
             "entry_max_score": result.entry_max_score,
+            "relative_score": result.relative_score,
+            "relative_max_score": result.relative_max_score,
             "signal": result.signal.value,
             "trade_status": result.trade_status.value,
             "reasons": [asdict(reason) for reason in result.reasons],
@@ -444,6 +448,8 @@ class AutomaticSignalScannerService:
             volume_max_score=float(value.get("volume_max_score") or 0.0),
             entry_score=float(value.get("entry_score") or 0.0),
             entry_max_score=float(value.get("entry_max_score") or 0.0),
+            relative_score=float(value.get("relative_score") or 0.0),
+            relative_max_score=float(value.get("relative_max_score") or 0.0),
             signal=SignalClass(str(value.get("signal") or SignalClass.NONE.value)),
             trade_status=TradeStatus(str(value.get("trade_status") or TradeStatus.NONE.value)),
             reasons=[
