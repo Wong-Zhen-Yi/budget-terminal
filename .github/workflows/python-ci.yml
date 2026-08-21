@@ -14,6 +14,13 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Check out the pull request's own head rather than the merge ref. The merge commit
+          # GitHub synthesizes for a pull request is authored and committed by GitHub itself, so
+          # the privacy check's commit-identity scan can never pass against it — every pull
+          # request failed at that step before lint or any smoke test had a chance to run. On a
+          # push or workflow_dispatch this expression is empty, which checkout treats as unset.
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
