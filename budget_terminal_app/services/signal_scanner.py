@@ -49,12 +49,18 @@ DEFAULT_ROLE_TIMEFRAMES = {
 }
 
 
+#: Benchmark for the relative-strength component. It rides along in the trend timeframe's batch,
+#: so scoring leadership costs no additional request.
+DEFAULT_BENCHMARK_SYMBOL = "SPY"
+
+
 @dataclass(frozen=True)
 class SignalScanRequest:
     tickers: tuple[str, ...]
     role_timeframes: Mapping[str, str]
     config: SignalConfig = SignalConfig()
     force_refresh: bool = False
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL
 
 
 def normalize_tickers(values: Any, *, limit: int = 50) -> list[str]:
@@ -297,6 +303,35 @@ class SignalScannerService:
                 continue
         return resolved
 
+    @staticmethod
+    def _benchmark_symbol(request: SignalScanRequest) -> str:
+        symbol = normalize_tickers([getattr(request, "benchmark_symbol", "")], limit=1)
+        return symbol[0] if symbol else ""
+
+    def _trend_timeframe(self, request: SignalScanRequest) -> TimeframeRequest:
+        label = request.role_timeframes.get("trend", DEFAULT_ROLE_TIMEFRAMES["trend"])
+        return self.data_service.timeframe_request(label)
+
+    def _fetch_benchmark_frame(self, request: SignalScanRequest) -> tuple[str, pd.DataFrame | None]:
+        """Fetch the benchmark's trend frame, never raising.
+
+        A throttled benchmark must cost the scan its relative-strength component and nothing else.
+        """
+
+        symbol = self._benchmark_symbol(request)
+        if not symbol:
+            return "", None
+        try:
+            frame = self.data_service.fetch_frame(
+                symbol,
+                self._trend_timeframe(request),
+                force_refresh=request.force_refresh,
+            )
+        except Exception as exc:
+            logger.info("Benchmark %s unavailable; relative strength will not be scored: %s", symbol, exc)
+            return symbol, None
+        return symbol, frame
+
     def scan_ticker(self, ticker: Any, request: SignalScanRequest) -> SignalResult:
         symbol = normalize_tickers([ticker], limit=1)
         if not symbol:
@@ -321,9 +356,16 @@ class SignalScannerService:
                 frames[role] = pd.DataFrame()
                 logger.info("Signal scanner %s %s data failed: %s", ticker_text, role, exc)
 
+        benchmark_symbol, benchmark_frame = self._fetch_benchmark_frame(request)
         strategy = self.strategy or TrendBreakoutStrategy(request.config)
         try:
-            result = strategy.evaluate(ticker_text, frames, role_bar_seconds=self._role_bar_seconds(request))
+            result = strategy.evaluate(
+                ticker_text,
+                frames,
+                role_bar_seconds=self._role_bar_seconds(request),
+                benchmark_frame=benchmark_frame,
+                benchmark_symbol=benchmark_symbol,
+            )
         except Exception as exc:
             logger.exception("Signal calculation failed for %s", ticker_text)
             return data_error_result(ticker_text, f"Signal calculation failed: {exc}", request.config)
@@ -359,17 +401,30 @@ class SignalScannerService:
         frames_by_ticker: dict[str, dict[str, pd.DataFrame]] = {ticker: {} for ticker in tickers}
         errors_by_ticker: dict[str, list[str]] = {ticker: [] for ticker in tickers}
         fetched_by_interval: dict[str, tuple[dict[str, pd.DataFrame], dict[str, str]]] = {}
+        benchmark_symbol = self._benchmark_symbol(request)
+        benchmark_frame: pd.DataFrame | None = None
         for role in self._ROLES:
             _check_cancelled()
             label = request.role_timeframes.get(role, DEFAULT_ROLE_TIMEFRAMES[role])
             timeframe = self.data_service.timeframe_request(label)
             if timeframe.interval not in fetched_by_interval:
+                # The benchmark joins the trend timeframe's batch rather than being fetched on its
+                # own: the download is already going out, so relative strength costs no extra
+                # request against a rate limit the scanner is deliberately careful with.
+                symbols = [*tickers, benchmark_symbol] if role == "trend" and benchmark_symbol else tickers
                 fetched_by_interval[timeframe.interval] = self.data_service.fetch_frames(
-                    tickers,
+                    symbols,
                     timeframe,
                     force_refresh=request.force_refresh,
                 )
             role_frames, role_errors = fetched_by_interval[timeframe.interval]
+            if role == "trend" and benchmark_symbol:
+                benchmark_frame = role_frames.get(benchmark_symbol)
+                if benchmark_frame is None:
+                    logger.info(
+                        "Benchmark %s unavailable; relative strength will not be scored",
+                        benchmark_symbol,
+                    )
             for ticker in tickers:
                 frame = role_frames.get(ticker)
                 if frame is not None:
@@ -389,7 +444,13 @@ class SignalScannerService:
             if progress:
                 progress(position - 1, total, ticker)
             try:
-                result = strategy.evaluate(ticker, frames_by_ticker[ticker], role_bar_seconds=role_bar_seconds)
+                result = strategy.evaluate(
+                    ticker,
+                    frames_by_ticker[ticker],
+                    role_bar_seconds=role_bar_seconds,
+                    benchmark_frame=benchmark_frame,
+                    benchmark_symbol=benchmark_symbol,
+                )
             except Exception as exc:
                 logger.exception("Signal calculation failed for %s", ticker)
                 result = data_error_result(ticker, f"Signal calculation failed: {exc}", request.config)

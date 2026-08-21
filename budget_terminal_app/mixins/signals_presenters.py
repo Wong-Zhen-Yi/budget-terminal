@@ -42,6 +42,7 @@ ROLE_LABELS = {
     "momentum": "Momentum (hourly)",
     "setup": "Setup (5-minute)",
     "entry": "Entry (1-minute)",
+    "relative": "Relative strength (vs benchmark)",
 }
 
 INDICATOR_FIELDS = (
@@ -56,6 +57,12 @@ INDICATOR_FIELDS = (
     ("VWAP distance", "vwap_distance_pct", "%"),
     ("Relative volume", "relative_volume", "x"),
     ("Prior 20-bar high", "breakout_level", "$"),
+    ("ATR (daily)", "atr", "$"),
+    # The setup ATR grades the breakout, which carries the single heaviest weight.
+    ("ATR (setup)", "atr_setup", "$"),
+    ("ATR (entry)", "atr_entry", "$"),
+    ("Relative strength (long)", "relative_strength_long_pct", "%"),
+    ("Relative strength (short)", "relative_strength_short_pct", "%"),
 )
 
 SCORE_COMPONENTS = (
@@ -63,6 +70,7 @@ SCORE_COMPONENTS = (
     ("Momentum", "momentum_score", "momentum_max_score", "Hourly structure"),
     ("Volume", "volume_score", "volume_max_score", "5-minute confirmation"),
     ("Entry", "entry_score", "entry_max_score", "5-minute breakout + 1-minute VWAP"),
+    ("Relative strength", "relative_score", "relative_max_score", "Daily excess return vs benchmark"),
 )
 
 
@@ -90,6 +98,15 @@ def format_compact_money(value: Any) -> str:
 def format_price(value: Any) -> str:
     numeric = finite_or_none(value)
     return f"${numeric:,.2f}" if numeric is not None else "—"
+
+
+def score_fraction(result: SignalResult) -> float:
+    """A result's score as a share of the points that were available to it."""
+
+    maximum = finite_or_none(result.max_score) or 0.0
+    if maximum <= 0.0:
+        return 0.0
+    return (finite_or_none(result.raw_score) or 0.0) / maximum
 
 
 def format_score(score: Any, maximum: Any) -> str:
@@ -192,7 +209,10 @@ def build_signal_row(
             format_score(result.raw_score, result.max_score),
             alignment="right",
             foreground=color,
-            sort_value=finite_or_none(result.raw_score) or 0.0,
+            # Sort on the fraction, not the raw points: a scan whose benchmark was unavailable
+            # scores every row out of a smaller maximum, and raw points would rank those rows
+            # below an equally strong scan that had one.
+            sort_value=score_fraction(result),
         ),
         TableCell(
             result.signal_label,
@@ -249,11 +269,27 @@ def build_indicator_lines(result: SignalResult) -> list[str]:
 
 
 def build_reason_lines(candidate: Any, result: SignalResult) -> list[str]:
+    """Render each check as awarded-out-of-available.
+
+    Checks award a fraction of their weight, so a single glyph and a bare point total would report
+    a check that earned most of its weight identically to one that barely registered.
+    """
+
     quality = [f"✓ {reason}" for reason in (getattr(candidate, "reasons", ()) or ())]
     signal_lines = []
     for reason in result.reasons:
-        points = f"+{format(reason.points, 'g')}" if reason.passed else "+0"
-        signal_lines.append(f"{'✓' if reason.passed else '○'} {reason.name} ({points})\n   {reason.description}")
+        points = finite_or_none(reason.points) or 0.0
+        weight = finite_or_none(getattr(reason, "weight", None)) or 0.0
+        if weight > 0.0 and points >= weight - 1e-9:
+            glyph = "✓"
+        elif points > 0.0:
+            glyph = "◐"
+        else:
+            glyph = "○"
+        awarded = f"+{format(round(points, 2), 'g')}"
+        if weight > 0.0:
+            awarded = f"{awarded} of {format(round(weight, 2), 'g')}"
+        signal_lines.append(f"{glyph} {reason.name} ({awarded})\n   {reason.description}")
     return quality + ([""] if quality and signal_lines else []) + signal_lines
 
 

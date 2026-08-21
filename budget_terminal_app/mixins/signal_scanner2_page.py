@@ -385,8 +385,8 @@ class SignalScanner2PageMixin:
         title = QLabel("<b>Signals</b>")
         self.set_theme_role(title, "page_title")
         subtitle = QLabel(
-            "Sources liquid US leaders on demand, then applies Daily → Hourly → 5-minute → 1-minute analysis. "
-            "Decision support only."
+            "Sources liquid US leaders on demand, then scores Daily → Hourly → 5-minute → 1-minute "
+            "analysis out of 100. Decision support only."
         )
         subtitle.setWordWrap(True)
         subtitle.setMinimumWidth(0)
@@ -402,7 +402,10 @@ class SignalScanner2PageMixin:
 
         methodology = QLabel(
             "Universe: US common stocks · price ≥ $5 · market cap ≥ $2B · 20-session median dollar volume ≥ $20M "
-            "· top 25 by liquidity. Context timeframes score the last closed bar; entry uses the live bar."
+            "· top 25 by liquidity. Context timeframes score the last closed bar; entry uses the live bar. "
+            "Every check awards partial credit, with distances measured in ATR of the timeframe being scored. "
+            "Relative strength is daily excess return against SPY; a scan without a usable benchmark is "
+            "scored out of 84 instead of 100."
         )
         methodology.setWordWrap(True)
         self.set_theme_role(methodology, "status_muted")
