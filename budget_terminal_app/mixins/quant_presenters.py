@@ -434,3 +434,132 @@ def build_pair_detail_lines(detail: Mapping[str, Any]) -> list[str]:
         direction = "short the spread" if spread_z > 0 else "long the spread"
         lines.append(f"Spread is stretched beyond 2 sigma — the mean-reversion setup is to {direction}.")
     return lines
+
+
+def _export_cell(value: Any) -> str:
+    """Escape a value for a markdown table cell."""
+
+    text = str(value if value is not None else "—").replace("|", "/").replace("\n", " ").strip()
+    return text or "—"
+
+
+def _export_row(values: Sequence[Any]) -> str:
+    return "| " + " | ".join(_export_cell(value) for value in values) + " |"
+
+
+def build_llm_export(
+    payload: QuantScanPayload | None,
+    *,
+    screen_rows: Sequence[QuantScreenRow],
+    pair_rows: Sequence[QuantPairRow],
+    screen_filter_label: str = "All ranked",
+    pair_filter_label: str = "All pairs",
+    search: str = "",
+    pair_detail: Mapping[str, Any] | None = None,
+    generated_at: dt.datetime | None = None,
+) -> str:
+    """Render the currently visible Quant scan as markdown for pasting into an LLM.
+
+    Takes the already-filtered rows rather than the raw payload so the export matches exactly what
+    the two tables show, and stays Qt-free so the smoke tests can exercise it.
+    """
+
+    stamp = generated_at or dt.datetime.now()
+    lines = [
+        "# Quant Screener & Pairs Export",
+        f"Generated: {stamp.isoformat(timespec='seconds')}",
+    ]
+    if payload is None or not payload.rows:
+        lines.extend(["", "No scan has been run yet — there is nothing to analyse."])
+        return "\n".join(lines)
+
+    completed = as_naive_local(payload.completed_at)
+    lines.extend(
+        [
+            f"Source: {payload.source}",
+            f"Scan completed: {completed.isoformat(timespec='seconds') if completed else 'unknown'}",
+            f"Universe size: {payload.universe_size} · ranked {len(payload.rows)} · pairs {len(payload.pairs)}",
+            f"Data errors: {len(payload.errors)}",
+            "",
+            "Universe: US common stocks · price >= $5 · market cap >= $2B · 20-session median dollar "
+            "volume >= $20M.",
+            "Composite is a cross-sectional percentile: 50% momentum (3/6/12M), 30% Sharpe, "
+            "20% low volatility.",
+            "Decision support only — not investment advice.",
+            "",
+            "## Screener",
+            f"Filter: {screen_filter_label}"
+            + (f" · ticker search: {search.upper()}" if search else "")
+            + f" · {len(screen_rows)} of {len(payload.rows)} rows shown",
+            "",
+            "| " + " | ".join(SCREEN_HEADERS) + " |",
+            "|" + "---|" * len(SCREEN_HEADERS),
+        ]
+    )
+    for row in screen_rows:
+        lines.append(
+            _export_row(
+                (
+                    row.rank or "—",
+                    row.ticker,
+                    format_price(row.last_price),
+                    format_percent(row.momentum_1m),
+                    format_percent(row.momentum_3m),
+                    format_percent(row.momentum_6m),
+                    format_percent(row.momentum_12m),
+                    format_plain(row.volatility_pct),
+                    format_ratio(row.sharpe),
+                    format_percent(row.max_drawdown_pct),
+                    format_ratio(row.z_score),
+                    format_plain(row.rsi),
+                    format_plain(row.composite),
+                )
+            )
+        )
+    if not screen_rows:
+        lines.append("_No screener rows match the active filter._")
+
+    lines.extend(
+        [
+            "",
+            "## Pairs",
+            "Spreads are fitted by OLS on price levels and tested for mean reversion. Many pairs are "
+            "tested at once, so roughly 1 in 20 clears the 5% Dickey-Fuller threshold by chance — "
+            "treat a stationary verdict as a shortlist, not a conclusion.",
+            f"Filter: {pair_filter_label} · {len(pair_rows)} of {len(payload.pairs)} rows shown",
+            "",
+            "| " + " | ".join(PAIR_HEADERS) + " |",
+            "|" + "---|" * len(PAIR_HEADERS),
+        ]
+    )
+    for pair in pair_rows:
+        lines.append(
+            _export_row(
+                (
+                    pair.rank or "—",
+                    pair.left,
+                    pair.right,
+                    format_ratio(pair.correlation),
+                    format_ratio(pair.hedge_ratio, 3),
+                    format_ratio(pair.spread_z),
+                    format_half_life(pair.half_life),
+                    format_ratio(pair.hurst),
+                    format_ratio(pair.dickey_fuller),
+                    pair.stationary_at or "no",
+                    format_plain(pair.score),
+                )
+            )
+        )
+    if not pair_rows:
+        lines.append("_No pairs match the active filter._")
+
+    if isinstance(pair_detail, Mapping) and pair_detail:
+        lines.extend(["", "## Inspected pair", ""])
+        lines.extend(build_pair_detail_lines(pair_detail))
+
+    if payload.errors:
+        lines.extend(["", "## Tickers with incomplete history", ""])
+        for ticker in sorted(payload.errors):
+            lines.append(f"- {ticker}: {str(payload.errors[ticker]).strip() or 'no detail'}")
+
+    return "\n".join(lines)

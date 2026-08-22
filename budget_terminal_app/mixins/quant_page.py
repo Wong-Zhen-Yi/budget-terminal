@@ -184,6 +184,14 @@ class QuantPageMixin:
         self.p41_force_btn.clicked.connect(self._p41_force_refresh)
         controls_layout.addWidget(self.p41_force_btn)
 
+        self.p41_export_llm_btn = QPushButton("Export to LLM")
+        self.set_theme_variant(self.p41_export_llm_btn, "positive")
+        self.p41_export_llm_btn.setToolTip(
+            "Copy the currently visible screener and pair rows to the clipboard as markdown."
+        )
+        self.p41_export_llm_btn.clicked.connect(self._p41_export_for_llm)
+        controls_layout.addWidget(self.p41_export_llm_btn)
+
         controls_layout.addStretch(1)
 
         self.p41_status_lbl = QLabel("Ready")
@@ -788,6 +796,39 @@ class QuantPageMixin:
         metrics = presenters.summarize_metrics(getattr(self, "_p41_payload", None))
         for key, label in getattr(self, "p41_metric_labels", {}).items():
             label.setText(metrics.get(key, "—"))
+
+    # ------------------------------------------------------------------ export
+
+    def _p41_build_llm_export(self) -> str:
+        screen_filter = getattr(self, "p41_screen_filter", None)
+        pair_filter = getattr(self, "p41_pair_filter", None)
+        search_input = getattr(self, "p41_search_input", None)
+        return presenters.build_llm_export(
+            getattr(self, "_p41_payload", None),
+            screen_rows=self._p41_visible_screen_rows(),
+            pair_rows=self._p41_visible_pair_rows(),
+            screen_filter_label=screen_filter.currentText() if screen_filter is not None else "All ranked",
+            pair_filter_label=pair_filter.currentText() if pair_filter is not None else "All pairs",
+            search=str(search_input.text() or "").strip() if search_input is not None else "",
+            pair_detail=getattr(self, "_p41_pair_detail", None),
+        )
+
+    def _p41_export_for_llm(self) -> None:
+        payload = getattr(self, "_p41_payload", None)
+        if payload is None or not payload.rows:
+            self._p41_update_status("Run a scan before exporting.", "warning")
+            return
+        try:
+            QApplication.clipboard().setText(self._p41_build_llm_export())
+        except Exception as exc:
+            self._p41_update_status(f"Export failed: {exc}", "negative")
+            QMessageBox.critical(self, "Export Failed", f"Unable to copy the Quant scan to the clipboard.\n\n{exc}")
+            return
+        self._p41_update_status(
+            f"Copied {len(self._p41_visible_screen_rows())} screener row(s) and "
+            f"{len(self._p41_visible_pair_rows())} pair(s) to the clipboard.",
+            "positive",
+        )
 
     # ------------------------------------------------------------------ status
 

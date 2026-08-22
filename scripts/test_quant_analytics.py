@@ -267,6 +267,41 @@ def test_presenter_rows_always_carry_finite_sort_values() -> None:
     assert first[1].data_roles == ((1001, "AAA/BBB"),)
 
 
+def test_llm_export_matches_the_visible_rows() -> None:
+    rows = [
+        QuantScreenRow(ticker="AAA", rank=1, last_price=101.5, composite=90.0, momentum_6m=12.0, rsi=70.0),
+        QuantScreenRow(ticker="BBB", rank=2, last_price=20.0, composite=40.0, momentum_6m=-3.0, rsi=30.0),
+    ]
+    pairs = [QuantPairRow(left="AAA", right="BBB", rank=1, stationary_at="1%", spread_z=2.5, half_life=5.0)]
+    payload = QuantScanPayload(rows=list(rows), pairs=list(pairs), universe_size=9, errors={"ZZZ": "no history"})
+
+    # An empty payload must still produce something safe to paste.
+    empty = presenters.build_llm_export(None, screen_rows=[], pair_rows=[])
+    assert "No scan has been run yet" in empty
+
+    export = presenters.build_llm_export(
+        payload,
+        screen_rows=rows[:1],
+        pair_rows=list(pairs),
+        screen_filter_label="Top quartile",
+        search="aaa",
+        pair_detail={"left": "AAA", "right": "BBB", "hedge_ratio": 2.0, "observations": 300},
+    )
+    # The export follows the filtered view, not the full payload.
+    assert "| AAA |" in export and "| BBB |" not in export.split("## Pairs")[0]
+    assert "1 of 2 rows shown" in export
+    assert "Filter: Top quartile" in export and "ticker search: AAA" in export
+    assert "## Inspected pair" in export and "long AAA / short BBB" in export
+    assert "ZZZ: no history" in export
+    # Pipes in free text would break the markdown tables.
+    piped = presenters.build_llm_export(
+        payload,
+        screen_rows=[QuantScreenRow(ticker="A|B", rank=1)],
+        pair_rows=[],
+    )
+    assert "| A/B |" in piped
+
+
 def test_presenter_filters_and_summaries() -> None:
     rows = [
         QuantScreenRow(ticker="AAA", composite=90.0, momentum_6m=12.0, rsi=70.0, volatility_pct=15.0),
@@ -314,4 +349,5 @@ if __name__ == "__main__":
     test_payload_round_trip()
     test_presenter_rows_always_carry_finite_sort_values()
     test_presenter_filters_and_summaries()
+    test_llm_export_matches_the_visible_rows()
     print("quant analytics tests passed")
