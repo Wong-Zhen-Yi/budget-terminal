@@ -50,6 +50,16 @@ def _build_window():
     return app, window, valuation_mixin, original_save
 
 
+DERIVED_VALUES = {
+    "growth_1_5": 14.2,
+    "growth_6_10": 7.0,
+    "discount_rate": 9.4,
+    "terminal_growth": 2.4,
+    "exit_multiple": 21.3,
+    "margin_of_safety": 20.0,
+}
+
+
 def _payload(ticker="NVDA", basis=5.0):
     history = pd.DataFrame({"Close": [90.0, 95.0, 100.0, 105.0]})
     return {
@@ -81,8 +91,30 @@ def _payload(ticker="NVDA", basis=5.0):
             "per_share_approximate": False,
         },
         "price_history": history,
-        "peer_rows": [],
+        "peer_rows": [
+            {"ticker": ticker, "company": ticker, "source": "Loaded", "market_cap": 1e9, "fcf_yield": 1.0, "pe": 60.0},
+            {"ticker": "AMD", "company": "AMD", "source": "Auto", "market_cap": 2e11, "fcf_yield": 5.0, "pe": 20.0},
+            {"ticker": "INTC", "company": "Intel", "source": "Auto", "market_cap": 1e11, "fcf_yield": 4.0, "pe": 25.0},
+            {"ticker": "AVGO", "company": "Broadcom", "source": "Auto", "market_cap": 5e11, "fcf_yield": 10.0, "pe": 10.0},
+        ],
         "peer_warnings": [],
+        "market_context": {
+            "risk_free_rate": 4.21,
+            "real_rate": 1.85,
+            "breakeven_inflation": 2.36,
+            "as_of": "2026-08-20",
+            "tenor": "10Y",
+            "freshness": "fresh",
+            "source": "US Treasury daily par yield curve, 10Y",
+        },
+        "analyst_estimates": {
+            "long_term_growth_pct": 21.4,
+            "next_year_growth_pct": 18.0,
+            "current_year_growth_pct": 25.0,
+            "analyst_count": 42,
+            "available": True,
+            "source": "Yahoo analyst earnings trend",
+        },
         "sources": {"quote": "Test quote", "statements": "Test statements", "computed": "Test calculation"},
         "sec": {
             "available": True,
@@ -102,17 +134,114 @@ def _payload(ticker="NVDA", basis=5.0):
                 }
             },
         },
-        "suggested_assumptions": {"growth_1_5": 9.0, "growth_6_10": 5.75, "discount_rate": 10.2, "terminal_growth": 2.5},
+        "suggested_assumptions": DERIVED_VALUES,
         "valuation_suggestions": {
             "fields": {
-                "growth_1_5": {"value": 9.0, "source": "Median of company growth inputs"},
-                "growth_6_10": {"value": 5.75, "source": "Fade toward mature growth"},
-                "discount_rate": {"value": 10.2, "source": "10% baseline plus beta"},
-                "terminal_growth": {"value": 2.5, "source": "Independent mature-growth anchor"},
-            }
+                "growth_1_5": {
+                    "value": 14.2,
+                    "source": "40% analyst next-year growth blended with 60% median of 3-year revenue CAGR",
+                    "inputs": [
+                        {"name": "3-year revenue CAGR", "value": 10.0},
+                        {"name": "analyst next-year growth", "value": 18.0},
+                    ],
+                },
+                "growth_6_10": {"value": 7.0, "source": "Average of a linear fade toward terminal growth"},
+                "discount_rate": {
+                    "value": 9.4,
+                    "source": "CAPM: 4.21% 10Y Treasury + 1.07 adjusted beta",
+                    "method": "capm",
+                    "risk_free_rate": 4.21,
+                },
+                "terminal_growth": {
+                    "value": 2.4,
+                    "source": "10Y breakeven inflation (2.36%)",
+                    "breakeven_inflation": 2.36,
+                    "caps_applied": [],
+                },
+                "exit_multiple": {"value": 21.3, "source": "Median P/FCF of 3 peers", "peer_count": 3},
+                "margin_of_safety": {"value": 20.0, "source": "Scaled to model support"},
+            },
+            "caveats": [
+                "Suggestions require consecutive, consistently positive annual history.",
+                "Analyst estimates unavailable; near-term growth uses reported history only.",
+            ],
         },
         "fetched_at": "2026-07-11T09:00:00+08:00",
     }
+
+
+def _mismatched_currency_payload():
+    """A GRVY-shaped payload: a USD quote over KRW statements, as Yahoo reports it."""
+    payload = _payload("GRVY", basis=10040.58)
+    payload["metrics"].update(
+        {
+            "company_name": "Gravity Co Ltd",
+            "price": 70.25,
+            "previous_close": 69.80,
+            "currency": "USD",
+            "financial_currency": "KRW",
+            "currency_mismatch": True,
+            "eps": 12000.0,
+            "fcf_per_share": 10040.58,
+            "cash": 200_000_000_000.0,
+            "debt": 0.0,
+            "net_debt": -200_000_000_000.0,
+            # The worker withholds every crossed ratio; the page must render that, not backfill it.
+            "pe": None,
+            "ps": None,
+            "ev_ebitda": None,
+            "fcf_yield": None,
+            "earnings_yield": None,
+        }
+    )
+    return payload
+
+
+def _assert_currency_mismatch_is_blocking(window, app) -> None:
+    """A KRW fair value must never be shown as a verdict against a USD price."""
+    window.update_valuation_page(_mismatched_currency_payload(), update_collection_info=False)
+    app.processEvents()
+
+    scenarios = window.valuation_current_scenarios
+    assert scenarios["price_comparison_valid"] is False
+    assert scenarios["verdict"] is None
+    assert scenarios["buy_below"] is None
+    assert scenarios["trim_above"] is None
+    assert scenarios["base_fair_value"] is not None, "the DCF itself still solves in KRW"
+
+    assert window.valuation_verdict_value.text() == "Not comparable"
+    assert window.valuation_fair_value_label.text() == "--"
+    assert window.valuation_upside_label.text() == "--"
+    assert window.valuation_band_label.text() == "--"
+
+    assert not window.valuation_validation_label.isHidden()
+    validation_text = window.valuation_validation_label.text()
+    assert "quoted in USD" in validation_text, validation_text
+    assert "report in KRW" in validation_text, validation_text
+    assert window.valuation_validation_label.property("bt_role") == "status_negative"
+
+    # Only the price line survives on the band chart; a KRW band on a USD axis is the defect itself.
+    fair_value_series = [item.name() for item in window.valuation_fair_value_plot.getPlotItem().listDataItems()]
+    assert fair_value_series == ["Current price"], fair_value_series
+    assert not window.valuation_pe_plot.getPlotItem().listDataItems()
+
+    assert window.valuation_metric_values["pe"][0].text() == "--"
+    assert window.valuation_metric_values["pe"][1].text() == "currency mismatch"
+    assert window.valuation_metric_values["pb"][1].text() == "quote/statements"
+
+    risk_notes = [
+        window.valuation_risk_table.item(row, 2).text()
+        for row in range(window.valuation_risk_table.rowCount())
+    ]
+    assert "Liquidity - reported in KRW" in risk_notes, risk_notes
+
+    # A matching-currency payload leaves every one of those outputs intact.
+    window.update_valuation_page(_payload(), update_collection_info=False)
+    app.processEvents()
+    assert window.valuation_current_scenarios["price_comparison_valid"] is True
+    assert window.valuation_fair_value_label.text() != "--"
+    assert window.valuation_validation_label.isHidden()
+    assert window.valuation_metric_values["pe"][1].text() == "computed"
 
 
 def test_valuation_page_smoke() -> None:
@@ -143,8 +272,26 @@ def test_valuation_page_smoke() -> None:
             assert control.isVisible()
             assert control.height() >= control.minimumSizeHint().height()
 
+        window.valuation_page_state = {
+            **window.valuation_page_state,
+            "assumptions_by_ticker": {"NVDA": {**window.valuation_page_state["assumptions"], "growth_1_5": 42.0}},
+        }
         window.update_valuation_page(_payload(), update_collection_info=False)
         app.processEvents()
+        for field, expected in DERIVED_VALUES.items():
+            spin = {
+                "growth_1_5": window.valuation_growth_1_5_spin,
+                "growth_6_10": window.valuation_growth_6_10_spin,
+                "discount_rate": window.valuation_discount_spin,
+                "terminal_growth": window.valuation_terminal_growth_spin,
+                "exit_multiple": window.valuation_exit_multiple_spin,
+                "margin_of_safety": window.valuation_margin_spin,
+            }[field]
+            assert spin.value() == expected, (field, spin.value(), expected)
+        assert window.valuation_assumption_state_label.text().startswith("Auto-derived")
+        assert "1 caveat" in window.valuation_assumption_state_label.text()
+        assert "analyst + reported history" in window.valuation_assumption_state_label.text()
+        assert window.valuation_basis_value_spin.value() == 5.0
         assert window.valuation_fair_value_label.text() != "--"
         assert window.valuation_confidence_label.text() in {"High", "Medium", "Low"}
         assert window.valuation_fair_value_plot.getPlotItem().legend is not None
@@ -161,9 +308,23 @@ def test_valuation_page_smoke() -> None:
         revenue_source_row = source_labels.index("Total Revenue")
         assert "0001-25-000001" in window.valuation_source_table.item(revenue_source_row, 1).text()
 
-        window._valuation_apply_suggested_assumptions()
-        assert window.valuation_growth_1_5_spin.value() == 9.0
-        assert "Median of company growth inputs" in window.valuation_assumption_state_label.text()
+        window.valuation_growth_1_5_spin.setValue(7.0)
+        app.processEvents()
+        assert window.valuation_assumption_state_label.text().startswith("Manual override")
+        assert window.valuation_current_scenarios["assumptions"]["growth_1_5"] == 7.0
+        assert "Auto-derived" in window.valuation_assumption_state_label.toolTip()
+
+        window._valuation_rederive_assumptions()
+        assert window.valuation_growth_1_5_spin.value() == 14.2
+        label = window.valuation_assumption_state_label.text()
+        # The label carries compact tags; the unabridged sources belong in the tooltip.
+        assert "required return 9.4% (CAPM on 4.21% 10Y)" in label, label
+        assert "terminal 2.4% (10Y breakeven)" in label, label
+        assert "exit 21.3x (median of 3 peers)" in label, label
+        assert len(label) < 260, len(label)
+        assert "Median P/FCF of 3 peers" in window.valuation_assumption_state_label.toolTip()
+        assert window.valuation_use_suggestions_btn.text() == "Re-derive assumptions"
+        assert not hasattr(window, "_valuation_apply_auto_fill_estimates")
 
         window.valuation_terminal_method_combo.setCurrentText("Exit Multiple")
         app.processEvents()
@@ -176,6 +337,7 @@ def test_valuation_page_smoke() -> None:
         assert window.valuation_basis_value_label.text() == "Starting EPS"
         assert window.valuation_terminal_method_combo.isHidden()
         assert window.valuation_exit_multiple_label.text() == "Exit P/E"
+        assert window.valuation_current_scenarios["assumptions"]["basis_type"] == "EPS"
 
         window.valuation_basis_type_combo.setCurrentText("FCF")
         window.valuation_terminal_method_combo.setCurrentText("Gordon Growth")
@@ -192,14 +354,22 @@ def test_valuation_page_smoke() -> None:
         window.valuation_assumption_ticker = "NVDA"
         window.valuation_ticker_input.setText("MSFT")
         window.valuation_page_state = _normalize_valuation_page_settings(window._valuation_settings_payload())
-        window._valuation_apply_payload_basis(_payload("MSFT", basis=4.0))
+        window._valuation_apply_derived_assumptions(_payload("MSFT", basis=4.0))
         assert window.valuation_assumption_ticker == "MSFT"
         assert window.valuation_basis_value_spin.value() == 4.0
         assert window.valuation_page_state["assumptions_by_ticker"]["NVDA"]["basis_value"] == 12.0
 
+        window.valuation_growth_1_5_spin.setValue(7.5)
+        app.processEvents()
         snapshot = window._valuation_session_snapshot()
         assert snapshot["assumptions"]["terminal_method"] == "gordon_growth"
+        assert snapshot["assumptions"]["growth_1_5"] == 7.5
+        window.valuation_growth_1_5_spin.setValue(30.0)
         assert window._valuation_restore_session_snapshot(snapshot) is True
+        app.processEvents()
+        assert window.valuation_growth_1_5_spin.value() == 7.5
+
+        _assert_currency_mismatch_is_blocking(window, app)
     finally:
         valuation_mixin.save_valuation_page_settings = original_save
         window.close()

@@ -134,7 +134,12 @@ class WindowLifecycleMixin:
         self._register_page(6, self.btn_page17, on_show=self._p17_on_show)
         self._register_page(7, self.btn_page12, on_show=self._stocks_on_show)
         self._register_page(22, self.btn_page23, on_show=self._valuation_on_show if hasattr(self, '_valuation_on_show') else None)
-        self._register_page(8, self.btn_page2, on_show=self._p2_on_show if hasattr(self, '_p2_on_show') else None)
+        self._register_page(
+            8,
+            self.btn_page2,
+            on_show=self._p2_on_show if hasattr(self, '_p2_on_show') else None,
+            on_show_sync=self._p2_on_show_sync if hasattr(self, '_p2_on_show_sync') else None,
+        )
         self._register_page(9, self.btn_page10, on_show=self._p10_on_show)
         self._register_page(27, self.btn_page28, on_show=self._p28_on_show if hasattr(self, '_p28_on_show') else None)
         self._register_page(24, self.btn_page25, on_show=self._p25_on_show if hasattr(self, '_p25_on_show') else None)
@@ -269,9 +274,15 @@ class WindowLifecycleMixin:
                     self._p7_apply_monthly_responsive_layout()
                 if hasattr(self, '_p7_apply_detail_table_widths'):
                     self._p7_apply_detail_table_widths()
-    def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None) -> None:
-        """Register a page in the nav system. Wires the button and stores lifecycle callbacks."""
-        self._pages[index] = {'btn': btn, 'on_show': on_show, 'on_hide': on_hide}
+    def _register_page(self, index: Any, btn: Any, on_show: Any=None, on_hide: Any=None, on_show_sync: Any=None) -> None:
+        """Register a page in the nav system. Wires the button and stores lifecycle callbacks.
+
+        ``on_show`` runs one event-loop pass after the page is painted. ``on_show_sync`` runs
+        inside switch_page instead, before the first paint, for the rare page whose show-time
+        layout would otherwise be visible as a pop-in. Keep it cheap: it is on the navigation
+        critical path that scripts/test_navigation_responsiveness.py budgets.
+        """
+        self._pages[index] = {'btn': btn, 'on_show': on_show, 'on_hide': on_hide, 'on_show_sync': on_show_sync}
         btn.clicked.connect(partial(self.switch_page, index))
 
     def _prepare_startup_before_show(self) -> None:
@@ -1124,6 +1135,17 @@ class WindowLifecycleMixin:
         if previous_index != numeric_index and callable(hide_callback):
             hide_callback()
         self.stacked_widget.setCurrentIndex(numeric_index)
+        # setCurrentIndex activates the page's layout synchronously, so a page that opts into
+        # on_show_sync gets correct geometry here and Qt folds its work into the first paint.
+        # A page still showing its placeholder has none of the widgets the callback expects.
+        if self._page_initialized(index=numeric_index):
+            target_page = self._pages.get(numeric_index, {}) if hasattr(self, '_pages') else {}
+            show_sync_callback = target_page.get('on_show_sync') if isinstance(target_page, dict) else None
+            if callable(show_sync_callback):
+                try:
+                    show_sync_callback()
+                except Exception:
+                    logger.exception('Synchronous page-show callback failed for index %s.', numeric_index)
         self._restore_window_height_after_page_switch(preserve_height)
         for i, page in self._pages.items():
             page['btn'].setChecked(i == numeric_index)

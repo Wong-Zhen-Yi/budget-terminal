@@ -622,7 +622,12 @@ def fetch_series_csv(series_id: Any, *, timeout: float = REQUEST_TIMEOUT_SECONDS
     return parse_fred_csv(response.text)
 
 
-def fetch_treasury_curve(*, kind: str = TREASURY_KIND_NOMINAL, years: Any = HISTORY_YEARS) -> dict[str, list[tuple[str, float]]]:
+def fetch_treasury_curve(
+    *,
+    kind: str = TREASURY_KIND_NOMINAL,
+    years: Any = HISTORY_YEARS,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> dict[str, list[tuple[str, float]]]:
     """Download the daily par yield curve and merge the yearly files into one series per tenor.
 
     Treasury serves one CSV per calendar year, so a decade of history is a fan-out rather than
@@ -638,7 +643,7 @@ def fetch_treasury_curve(*, kind: str = TREASURY_KIND_NOMINAL, years: Any = HIST
 
     def _year(value: int) -> dict[str, list[tuple[str, float]]]:
         try:
-            response = _http_get(TREASURY_CSV_URL_TEMPLATE.format(year=value, kind=kind))
+            response = _http_get(TREASURY_CSV_URL_TEMPLATE.format(year=value, kind=kind), timeout=timeout)
             return parse_treasury_csv(response.text)
         except Exception as exc:
             logger.debug('Treasury %s curve for %s failed: %s', kind, value, exc)

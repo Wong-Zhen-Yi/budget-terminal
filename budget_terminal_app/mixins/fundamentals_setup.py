@@ -60,6 +60,11 @@ class FundamentalsSetupMixin:
         self.p2_fund_workers = {'primary': None, 'compare': None}
         self.p2_compare_data = None
         self._p2_overview_refresh_timer = None
+        # Chart-layout caches: the grid geometry last applied, the plot pixel sizes the charts were
+        # last drawn at, and a rebuild counter the layout-stability smoke asserts against.
+        self._p2_chart_layout_signature = None
+        self._p2_chart_render_geometry = None
+        self._p2_chart_layout_rebuilds = 0
         self.p2_website_url = ''
         self.p2_ir_url = ''
         self.fundamentals_page_state = getattr(self, 'fundamentals_page_state', load_fundamentals_page_settings())
@@ -596,11 +601,43 @@ class FundamentalsSetupMixin:
         if getattr(self, 'p2_fullscreen_dialog', None) is dialog:
             self.p2_fullscreen_dialog = None
 
-    def _p2_relayout_charts(self) -> None:
-        """Resize and reflow the Fundamentals chart grid."""
+    def _p2_activate_pending_layout(self) -> None:
+        """Give page2 real geometry before measuring it inside a switch_page call stack.
+
+        QStackedLayout lays out only the current page, so page2's own layout has pending geometry
+        the instant setCurrentIndex shows it. Measuring before it activates would pick the stale
+        column count and then correct it a frame later, which is the pop-in this avoids.
+        """
+        page = getattr(self, 'page2', None)
+        try:
+            if page is None or not page.isVisible():
+                return
+            stack = getattr(self, 'stacked_widget', None)
+            candidates = (
+                stack,
+                page,
+                getattr(self, 'p2_content_widget', None),
+                getattr(self, 'p2_workspace_stack', None),
+            )
+            for widget in candidates:
+                layout = widget.layout() if widget is not None else None
+                if layout is not None:
+                    layout.activate()
+        except (AttributeError, RuntimeError):
+            return
+
+    def _p2_relayout_charts(self, *, immediate: bool=False) -> None:
+        """Resize and reflow the Fundamentals chart grid.
+
+        The grid rebuild is skipped when the computed geometry matches the last applied pass, so
+        navigating back to an unchanged page costs nothing and cannot flicker. ``immediate`` runs
+        the follow-up rerender in this call stack instead of on a zero-timer, which is what keeps
+        a page switch to a single painted frame.
+        """
         if hasattr(self, 'p2_charts_grid'):
             frames = getattr(self, 'p2_chart_frames', [])
             if frames:
+                self._p2_activate_pending_layout()
                 page_width = self.page2.contentsRect().width() if hasattr(self, 'page2') else 0
                 available_width = max(self.p2_charts_box.width(), page_width - 20)
                 workspace_height = self.p2_workspace_stack.contentsRect().height() if hasattr(self, 'p2_workspace_stack') else 0
@@ -620,23 +657,41 @@ class FundamentalsSetupMixin:
                 plot_height = max(72, chart_height - 46)
                 box_height = chrome_height + rows * chart_height + max(0, rows - 1) * spacing
                 box_height = min(box_height, max(180, available_height))
-                self.p2_charts_grid.setHorizontalSpacing(spacing)
-                self.p2_charts_grid.setVerticalSpacing(spacing)
-                self.p2_charts_box.setMinimumHeight(box_height)
-                while self.p2_charts_grid.count():
-                    item = self.p2_charts_grid.takeAt(0)
-                    widget = item.widget()
-                    if widget is not None:
-                        widget.setParent(self.p2_charts_box)
-                for index, frame in enumerate(frames):
-                    frame.setFixedHeight(chart_height)
-                    frame.layout().setContentsMargins(8, 6, 8, 6)
-                    self.p2_simple_charts[index].setMinimumHeight(plot_height)
-                    self.p2_simple_charts[index].setMaximumHeight(plot_height)
-                    self.p2_charts_grid.addWidget(frame, index // columns, index % columns)
-                for column in range(columns):
-                    self.p2_charts_grid.setColumnStretch(column, 1)
-        self._p2_schedule_chart_density_refresh()
+                signature = (len(frames), columns, spacing, chart_height, plot_height, box_height)
+                grid_populated = self.p2_charts_grid.count() == len(frames)
+                if not (grid_populated and signature == getattr(self, '_p2_chart_layout_signature', None)):
+                    # A hidden page reports stale geometry, so a pass measured off-screen applies
+                    # its layout but must not be cached as the settled one.
+                    self._p2_chart_layout_signature = signature if self._p2_page_is_visible() else None
+                    # Tearing the grid down and re-adding every frame must never reach the screen
+                    # half-done, so suppress painting for the whole rebuild.
+                    previous_updates = self.p2_charts_box.updatesEnabled()
+                    self.p2_charts_box.setUpdatesEnabled(False)
+                    try:
+                        self.p2_charts_grid.setHorizontalSpacing(spacing)
+                        self.p2_charts_grid.setVerticalSpacing(spacing)
+                        self.p2_charts_box.setMinimumHeight(box_height)
+                        while self.p2_charts_grid.count():
+                            item = self.p2_charts_grid.takeAt(0)
+                            widget = item.widget()
+                            if widget is not None:
+                                widget.setParent(self.p2_charts_box)
+                        for index, frame in enumerate(frames):
+                            frame.setFixedHeight(chart_height)
+                            frame.layout().setContentsMargins(8, 6, 8, 6)
+                            self.p2_simple_charts[index].setMinimumHeight(plot_height)
+                            self.p2_simple_charts[index].setMaximumHeight(plot_height)
+                            self.p2_charts_grid.addWidget(frame, index // columns, index % columns)
+                        for column in range(columns):
+                            self.p2_charts_grid.setColumnStretch(column, 1)
+                        self._p2_chart_layout_rebuilds = int(getattr(self, '_p2_chart_layout_rebuilds', 0)) + 1
+                    finally:
+                        self.p2_charts_box.setUpdatesEnabled(previous_updates)
+                        self.p2_charts_box.update()
+        if immediate:
+            self._p2_refresh_chart_density()
+        else:
+            self._p2_schedule_chart_density_refresh()
 
     def _p2_schedule_chart_density_refresh(self) -> None:
         """Coalesce resize-driven rerenders so label density follows the final chart widths."""
@@ -645,11 +700,24 @@ class FundamentalsSetupMixin:
         self._p2_chart_density_refresh_pending = True
         QTimer.singleShot(0, self._p2_refresh_chart_density)
 
+    def _p2_chart_geometry_signature(self) -> tuple:
+        """Return the per-plot pixel geometry that tick stride and label collision depend on."""
+        try:
+            return tuple((plot.width(), plot.height()) for plot in getattr(self, 'p2_simple_charts', []))
+        except RuntimeError:
+            return ()
+
     def _p2_refresh_chart_density(self) -> None:
         """Rerender chart annotations after layout geometry has settled."""
         self._p2_chart_density_refresh_pending = False
         data = getattr(self, 'p2_current_data', None)
         if data is None:
+            return
+        # Tick stride (_p2_set_plot_ticks) and label collision both derive from plot pixel size.
+        # Unchanged since the last render means this rerender would only flicker. Note this cannot
+        # be folded into the grid-layout signature: a width-only resize leaves every cached height
+        # identical while still changing the stride.
+        if self._p2_chart_geometry_signature() == getattr(self, '_p2_chart_render_geometry', None):
             return
         period = self._p2_period()
         self._render_simple_charts(data, period)
@@ -974,12 +1042,40 @@ class FundamentalsSetupMixin:
 
     def _p2_on_show(self) -> None:
         # Primary first: the compare overlay renders against the primary payload.
+        # Chart geometry is not settled here: _p2_on_show_sync already did that before the page
+        # was painted, and a payload delivered below reflows through update_page2.
         for slot in ('primary', 'compare'):
             pending = self._p2_pending_results.pop(slot, None)
             if isinstance(pending, tuple) and len(pending) == 2:
                 data, context = pending
                 self._p2_deliver_result(slot, data, context)
-        self._p2_relayout_charts()
+
+    def _p2_on_show_sync(self) -> None:
+        """Settle chart geometry and labels in the frame the page becomes visible.
+
+        Runs inside switch_page's call stack, after setCurrentIndex has activated the layout but
+        before control returns to the event loop, so Qt coalesces the reflow and the rerender into
+        the page's first paint instead of showing them as a staged pop-in.
+        """
+        if not hasattr(self, 'p2_charts_grid'):
+            return
+        self._p2_relayout_charts(immediate=True)
+        self._p2_settle_chart_annotations()
+
+    def _p2_settle_chart_annotations(self) -> None:
+        """Place chart labels now rather than on the zero-timer queued at creation.
+
+        _p2_layout_chart_annotations bails out while its plot is hidden and never retries, so a
+        render performed off-screen leaves every label unpositioned and every Y range unexpanded
+        until a frame after the page appears. Running it here absorbs that into the first paint;
+        the queued timer then repeats it as a no-op.
+        """
+        for plot in getattr(self, 'p2_simple_charts', []):
+            try:
+                if plot.isVisible():
+                    self._p2_layout_chart_annotations(plot)
+            except RuntimeError:
+                return
 
     def _p2_build_filings_tab(self) -> Any:
         """Build the searchable SEC filing browser without changing the statement workspace."""
@@ -1119,6 +1215,9 @@ class FundamentalsSetupMixin:
 
     def _apply_fundamentals_theme(self) -> None:
         """Refresh Fundamentals colors when the active theme changes."""
+        # Chart chrome is rebuilt below, so the cached grid geometry no longer describes it.
+        self._p2_chart_layout_signature = None
+        self._p2_chart_render_geometry = None
         self.p2_name_lbl.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {self.theme_color("text_primary")};')
         self.p2_info_lbl.setStyleSheet(f'color: {self.theme_color("text_muted")}; font-size: 12px;')
         self.set_status_text(self.p2_status_lbl, self.p2_status_lbl.text(), status=self.p2_status_lbl.property('bt_status') or 'muted')

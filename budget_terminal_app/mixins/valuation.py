@@ -196,9 +196,9 @@ class ValuationMixin:
         model_header_layout.setSpacing(8)
         model_title = QLabel('Fair Value Assumptions')
         self.set_theme_role(model_title, 'section_title')
-        self.valuation_use_suggestions_btn = QPushButton('Use suggested assumptions')
-        self.valuation_use_suggestions_btn.setToolTip('Apply company-derived suggestions once; later edits remain manual')
-        self.valuation_use_suggestions_btn.clicked.connect(self._valuation_apply_suggested_assumptions)
+        self.valuation_use_suggestions_btn = QPushButton('Re-derive assumptions')
+        self.valuation_use_suggestions_btn.setToolTip('Recompute every assumption from the loaded data, discarding manual edits')
+        self.valuation_use_suggestions_btn.clicked.connect(self._valuation_rederive_assumptions)
         model_header_layout.addWidget(model_title)
         model_header_layout.addStretch()
         model_header_layout.addWidget(self.valuation_use_suggestions_btn)
@@ -735,11 +735,15 @@ class ValuationMixin:
             finally:
                 self._valuation_assumption_guard = False
         self._valuation_update_dynamic_assumption_rows()
+        # The basis spin is written under the guard, which suppresses _valuation_on_assumption_edited,
+        # so without this the verdict and charts keep showing the previous basis.
+        self._valuation_recalculate_from_controls()
 
     def _valuation_on_assumption_edited(self, *_: Any) -> None:
         if getattr(self, '_valuation_assumption_guard', False):
             return
-        self.valuation_assumption_state_label.setText('Manual assumptions')
+        self.valuation_assumption_state_label.setText('Manual override - press Re-derive to restore derived values')
+        self.valuation_assumption_state_label.setToolTip(str(getattr(self, '_valuation_derived_summary', '') or ''))
         self._valuation_recalculate_from_controls()
 
     def _valuation_update_dynamic_assumption_rows(self, *_: Any) -> None:
@@ -756,164 +760,126 @@ class ValuationMixin:
         self.valuation_exit_multiple_label.setVisible(is_eps or not is_gordon)
         self.valuation_exit_multiple_spin.setVisible(is_eps or not is_gordon)
 
-    def _valuation_clamp(self, value: Any, minimum: float, maximum: float) -> float | None:
-        numeric = self._valuation_float(value)
-        if numeric is None:
-            return None
-        return min(max(numeric, minimum), maximum)
-
-    def _valuation_series_cagr(self, values: Any) -> float | None:
-        numeric_values = [
-            numeric
-            for numeric in (self._valuation_float(value) for value in list(values or []))
-            if numeric is not None and numeric > 0
-        ]
-        if len(numeric_values) < 2:
-            return None
-        start = numeric_values[0]
-        end = numeric_values[-1]
-        years = len(numeric_values) - 1
-        if start <= 0 or end <= 0 or years <= 0:
-            return None
-        try:
-            return ((end / start) ** (1.0 / years) - 1.0) * 100.0
-        except (OverflowError, ZeroDivisionError, ValueError):
-            return None
-
-    def _valuation_estimate_near_growth(self, metrics: dict[str, Any], trends: dict[str, Any]) -> float | None:
-        basis_type = str(self.valuation_basis_type_combo.currentText() or '').upper().strip()
-        basis_key = 'eps' if basis_type == 'EPS' else 'fcf'
-        growth = self._valuation_series_cagr(trends.get(basis_key))
-        if growth is None:
-            growth = self._valuation_series_cagr(trends.get('revenue'))
-        if growth is None:
-            growth = self._valuation_float(metrics.get('revenue_growth'))
-        return self._valuation_clamp(growth, -10.0, 35.0)
-
-    def _valuation_estimate_discount_rate(self, metrics: dict[str, Any]) -> float | None:
-        discount = float(DEFAULT_VALUATION_ASSUMPTIONS['discount_rate'])
-        has_signal = False
-        beta = self._valuation_float(metrics.get('beta'))
-        if beta is not None:
-            discount += (beta - 1.0) * 2.0
-            has_signal = True
-        free_cash_flow = self._valuation_float(metrics.get('free_cash_flow'))
-        if free_cash_flow is not None:
-            has_signal = True
-            if free_cash_flow <= 0:
-                discount += 1.5
-        net_debt = self._valuation_float(metrics.get('net_debt'))
-        market_cap = self._valuation_float(metrics.get('market_cap'))
-        if net_debt is not None and market_cap is not None and market_cap > 0:
-            has_signal = True
-            leverage = net_debt / market_cap
-            if leverage > 0.5:
-                discount += 2.0
-            elif leverage > 0.2:
-                discount += 1.0
-        return self._valuation_clamp(discount, 6.0, 18.0) if has_signal else None
-
-    def _valuation_auto_assumptions_from_payload(self) -> dict[str, float]:
-        payload = getattr(self, 'valuation_current_data', None) if isinstance(getattr(self, 'valuation_current_data', None), dict) else {}
+    def _valuation_derivation_bundle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the worker's derivation bundle, recomputing it here if the payload lost it."""
+        bundle = payload.get('valuation_suggestions') or payload.get('assumption_suggestions')
+        if isinstance(bundle, dict) and isinstance(bundle.get('fields'), dict):
+            return bundle
         metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
-        trends = payload.get('trends', {}) if isinstance(payload.get('trends'), dict) else {}
-        estimates: dict[str, float] = {}
-        near_growth = self._valuation_estimate_near_growth(metrics, trends)
-        if near_growth is not None:
-            estimates['growth_1_5'] = near_growth
-            outer_growth = self._valuation_clamp(near_growth * 0.5, -5.0, 15.0)
-            if outer_growth is not None:
-                estimates['growth_6_10'] = outer_growth
-                terminal_growth = self._valuation_clamp(outer_growth * 0.5, 0.0, 4.0)
-                if terminal_growth is not None:
-                    estimates['terminal_growth'] = terminal_growth
-        discount_rate = self._valuation_estimate_discount_rate(metrics)
-        if discount_rate is not None:
-            estimates['discount_rate'] = discount_rate
-        return estimates
+        return derive_valuation_suggestions(
+            metrics,
+            payload.get('trends', {}),
+            metrics.get('basis_type') or self.valuation_basis_type_combo.currentText(),
+            market=payload.get('market_context'),
+            analyst=payload.get('analyst_estimates'),
+            peer_rows=payload.get('peer_rows'),
+            projection_years=self.valuation_projection_years_spin.value(),
+            terminal_method=(
+                'gordon_growth'
+                if self.valuation_terminal_method_combo.currentText() == 'Gordon Growth'
+                else 'exit_multiple'
+            ),
+        )
 
-    def _valuation_apply_auto_fill_estimates(self, *, show_status: bool = True, persist: bool = True) -> bool:
-        payload = getattr(self, 'valuation_current_data', None) if isinstance(getattr(self, 'valuation_current_data', None), dict) else {}
-        if not payload:
-            if show_status:
-                self.set_status_text(self.valuation_status_label, 'Load a ticker before auto-filling valuation assumptions.', status='warning')
-            return False
-        estimates = self._valuation_auto_assumptions_from_payload()
-        if not estimates:
-            if show_status:
-                self.set_status_text(self.valuation_status_label, 'No company-only assumption inputs were available for auto-fill.', status='warning')
-            return False
-        self._valuation_assumption_guard = True
-        try:
-            if 'growth_1_5' in estimates:
-                self.valuation_growth_1_5_spin.setValue(float(estimates['growth_1_5']))
-            if 'growth_6_10' in estimates:
-                self.valuation_growth_6_10_spin.setValue(float(estimates['growth_6_10']))
-            if 'discount_rate' in estimates:
-                self.valuation_discount_spin.setValue(float(estimates['discount_rate']))
-            if 'terminal_growth' in estimates:
-                self.valuation_terminal_growth_spin.setValue(float(estimates['terminal_growth']))
-        finally:
-            self._valuation_assumption_guard = False
-        self._valuation_recalculate_from_controls(persist=persist)
-        if show_status:
-            self.set_status_text(self.valuation_status_label, 'Applied company-only auto-fill assumptions from loaded valuation data.', status='positive')
-        return True
+    def _valuation_apply_derived_assumptions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Overwrite every derivable assumption from a freshly loaded payload.
 
-    def _valuation_apply_suggested_assumptions(self) -> None:
-        payload = getattr(self, 'valuation_current_data', None) if isinstance(getattr(self, 'valuation_current_data', None), dict) else {}
-        if not payload:
-            self.set_status_text(self.valuation_status_label, 'Load a ticker before applying suggested assumptions.', status='warning')
-            return
-        suggestion_bundle = payload.get('valuation_suggestions') or payload.get('assumption_suggestions')
-        if not isinstance(suggestion_bundle, dict) or not isinstance(suggestion_bundle.get('fields'), dict):
-            suggestion_bundle = derive_valuation_suggestions(
-                payload.get('metrics', {}),
-                payload.get('trends', {}),
-                self.valuation_basis_type_combo.currentText(),
-            )
-        fields = suggestion_bundle.get('fields', {}) if isinstance(suggestion_bundle, dict) else {}
-        structured_estimates = {
-            key: detail.get('value')
-            for key, detail in fields.items()
-            if isinstance(detail, dict) and detail.get('value') is not None
-        }
-        provenance = {
-            key: detail.get('source')
-            for key, detail in fields.items()
-            if isinstance(detail, dict) and str(detail.get('source') or '').strip()
-        }
-        suggested = payload.get('suggested_assumptions') or structured_estimates
-        if isinstance(suggested, dict):
-            estimates = dict(suggested)
-        else:
-            estimates = structured_estimates
-        basis_type = self.valuation_basis_type_combo.currentText()
-        basis_value = self._valuation_metric_basis_value(basis_type)
-        if basis_value is not None:
-            estimates['basis_value'] = basis_value
-        if not estimates:
-            self.set_status_text(self.valuation_status_label, 'No company-derived suggestions are available for this ticker.', status='warning')
-            return
-        values = self._valuation_assumptions_from_controls()
-        values.update(estimates)
+        Saved per-ticker assumptions are deliberately not consulted here: a load always re-derives.
+        They survive as the first-paint defaults in ``init_page23`` and inside the session
+        snapshot, both of which run before or instead of a fetch.
+        """
+        bundle = self._valuation_derivation_bundle(payload)
+        metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
+        current = self._valuation_assumptions_from_controls()
+        values = normalize_valuation_assumptions(DEFAULT_VALUATION_ASSUMPTIONS)
+        # Neither of these has a derivation rule - they are the user's model choices.
+        values['terminal_method'] = current['terminal_method']
+        values['projection_years'] = current['projection_years']
+        values['basis_type'] = metrics.get('basis_type') or current['basis_type']
+        basis_value = self._valuation_float(metrics.get('basis_value'))
+        values['basis_value'] = basis_value if basis_value is not None and basis_value > 0 else current['basis_value']
+        fields = bundle.get('fields', {}) if isinstance(bundle, dict) else {}
+        for key in ('growth_1_5', 'growth_6_10', 'discount_rate', 'terminal_growth', 'exit_multiple', 'margin_of_safety'):
+            detail = fields.get(key)
+            value = detail.get('value') if isinstance(detail, dict) else None
+            if value is not None:
+                values[key] = value
         self._valuation_apply_assumptions_to_controls(values)
-        source_parts = []
-        if isinstance(provenance, dict):
-            for field, source in provenance.items():
-                if field in estimates and str(source or '').strip():
-                    source_parts.append(f'{field.replace("_", " ")}: {source}')
-        source_text = '; '.join(source_parts[:4]) or 'historical company growth and risk signals'
-        self.valuation_assumption_state_label.setText(f'Suggested assumptions applied — {source_text}')
-        self._valuation_recalculate_from_controls()
-        self.set_status_text(self.valuation_status_label, 'Applied suggested assumptions. Further edits are marked manual.', status='positive')
+        self.valuation_assumption_ticker = str(payload.get('ticker', '') or '').upper().strip()
+        self._valuation_set_assumption_state_label(bundle, payload)
+        return bundle
 
-    def _valuation_on_auto_fill_toggled(self, enabled: bool) -> None:
-        if enabled:
-            self._valuation_apply_auto_fill_estimates(show_status=True)
-        else:
-            self._valuation_recalculate_from_controls()
-            self.set_status_text(self.valuation_status_label, 'Auto-fill assumptions off; manual assumptions stay editable.', status='muted')
+    _VALUATION_LABEL_CLAUSES = (
+        ('discount_rate', 'required return', '{:.1f}%'),
+        ('growth_1_5', 'growth', '{:.1f}%'),
+        ('terminal_growth', 'terminal', '{:.1f}%'),
+        ('exit_multiple', 'exit', '{:.1f}x'),
+        ('margin_of_safety', 'margin of safety', '{:.0f}%'),
+    )
+
+    def _valuation_short_source(self, key: str, detail: dict[str, Any]) -> str:
+        """Compress one derivation into a few words, reading the structured fields not the prose.
+
+        The full sentence goes in the tooltip. On the label it would wrap to six lines and shove
+        the assumption grid off the bottom of the panel.
+        """
+        if key == 'discount_rate':
+            risk_free = self._valuation_float(detail.get('risk_free_rate'))
+            if detail.get('method') == 'capm' and risk_free is not None:
+                return f'CAPM on {risk_free:.2f}% 10Y'
+            return 'company-risk heuristic'
+        if key == 'terminal_growth':
+            if detail.get('caps_applied'):
+                return 'capped under required return'
+            if self._valuation_float(detail.get('breakeven_inflation')) is not None:
+                return '10Y breakeven'
+            return 'mature-growth anchor'
+        if key == 'growth_1_5':
+            names = [str(item.get('name', '')) for item in list(detail.get('inputs') or []) if isinstance(item, dict)]
+            has_analyst = any(name.startswith('analyst') for name in names)
+            has_history = any(not name.startswith('analyst') for name in names)
+            if has_analyst and has_history:
+                return 'analyst + reported history'
+            if has_analyst:
+                return 'analyst estimates'
+            return 'reported history' if has_history else 'default'
+        if key == 'exit_multiple':
+            count = detail.get('peer_count') or 0
+            return f'median of {count} peers' if count else 'default'
+        return 'scaled to model support'
+
+    def _valuation_set_assumption_state_label(self, bundle: Any, payload: dict[str, Any]) -> None:
+        """Summarize the derivation in one short line, with the unabridged version as the tooltip."""
+        fields = bundle.get('fields', {}) if isinstance(bundle, dict) else {}
+        clauses = []
+        detailed = []
+        for key, name, fmt in self._VALUATION_LABEL_CLAUSES:
+            detail = fields.get(key)
+            if not isinstance(detail, dict) or detail.get('value') is None:
+                continue
+            shown = fmt.format(float(detail['value']))
+            clauses.append(f'{name} {shown} ({self._valuation_short_source(key, detail)})')
+            source = str(detail.get('source') or '').strip()
+            detailed.append(f'{name} {shown}' + (f' - {source}' if source else ''))
+        caveats = [str(item) for item in list(bundle.get('caveats') or [])[1:] if str(item or '').strip()]
+        market = payload.get('market_context') if isinstance(payload.get('market_context'), dict) else {}
+        stamp = str(market.get('as_of') or '').strip() or self._valuation_format_timestamp(payload.get('fetched_at'))
+        headline = f'Auto-derived {stamp}' if stamp else 'Auto-derived'
+        summary = headline + (' - ' + '; '.join(clauses) if clauses else '')
+        if caveats:
+            summary += f'. {len(caveats)} caveat' + ('s' if len(caveats) != 1 else '')
+        self._valuation_derived_summary = '\n'.join([headline] + detailed + ([''] + caveats if caveats else []))
+        self.valuation_assumption_state_label.setText(summary)
+        self.valuation_assumption_state_label.setToolTip(self._valuation_derived_summary)
+
+    def _valuation_rederive_assumptions(self) -> None:
+        payload = getattr(self, 'valuation_current_data', None) if isinstance(getattr(self, 'valuation_current_data', None), dict) else {}
+        if not payload:
+            self.set_status_text(self.valuation_status_label, 'Load a ticker before re-deriving assumptions.', status='warning')
+            return
+        self._valuation_apply_derived_assumptions(payload)
+        self._valuation_recalculate_from_controls()
+        self.set_status_text(self.valuation_status_label, 'Re-derived every assumption from the loaded data.', status='positive')
 
     def _valuation_apply_assumptions_to_controls(self, assumptions: Any) -> None:
         values = normalize_valuation_assumptions(assumptions)
@@ -933,23 +899,6 @@ class ValuationMixin:
         finally:
             self._valuation_assumption_guard = False
         self._valuation_update_dynamic_assumption_rows()
-
-    def _valuation_apply_payload_basis(self, payload: dict[str, Any]) -> None:
-        metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
-        basis_value = metrics.get('basis_value')
-        if basis_value is None or basis_value <= 0:
-            return
-        current_ticker = str(payload.get('ticker', '') or '').upper().strip()
-        saved_by_ticker = getattr(self, 'valuation_page_state', {}).get('assumptions_by_ticker', {})
-        saved = saved_by_ticker.get(current_ticker) if isinstance(saved_by_ticker, dict) else None
-        if isinstance(saved, dict) and self._valuation_float(saved.get('basis_value')) not in {None, 0.0}:
-            self._valuation_apply_assumptions_to_controls(saved)
-        else:
-            values = normalize_valuation_assumptions(saved if isinstance(saved, dict) else DEFAULT_VALUATION_ASSUMPTIONS)
-            values['basis_type'] = metrics.get('basis_type') or values['basis_type']
-            values['basis_value'] = float(basis_value)
-            self._valuation_apply_assumptions_to_controls(values)
-        self.valuation_assumption_ticker = current_ticker
 
     def load_valuation_data(self, *_: Any, update_collection_info: bool = True) -> bool | None:
         ticker = self._valuation_current_ticker()
@@ -1022,12 +971,15 @@ class ValuationMixin:
         self.valuation_load_btn.setEnabled(True)
         self.set_status_text(self.valuation_status_label, f'Valuation load failed: {message}', status='negative')
 
-    def update_valuation_page(self, payload: dict[str, Any], *, update_collection_info: bool = True, status_text: str | None = None) -> None:
+    def update_valuation_page(self, payload: dict[str, Any], *, update_collection_info: bool = True, status_text: str | None = None, derive_assumptions: bool = True) -> None:
         self.valuation_current_data = payload
         ticker = str(payload.get('ticker') or self._valuation_current_ticker() or 'NVDA').upper().strip()
         self.valuation_ticker_input.setText(ticker)
         self._valuation_sync_custom_peer_list(ticker)
-        self._valuation_apply_payload_basis(payload)
+        if derive_assumptions:
+            self._valuation_apply_derived_assumptions(payload)
+        else:
+            self.valuation_assumption_ticker = ticker
         self.valuation_loaded_ticker = ticker
         self._valuation_render_snapshot(payload)
         self._valuation_render_metrics(payload)
@@ -1073,15 +1025,45 @@ class ValuationMixin:
         self.valuation_sector_label.setToolTip(self.valuation_sector_label.text())
         self.valuation_refresh_label.setText(f'Last refreshed {fetched_at}')
 
+    #: Ratios this page derives by dividing a quoted figure by a reported one. The worker withholds
+    #: them outright when the two currencies differ, so they are the ones that need the explanation.
+    _VALUATION_CROSSED_METRIC_KEYS = frozenset({'pe', 'ps', 'ev_ebitda', 'fcf_yield', 'earnings_yield'})
+
     def _valuation_render_metrics(self, payload: dict[str, Any]) -> None:
         metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
+        mismatch = bool(metrics.get('currency_mismatch'))
         for _label, key, kind in self._VALUATION_METRIC_DEFS:
             value_label, sub_label = self.valuation_metric_values[key]
             if kind == 'pct':
                 value_label.setText(self._valuation_pct(metrics.get(key)))
             else:
                 value_label.setText(self._valuation_ratio(metrics.get(key)))
-            sub_label.setText('computed' if key in {'pe', 'ps', 'ev_ebitda', 'fcf_yield', 'earnings_yield'} else 'quote/statements')
+            crossed = key in self._VALUATION_CROSSED_METRIC_KEYS
+            if crossed and mismatch:
+                sub_label.setText('currency mismatch')
+            else:
+                sub_label.setText('computed' if crossed else 'quote/statements')
+
+    def _valuation_currency_warnings(self, metrics: Any) -> list[str]:
+        """Block the price-vs-fair-value comparison when quote and statements disagree on unit.
+
+        ``basis_value`` is per-share and comes off the financial statements; ``price`` comes off the
+        quote. For a foreign listing such as a Korean ADR those are KRW and USD, so the DCF is
+        solved in one currency and compared against a price in another, and every price-relative
+        output - verdict, upside, buy-below, trim-above, the band chart - is nonsense.
+
+        No FX conversion is applied here on purpose. Converting needs a rate source and a
+        per-statement-period date convention; picking one silently would swap a visible error for an
+        invisible one.
+        """
+        if not isinstance(metrics, dict) or not metrics.get('currency_mismatch'):
+            return []
+        quote = str(metrics.get('currency') or '').strip() or 'the quote currency'
+        statement = str(metrics.get('financial_currency') or '').strip() or 'the reporting currency'
+        return [
+            f'Price is quoted in {quote} but the statements report in {statement}, so fair value '
+            'cannot be compared to price. Verdict, upside, and the buy/trim band are withheld.'
+        ]
 
     def _valuation_recalculate_from_controls(self, *_: Any, persist: bool = True) -> None:
         if getattr(self, '_valuation_assumption_guard', False):
@@ -1099,13 +1081,15 @@ class ValuationMixin:
             self._valuation_assumptions_from_controls(),
             history_points=history_points,
             material_warnings=material_warnings,
+            blocking_warnings=self._valuation_currency_warnings(metrics),
         )
         self.valuation_current_scenarios = scenarios
         warnings = [str(item) for item in list(scenarios.get('warnings', []) or []) if str(item or '').strip()]
         invalid = scenarios.get('valid') is False or scenarios.get('base_fair_value') is None
+        blocked = scenarios.get('price_comparison_valid') is False
         self.valuation_validation_label.setText(' '.join(warnings))
         self.valuation_validation_label.setVisible(bool(warnings))
-        self.set_theme_role(self.valuation_validation_label, 'status_negative' if invalid else 'status_warning')
+        self.set_theme_role(self.valuation_validation_label, 'status_negative' if invalid or blocked else 'status_warning')
         self._valuation_render_verdict(scenarios, price)
         self._valuation_render_scenarios(scenarios)
         self._valuation_render_fair_value_chart(payload, scenarios)
@@ -1115,10 +1099,11 @@ class ValuationMixin:
 
     def _valuation_render_verdict(self, scenarios: dict[str, Any], price: Any) -> None:
         invalid = scenarios.get('valid') is False or scenarios.get('base_fair_value') is None
-        verdict = scenarios.get('verdict') or ('--' if invalid else 'Too uncertain')
+        blocked = scenarios.get('price_comparison_valid') is False
+        verdict = scenarios.get('verdict') or ('--' if invalid else 'Not comparable' if blocked else 'Too uncertain')
         base_value = scenarios.get('base_fair_value')
         price_value = self._valuation_float(price)
-        upside = (base_value / price_value - 1.0) * 100.0 if base_value is not None and price_value else None
+        upside = (base_value / price_value - 1.0) * 100.0 if base_value is not None and price_value and not blocked else None
         self.valuation_verdict_value.setText(str(verdict))
         self.valuation_verdict_value.setStyleSheet(f'font-size: 15px; font-weight: 800; color: {self._valuation_verdict_color(verdict)};')
         self.valuation_fair_value_label.setText(self._valuation_money(base_value))
@@ -1130,6 +1115,11 @@ class ValuationMixin:
         self.valuation_band_label.setText(f'{self._valuation_money(scenarios.get("buy_below"))} / {self._valuation_money(upper)}')
         if invalid:
             for label in (self.valuation_verdict_value, self.valuation_fair_value_label, self.valuation_upside_label, self.valuation_band_label):
+                label.setText('--')
+        elif blocked:
+            # The fair value itself is sound in the reporting currency, but printing it beside a
+            # quote-currency price invites exactly the comparison that is being blocked.
+            for label in (self.valuation_fair_value_label, self.valuation_upside_label, self.valuation_band_label):
                 label.setText('--')
 
     def _valuation_render_scenarios(self, scenarios: dict[str, Any]) -> None:
@@ -1171,6 +1161,10 @@ class ValuationMixin:
         x_values = list(range(len(closes)))
         y_values = [float(value) for value in closes.tolist()]
         plot.plot(x_values, y_values, pen=self.theme_pen('info', width=2.0), name='Current price')
+        if scenarios.get('price_comparison_valid') is False:
+            # The band is in the reporting currency and the price line is in the quote currency;
+            # sharing one axis between them is the whole defect this guard exists to avoid.
+            return
         scenario_values = {
             str(row.get('name', '')).casefold(): row.get('fair_value')
             for row in list(scenarios.get('scenarios', []) or [])
@@ -1207,6 +1201,9 @@ class ValuationMixin:
         metrics = payload.get('metrics', {}) if isinstance(payload.get('metrics'), dict) else {}
         eps = self._valuation_float(metrics.get('eps'))
         history = payload.get('price_history')
+        if metrics.get('currency_mismatch'):
+            # Every point on this curve is a quote-currency close over a reporting-currency EPS.
+            return
         if eps is None or eps <= 0 or not isinstance(history, pd.DataFrame) or history.empty or 'Close' not in history.columns:
             return
         closes = pd.to_numeric(history['Close'], errors='coerce').dropna()
@@ -1257,10 +1254,14 @@ class ValuationMixin:
         cash = metrics.get('cash')
         debt = metrics.get('debt')
         net_debt = metrics.get('net_debt')
+        # These three are reported figures rendered with a '$' prefix. Naming the reporting currency
+        # keeps that prefix from reading as a claim when it is not the currency of the quote.
+        statement_currency = str(metrics.get('financial_currency') or '').strip()
+        unit_note = f' - reported in {statement_currency}' if metrics.get('currency_mismatch') and statement_currency else ''
         rows = [
-            ('Cash & equivalents', self._valuation_compact_money(cash), 'Liquidity'),
-            ('Total debt', self._valuation_compact_money(debt), 'Leverage'),
-            ('Net debt', self._valuation_compact_money(net_debt), 'Negative means net cash'),
+            ('Cash & equivalents', self._valuation_compact_money(cash), f'Liquidity{unit_note}'),
+            ('Total debt', self._valuation_compact_money(debt), f'Leverage{unit_note}'),
+            ('Net debt', self._valuation_compact_money(net_debt), f'Negative means net cash{unit_note}'),
             ('Revenue growth', self._valuation_pct(metrics.get('revenue_growth')), 'Latest available'),
             ('Net margin', self._valuation_pct(metrics.get('net_margin')), 'Profitability'),
             ('Beta', self._valuation_ratio(metrics.get('beta')), 'Market sensitivity'),
@@ -1400,7 +1401,12 @@ class ValuationMixin:
             self._valuation_apply_assumptions_to_controls(assumptions)
         restored_data = deserialize_session_value(payload.get('data'))
         if isinstance(restored_data, dict) and restored_data:
-            self.update_valuation_page(restored_data, update_collection_info=False, status_text=f'Restored last valuation session for {ticker or restored_data.get("ticker", "")}.')
+            self.update_valuation_page(
+                restored_data,
+                update_collection_info=False,
+                derive_assumptions=False,
+                status_text=f'Restored last valuation session for {ticker or restored_data.get("ticker", "")}.',
+            )
             return True
         notes = str(payload.get('notes', '') or '')
         if notes:

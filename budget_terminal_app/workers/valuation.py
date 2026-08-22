@@ -4,6 +4,7 @@ from typing import Any
 
 from ..constants import SECTOR_DATA
 from ..dependencies import *
+from ..services.risk_free import fetch_risk_free_snapshot
 from ..services.sec_edgar import fetch_company_bundle, merge_sec_frames
 from ..services.valuation import (
     DEFAULT_VALUATION_ASSUMPTIONS as DEFAULT_VALUATION_ASSUMPTIONS,
@@ -238,6 +239,34 @@ def _first_text(info: dict[str, Any], *keys: str, fallback: str = '') -> str:
     return fallback
 
 
+#: Yahoo quotes a handful of listings in the minor unit (pence, cents, agorot) while the statements
+#: stay in the major unit, and it spells the minor unit by lower-casing the last letter: ``GBp``
+#: against ``GBP``. Those two are 100x apart, so the codes below are compared case-sensitively while
+#: every other pair is compared case-insensitively.
+MINOR_UNIT_CURRENCY_CODES = frozenset({'GBp', 'ZAc', 'ILA'})
+
+
+def _currency_code(value: Any) -> str:
+    """Return one Yahoo currency code, or '' when the field is missing or not a code."""
+    text = str(value or '').strip()
+    return text if text.isalpha() and 2 <= len(text) <= 4 else ''
+
+
+def _currencies_agree(quote_currency: str, statement_currency: str) -> bool:
+    """Report whether a quote price and a statement-derived value share a unit.
+
+    An unknown code on either side returns ``True``: a missing ``financialCurrency`` is the common
+    case for US issuers and must not raise a warning on its own.
+    """
+    if not quote_currency or not statement_currency:
+        return True
+    if quote_currency == statement_currency:
+        return True
+    if quote_currency in MINOR_UNIT_CURRENCY_CODES or statement_currency in MINOR_UNIT_CURRENCY_CODES:
+        return False
+    return quote_currency.upper() == statement_currency.upper()
+
+
 def _optional_value(label: str, ticker: str, getter: Any) -> Any:
     try:
         return getter()
@@ -301,6 +330,9 @@ def _extract_metrics(
     *,
     prefer_statements: bool = False,
 ) -> dict[str, Any]:
+    quote_currency = _currency_code(info.get('currency'))
+    statement_currency = _currency_code(info.get('financialCurrency'))
+    currency_mismatch = not _currencies_agree(quote_currency, statement_currency)
     price = _info_value(info, 'currentPrice', 'regularMarketPrice', 'previousClose')
     if price is None and isinstance(price_history, pd.DataFrame) and not price_history.empty and 'Close' in price_history.columns:
         price = _safe_float(price_history['Close'].dropna().iloc[-1])
@@ -349,21 +381,28 @@ def _extract_metrics(
     cash = _prefer_number(reported_cash, info_cash) if prefer_statements else _prefer_number(info_cash, reported_cash)
     debt = _prefer_number(reported_debt, info_debt) if prefer_statements else _prefer_number(info_debt, reported_debt)
     enterprise_value = _info_value(info, 'enterpriseValue')
-    if enterprise_value is None and market_cap is not None:
+    if enterprise_value is None and market_cap is not None and not currency_mismatch:
+        # market_cap is quoted, debt and cash are reported: summing them across a currency split
+        # would produce a number with no unit at all.
         enterprise_value = market_cap + (debt or 0.0) - (cash or 0.0)
     basis_value = fcf_per_share if fcf_per_share is not None and fcf_per_share > 0 else eps
     basis_type = 'FCF' if fcf_per_share is not None and fcf_per_share > 0 else 'EPS'
-    pe = price / eps if price is not None and eps and eps > 0 else None
-    earnings_yield = eps / price * 100.0 if price and eps and eps > 0 else None
-    fcf_yield = free_cash_flow / market_cap * 100.0 if free_cash_flow is not None and market_cap else None
-    ps = market_cap / revenue if market_cap and revenue and revenue > 0 else None
-    ev_ebitda = enterprise_value / ebitda if enterprise_value and ebitda and ebitda > 0 else None
+    # Every ratio below divides a quoted figure by a reported one. When the two currencies differ
+    # the quotient is meaningless, so it is withheld rather than shown at the wrong scale.
+    pe = price / eps if price is not None and eps and eps > 0 and not currency_mismatch else None
+    earnings_yield = eps / price * 100.0 if price and eps and eps > 0 and not currency_mismatch else None
+    fcf_yield = free_cash_flow / market_cap * 100.0 if free_cash_flow is not None and market_cap and not currency_mismatch else None
+    ps = market_cap / revenue if market_cap and revenue and revenue > 0 and not currency_mismatch else None
+    ev_ebitda = enterprise_value / ebitda if enterprise_value and ebitda and ebitda > 0 and not currency_mismatch else None
     net_margin = net_income / revenue * 100.0 if net_income is not None and revenue else None
     return {
         'ticker': ticker,
         'company_name': _first_text(info, 'longName', 'shortName', fallback=ticker),
         'sector': _first_text(info, 'sector', fallback='N/A'),
         'industry': _first_text(info, 'industry', fallback='N/A'),
+        'currency': quote_currency or None,
+        'financial_currency': statement_currency or None,
+        'currency_mismatch': currency_mismatch,
         'price': price,
         'previous_close': _info_value(info, 'previousClose'),
         'market_cap': market_cap,
@@ -394,6 +433,47 @@ def _extract_metrics(
         'revenue_growth': (_info_value(info, 'revenueGrowth') * 100.0) if _info_value(info, 'revenueGrowth') is not None else None,
         'beta': _info_value(info, 'beta'),
     }
+
+
+def _estimate_row_value(frame: Any, period: str, column: str) -> float | None:
+    """Read one cell from a Yahoo analyst-estimate frame, tolerating every missing piece."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty or column not in frame.columns:
+        return None
+    if period not in frame.index:
+        return None
+    try:
+        return _safe_float(frame.loc[period, column])
+    except Exception:
+        return None
+
+
+def _analyst_estimates(earnings_estimate: Any, growth_estimates: Any) -> dict[str, Any]:
+    """Normalize Yahoo's analyst trend frames into plain percentages.
+
+    Yahoo reports these growth figures as decimal fractions, so every value is scaled by 100
+    here - the valuation service works in percentage points throughout.
+    """
+    # yfinance 1.5.2 labels the long-term row 'LTG'; older builds used '+5y'. Yahoo leaves the
+    # stock's own long-term trend empty for most tickers, so this leg is usually absent and the
+    # next-year estimate carries the blend.
+    long_term = _estimate_row_value(growth_estimates, 'LTG', 'stockTrend')
+    if long_term is None:
+        long_term = _estimate_row_value(growth_estimates, '+5y', 'stockTrend')
+    next_year = _estimate_row_value(earnings_estimate, '+1y', 'growth')
+    current_year = _estimate_row_value(earnings_estimate, '0y', 'growth')
+    analyst_count = _estimate_row_value(earnings_estimate, '+1y', 'numberOfAnalysts')
+    estimates = {
+        'long_term_growth_pct': long_term * 100.0 if long_term is not None else None,
+        'next_year_growth_pct': next_year * 100.0 if next_year is not None else None,
+        'current_year_growth_pct': current_year * 100.0 if current_year is not None else None,
+        'analyst_count': int(analyst_count) if analyst_count is not None else None,
+        'source': 'Yahoo analyst earnings trend',
+    }
+    estimates['available'] = any(
+        estimates[key] is not None
+        for key in ('long_term_growth_pct', 'next_year_growth_pct', 'current_year_growth_pct')
+    )
+    return estimates
 
 
 def _build_trends(financials: Any, cashflow: Any, metrics: dict[str, Any]) -> dict[str, Any]:
@@ -644,6 +724,11 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
     quarterly_financials = _optional_value('quarterly financials', symbol, lambda: ticker_obj.quarterly_financials)
     quarterly_cashflow = _optional_value('quarterly cashflow', symbol, lambda: ticker_obj.quarterly_cashflow)
     quarterly_balance_sheet = _optional_value('quarterly balance sheet', symbol, lambda: ticker_obj.quarterly_balance_sheet)
+    market_context = _optional_value('risk-free rate', symbol, fetch_risk_free_snapshot)
+    # earnings_estimate first: it warms the shared earningsTrend cache that growth_estimates reuses.
+    earnings_estimate = _optional_value('analyst earnings estimate', symbol, lambda: ticker_obj.earnings_estimate)
+    growth_estimates = _optional_value('analyst growth estimates', symbol, lambda: ticker_obj.growth_estimates)
+    analyst_estimates = _analyst_estimates(earnings_estimate, growth_estimates)
     try:
         sec_bundle = fetch_company_bundle(symbol)
     except Exception as exc:
@@ -718,7 +803,14 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
         raise ValueError(f"No quote data found for '{symbol}'. Check the ticker symbol.")
     peer_rows, peer_warnings = _build_peer_rows(symbol, info, normalized_custom_peers) if include_peers else ([], [])
     trends = _build_trends(financials, cashflow, metrics)
-    suggestions = derive_valuation_suggestions(metrics, trends, metrics.get('basis_type'))
+    suggestions = derive_valuation_suggestions(
+        metrics,
+        trends,
+        metrics.get('basis_type'),
+        market=market_context,
+        analyst=analyst_estimates,
+        peer_rows=peer_rows,
+    )
     suggested_assumptions = {
         key: detail.get('value')
         for key, detail in suggestions.get('fields', {}).items()
@@ -755,6 +847,8 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
         'quarterly_cashflow': quarterly_cashflow,
         'quarterly_balance_sheet': quarterly_balance_sheet,
         'trends': trends,
+        'market_context': market_context,
+        'analyst_estimates': analyst_estimates,
         'valuation_suggestions': suggestions,
         'assumption_suggestions': suggestions,
         'suggested_assumptions': suggested_assumptions,
@@ -772,12 +866,23 @@ def fetch_company_analysis_payload(ticker: Any, custom_peers: Any=None, *, inclu
             'quote': 'yfinance quote/history',
             'statements': 'SEC EDGAR XBRL with yfinance fallback' if sec_backed else 'yfinance financial statements',
             'computed': 'Computed from quote, statements, and assumptions',
-            'suggestions': (
-                'SEC-backed consecutive annual statements and Yahoo quote metadata; '
-                'required return is a transparent heuristic'
+            'suggestions': '; '.join([
+                'SEC-backed consecutive annual statements and Yahoo quote metadata'
                 if sec_backed
-                else 'Consecutive annual statements and quote metadata; required return is a transparent heuristic'
-            ),
+                else 'Consecutive annual statements and Yahoo quote metadata',
+                (
+                    f'{market_context.get("tenor", "10Y")} Treasury yield '
+                    f'({market_context.get("freshness", "fresh")}) for CAPM'
+                    if isinstance(market_context, dict)
+                    else 'no risk-free rate, so the required return falls back to a heuristic'
+                ),
+                (
+                    'Yahoo analyst earnings trend for near-term growth'
+                    if analyst_estimates.get('available')
+                    else 'no analyst estimates'
+                ),
+                f'{len(peer_rows)} peer rows for the exit multiple',
+            ]),
         },
     }
 

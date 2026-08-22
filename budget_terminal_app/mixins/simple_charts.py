@@ -1187,4 +1187,7 @@ class SimpleChartsMixin:
             )
         for button in getattr(self, 'p2_expand_buttons', []):
             button.setEnabled(True)
+        # Record the geometry these plots were actually drawn at, so _p2_refresh_chart_density can
+        # tell a real reflow from a redundant rerender.
+        self._p2_chart_render_geometry = self._p2_chart_geometry_signature()
         self._p2_sync_periods_availability()
