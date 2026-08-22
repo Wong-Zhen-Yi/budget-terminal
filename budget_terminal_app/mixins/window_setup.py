@@ -74,7 +74,6 @@ class WindowSetupMixin:
         1: 'Portfolio',
         2: 'Personal Finance',
         3: 'Calendar',
-        5: 'Sectors',
         6: 'Heatmap',
         7: 'Stocks',
         8: 'Fundamentals',
@@ -192,8 +191,6 @@ class WindowSetupMixin:
         self.btn_page30.setCheckable(True)
         self.btn_page27 = QPushButton('Up/Down')
         self.btn_page27.setCheckable(True)
-        self.btn_page8 = QPushButton('Sectors')
-        self.btn_page8.setCheckable(True)
         self.btn_page17 = QPushButton('Heatmap')
         self.btn_page17.setCheckable(True)
         self.btn_page15 = QPushButton('Politics')
@@ -240,7 +237,6 @@ class WindowSetupMixin:
             self.btn_page40,
             self.btn_page30,
             self.btn_page17,
-            self.btn_page8,
             self.btn_page34,
             self.btn_page7,
             self.btn_page12,
@@ -963,7 +959,7 @@ class WindowSetupMixin:
             {'index': 2, 'page_attr': 'page6', 'init_method': 'init_page6', 'theme_hook': '_apply_networth_theme'},
             {'index': 3, 'page_attr': 'page7', 'init_method': 'init_page7', 'theme_hook': '_apply_calendar_theme', 'hydrate_hook': '_hydrate_lazy_page7'},
             {'index': 4, 'page_attr': '_retired_page4', 'placeholder_only': True},
-            {'index': 5, 'page_attr': 'page8', 'init_method': 'init_page8', 'theme_hook': '_apply_sectors_theme'},
+            {'index': 5, 'page_attr': '_retired_page5', 'placeholder_only': True},
             {'index': 6, 'page_attr': 'page17', 'init_method': 'init_page17', 'theme_hook': '_apply_spy_heatmap_theme'},
             {'index': 7, 'page_attr': 'page12', 'init_method': 'init_page12', 'theme_hook': '_apply_stocks_theme'},
             {'index': 8, 'page_attr': 'page2', 'init_method': 'init_page2', 'theme_hook': '_apply_fundamentals_theme', 'layout_margins': (10, 10, 10, 10)},

@@ -11,7 +11,6 @@ REFRESH_ROUTE_ARCHITECTURE = {
     1: 'background-coordinated',
     2: 'local-only',
     3: 'background-coordinated',
-    5: 'background-single-flight',
     6: 'background-single-flight',
     7: 'background-single-flight',
     8: 'background-single-flight',
@@ -130,7 +129,6 @@ class WindowLifecycleMixin:
         self._register_page(29, self.btn_page30, on_show=self._p30_on_show if hasattr(self, '_p30_on_show') else None)
         self._register_page(26, self.btn_page27, on_show=self._p27_on_show if hasattr(self, '_p27_on_show') else None)
         self._register_page(33, self.btn_page34, on_show=self._p34_on_show if hasattr(self, '_p34_on_show') else None)
-        self._register_page(5, self.btn_page8, on_show=self._p8_on_show)
         self._register_page(6, self.btn_page17, on_show=self._p17_on_show)
         self._register_page(7, self.btn_page12, on_show=self._stocks_on_show)
         self._register_page(22, self.btn_page23, on_show=self._valuation_on_show if hasattr(self, '_valuation_on_show') else None)
@@ -262,9 +260,6 @@ class WindowLifecycleMixin:
         if hasattr(self, '_p2_relayout_charts') and hasattr(self, 'stacked_widget'):
             if self._is_current_page(getattr(self, 'page2', None)):
                 self._p2_relayout_charts()
-        if hasattr(self, '_p8_relayout_cards') and hasattr(self, 'stacked_widget'):
-            if self._is_current_page(getattr(self, 'page8', None)):
-                self._p8_relayout_cards()
         if (
             (hasattr(self, '_p7_apply_monthly_responsive_layout') or hasattr(self, '_p7_apply_detail_table_widths'))
             and hasattr(self, 'stacked_widget')
@@ -399,21 +394,8 @@ class WindowLifecycleMixin:
         )
         return bool(hidden_full_startup)
 
-    def _run_startup_sectors_prefetch(self) -> None:
-        """Build and refresh the Sectors page after the first startup wave."""
-        if not getattr(self, '_startup_show_completed', False) or not self.isVisible():
-            return
-        logger.info('Startup prefetch loading %s page.', self._page_label(5))
-        self._ensure_page_initialized(5)
-        logger.info('Startup prefetch requesting data for %s page.', self._page_label(5))
-        self._call_if_page_initialized(
-            '_p8_request_refresh',
-            page_attr='page8',
-            status_text='Loading sector data...',
-        )
-
     def _run_startup_heatmap_prefetch(self) -> None:
-        """Build and refresh the Heatmap page after Sectors has started."""
+        """Build and refresh the Heatmap page after the first startup wave."""
         if not self._startup_work_can_run():
             return
         logger.info('Startup prefetch loading %s page.', self._page_label(6))
@@ -494,7 +476,6 @@ class WindowLifecycleMixin:
         return [
             *minimal_specs,
             {'label': 'options expiries', 'method': '_warm_startup_options_expiries'},
-            {'label': 'sector data', 'method': '_warm_startup_sector_data'},
             {'label': 'ETF heatmap', 'method': '_warm_startup_etf_heatmap'},
             {'label': 'ETF holdings', 'method': '_warm_startup_etf_holdings'},
         ]
@@ -619,17 +600,6 @@ class WindowLifecycleMixin:
         self._ensure_page_initialized(1)
         if hasattr(self, '_fetch_portfolio_analytics'):
             self._fetch_portfolio_analytics(force=False)
-
-    def _warm_startup_sector_data(self) -> None:
-        """Warm sector page data using existing throttles."""
-        if not self._startup_work_can_run():
-            return
-        self._ensure_page_initialized(5)
-        self._call_if_page_initialized(
-            '_p8_request_refresh',
-            page_attr='page8',
-            status_text='Warming sector data...',
-        )
 
     def _warm_startup_etf_heatmap(self) -> None:
         """Warm ETF heatmap data using existing throttles."""
@@ -821,8 +791,6 @@ class WindowLifecycleMixin:
             _dispatch('Global', getattr(self, '_p26_request_refresh', None), force=False)
         if hasattr(self, '_fetch_portfolio_analytics'):
             _dispatch('Portfolio metrics', self._fetch_portfolio_analytics, force=False)
-        if self._page_initialized(index=5):
-            _dispatch('Sectors', getattr(self, '_p8_request_refresh', None), force=False, status_text='Loading sector data...')
         if self._page_initialized(index=6):
             _dispatch('Heatmap', getattr(self, '_p17_request_refresh', None), force=False)
         if self._page_initialized(index=7):
@@ -925,7 +893,6 @@ class WindowLifecycleMixin:
             1: 10,
             2: 20,
             4: 30,
-            5: 40,
             6: 45,
             7: 50,
             22: 58,
@@ -1725,10 +1692,6 @@ class WindowLifecycleMixin:
         if current_index == 26:
             if hasattr(self, '_p27_request_refresh'):
                 self._p27_request_refresh(force=True)
-            return
-        if current_index == 5:
-            if hasattr(self, '_p8_request_refresh'):
-                self._p8_request_refresh(force=True, status_text='Refreshing sector data...')
             return
         if current_index == 6:
             if hasattr(self, '_p17_request_refresh'):

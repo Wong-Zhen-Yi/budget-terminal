@@ -24,7 +24,6 @@ from budget_terminal_app.mixins.news import NewsMixin
 from budget_terminal_app.mixins.politics import PoliticsMixin
 from budget_terminal_app.mixins.pre_market import PreMarketMixin
 from budget_terminal_app.mixins.random_recommender import RandomRecommenderMixin
-from budget_terminal_app.mixins.sectors import SectorsMixin
 from budget_terminal_app.mixins.spy_heatmap import SpyHeatmapMixin
 from budget_terminal_app.mixins.stocks_page import StocksPageMixin
 from budget_terminal_app.mixins.strategies_page import StrategiesPageMixin
@@ -89,26 +88,6 @@ class _ValuationProbe(_VisibilityProbe, ValuationMixin):
 
     def update_valuation_page(self, *_args, **_kwargs) -> None:
         self.render_count += 1
-
-
-class _SectorsProbe(_VisibilityProbe, SectorsMixin):
-    def __init__(self) -> None:
-        super().__init__()
-        self.page8 = object()
-        self._p8_all_results = {}
-        self.p8_fetch_in_progress = True
-
-    def _p8_apply_mktcap_cache_updates(self, _updates) -> None:
-        return None
-
-    def _p8_apply_all_data(self, _results) -> None:
-        self.render_count += 1
-
-    def _p8_relayout_cards(self) -> None:
-        return None
-
-    def _p8_request_refresh(self, **_kwargs) -> bool:
-        return False
 
 
 class _HeatmapProbe(_VisibilityProbe, SpyHeatmapMixin):
@@ -357,13 +336,6 @@ def test_refresh_heavy_pages_defer_hidden_results() -> None:
         valuation,
         lambda: valuation._valuation_handle_result(1, {"ticker": "AAPL"}),
         valuation._valuation_on_show,
-    )
-
-    sectors = _SectorsProbe()
-    _assert_hidden_then_visible_once(
-        sectors,
-        lambda: sectors._p8_complete_refresh({"AAPL": object()}),
-        sectors._p8_on_show,
     )
 
     heatmap = _HeatmapProbe()

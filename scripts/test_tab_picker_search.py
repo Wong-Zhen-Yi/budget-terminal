@@ -22,7 +22,7 @@ from budget_terminal_app.persistence import DEFAULT_NAVIGATION_PAGE_ORDER, norma
 
 
 EXPECTED_DEFAULT_NAVIGATION_ORDER = [
-    0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 5, 33, 3, 7, 8,
+    0, 25, 1, 28, 2, 13, 26, 19, 39, 29, 6, 33, 3, 7, 8,
     22, 9, 27, 11, 12, 14, 24, 18, 20, 23, 15, 16, 37, 40, 41, 17,
 ]
 
@@ -54,9 +54,9 @@ def test_default_navigation_order_and_normalization() -> None:
     migrated = normalize_navigation_settings({"page_order": pre_tail_order, "hidden_pages": []})
     assert migrated["page_order"] == EXPECTED_DEFAULT_NAVIGATION_ORDER
 
-    partial_order = [0, 25, 1, 5, 26, 27]
+    partial_order = [0, 25, 1, 6, 26, 27]
     normalized = normalize_navigation_settings({"page_order": partial_order, "hidden_pages": [21, 30]})
-    migrated_partial = [0, 25, 1, 5, 33, 26, 27]
+    migrated_partial = [0, 25, 1, 6, 33, 26, 27]
     assert normalized["page_order"][:len(migrated_partial)] == migrated_partial
     assert normalized["page_order"][len(migrated_partial):] == [
         page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index not in migrated_partial
@@ -90,7 +90,7 @@ def test_default_navigation_order_and_normalization() -> None:
 
     pre_news_order = [page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index != 33]
     migrated = normalize_navigation_settings({"page_order": pre_news_order, "hidden_pages": []})
-    assert migrated["page_order"].index(33) == migrated["page_order"].index(5) + 1
+    assert migrated["page_order"].index(33) == migrated["page_order"].index(6) + 1
 
     stale_game_order = [
         *[page_index for page_index in EXPECTED_DEFAULT_NAVIGATION_ORDER if page_index not in {37, 17}],
@@ -104,9 +104,10 @@ def test_default_navigation_order_and_normalization() -> None:
     assert migrated["hidden_pages"] == []
 
     legacy_news_order = [0, 25, 1, 5, 4, 32, 33, 3, 17]
-    migrated = normalize_navigation_settings({"page_order": legacy_news_order, "hidden_pages": [4, 32]})
-    assert 4 not in migrated["page_order"] and 32 not in migrated["page_order"]
-    assert 4 not in migrated["hidden_pages"] and 32 not in migrated["hidden_pages"]
+    migrated = normalize_navigation_settings({"page_order": legacy_news_order, "hidden_pages": [4, 5, 32]})
+    for retired in (4, 5, 32):
+        assert retired not in migrated["page_order"]
+        assert retired not in migrated["hidden_pages"]
 
 
 def _build_window():

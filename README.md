@@ -69,7 +69,6 @@ Finance is obscured by default (`DEFAULT_PRIVACY_SETTINGS`).
 | Trading Volumes | Most-traded names, with an export-for-LLM action. |
 | Price | Screener of the top names by market cap, as a sortable table and a price-versus-market-cap scatter. |
 | Heatmap | Holdings heatmap for SPY and other ETFs. |
-| Sectors | Sector heat cards with sector averages and a per-sector detail panel. |
 | Calendar | Economic calendar and earnings, on separate tabs. |
 | Economic | Headline US macro releases from FRED: inflation, labour, growth, and the full treasury curve. |
 
