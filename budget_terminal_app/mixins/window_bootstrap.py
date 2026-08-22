@@ -943,8 +943,49 @@ class WindowBootstrapMixin:
             self._apply_startup_window_size()
 
     def _on_invoke_main(self, fn: Any) -> None:
-        """Handle invoke main."""
+        """Run one marshalled callback on the GUI thread.
+
+        Every `_invoke_main.emit` in the app lands here, so this is the one place that can drop
+        late results. Once `closeEvent` has begun tearing pages down, running a queued callback
+        would touch half-destroyed widgets, and the daemon threads and executors that emit these
+        are not joined before the window goes away.
+        """
+        if getattr(self, '_refresh_shutdown', False):
+            return
         fn()
+
+    def _deliver_to_main(self, fn: Any) -> None:
+        """Queue `fn` onto the GUI thread, dropping it if the window is already gone.
+
+        `_invoke_main`'s receiver is a bound method of this window, so Qt queues the emission
+        onto the GUI thread no matter which thread calls this.
+        """
+        try:
+            self._invoke_main.emit(fn)
+        except RuntimeError:
+            # The C++ window went away before the emit.
+            logger.debug('Window closed before a background result could be delivered.')
+
+    def _connect_worker_signal(self, signal: Any, callback: Any, *bound: Any) -> None:
+        """Connect a worker signal so `callback` always runs on the GUI thread.
+
+        A plain callable slot -- a lambda or a partial -- is not a QObject, so Qt has no receiver
+        context to compare thread affinity against and resolves AutoConnection to a
+        DirectConnection. The slot then runs inline inside `emit()`, on the worker thread. That is
+        how valuation's chart render ended up racing the GUI thread inside pyqtgraph and aborting
+        the process with an access violation. Hopping through `_invoke_main` puts the callback
+        back where every widget touch belongs.
+
+        `bound` values are passed to `callback` ahead of the signal's own arguments, matching the
+        `handler(request_id, payload)` shape the call sites used to build with a lambda default
+        argument. Signals with no arguments work too: the callback then sees only `bound`.
+        """
+        def _relay(*args: Any) -> None:
+            # _deliver_to_main, not a bare emit: this runs on the worker thread, where an
+            # unhandled RuntimeError from an already-destroyed window would escape into Qt.
+            self._deliver_to_main(partial(callback, *bound, *args))
+
+        signal.connect(_relay)
 
     def _apply_startup_window_size(self) -> None:
         """Apply one stable startup size after the initial UI has its final size hints."""

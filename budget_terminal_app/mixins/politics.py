@@ -473,8 +473,7 @@ class PoliticsMixin:
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progress.connect(lambda p: self.set_status_text(
-            self.p15_status_lbl, f'Fetching page {p}/5...', status='muted'))
+        self._connect_worker_signal(worker.progress, self._p15_on_export_progress)
         worker.finished.connect(self._p15_on_export_done)
         worker.finished.connect(thread.quit)
         worker.error.connect(self._p15_on_export_error)
@@ -483,6 +482,10 @@ class PoliticsMixin:
         self._p15_export_thread = thread
         self._p15_export_worker = worker
         thread.start()
+
+    def _p15_on_export_progress(self, page: Any) -> None:
+        """Report export progress. Runs on the GUI thread; set_status_text restyles a widget."""
+        self.set_status_text(self.p15_status_lbl, f'Fetching page {page}/5...', status='muted')
 
     def _p15_on_export_done(self, trades: list) -> None:
         self.p15_export_btn.setEnabled(True)

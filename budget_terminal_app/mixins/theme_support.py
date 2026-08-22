@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from budget_terminal_app.compat import *
+from budget_terminal_app.gui_thread import warn_if_off_gui_thread
 from budget_terminal_app.themes import ThemeManager
 
 
@@ -111,7 +112,15 @@ class ThemeSupportMixin:
         }.get(status, self.theme_color("text_muted"))
 
     def style_plot_widget(self, plot: Any, *, show_y_grid: bool = True) -> None:
-        """Apply the active theme to a pyqtgraph plot widget."""
+        """Apply the active theme to a pyqtgraph plot widget.
+
+        Every access violation captured in logs/crashes/native-faults.log passed through this
+        method on a worker thread, on its way into AxisItem.setTextPen. Callers are supposed to
+        marshal to the GUI thread first; if one ever stops doing so, fail loudly in the log
+        instead of silently corrupting the scene graph.
+        """
+        if not warn_if_off_gui_thread('style_plot_widget'):
+            return
         plot.setBackground(self.theme_color("chart_bg"))
         plot.showGrid(x=True, y=show_y_grid, alpha=0.18)
         right_axis = plot.getPlotItem().getAxis("right")

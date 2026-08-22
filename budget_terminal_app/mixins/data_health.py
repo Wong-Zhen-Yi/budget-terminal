@@ -4,14 +4,7 @@ from typing import Any
 
 from budget_terminal_app.compat import *
 from budget_terminal_app.data_service.results import market_data_errors, market_data_meta
-
-
-def _on_gui_thread() -> bool:
-    """Return whether the caller is running on the thread that owns the widgets."""
-    app = QApplication.instance()
-    if app is None:
-        return True
-    return QThread.currentThread() is app.thread()
+from budget_terminal_app.gui_thread import on_gui_thread as _on_gui_thread
 
 
 class DataHealthMixin:

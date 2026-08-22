@@ -865,21 +865,21 @@ class RandomRecommenderMixin:
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         if hasattr(worker, 'progress'):
-            worker.progress.connect(lambda update, req=request_id: self._p18_handle_progress(req, update))
+            self._connect_worker_signal(worker.progress, self._p18_handle_progress, request_id)
         if hasattr(worker, 'partial'):
-            worker.partial.connect(lambda update, req=request_id: self._p18_handle_partial(req, update))
-        worker.finished.connect(lambda payload, req=request_id: self._p18_handle_result(req, payload))
+            self._connect_worker_signal(worker.partial, self._p18_handle_partial, request_id)
+        self._connect_worker_signal(worker.finished, self._p18_handle_result, request_id)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        worker.error.connect(lambda message, req=request_id: self._p18_handle_error(req, message))
+        self._connect_worker_signal(worker.error, self._p18_handle_error, request_id)
         worker.error.connect(thread.quit)
         worker.error.connect(worker.deleteLater)
         if hasattr(worker, 'cancelled'):
-            worker.cancelled.connect(lambda req=request_id: self._p18_handle_cancelled(req))
+            self._connect_worker_signal(worker.cancelled, self._p18_handle_cancelled, request_id)
             worker.cancelled.connect(thread.quit)
             worker.cancelled.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda req=request_id, w=worker, t=thread: self._p18_cleanup_worker_refs(req, w, t))
+        self._connect_worker_signal(thread.finished, self._p18_cleanup_worker_refs, request_id, worker, thread)
         thread.start()
 
     def _p18_excluded_symbols(self) -> list[str]:

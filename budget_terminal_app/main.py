@@ -201,6 +201,13 @@ def _run_primary_application(
                 logger.exception('Failed to show the main window after startup preparation.')
                 _detach_startup_log_handler()
                 loading_screen.close()
+                # app.exit() leaves the event loop without ever delivering closeEvent, so the
+                # worker-thread drain would be skipped and a still-running QThread would abort the
+                # process on interpreter shutdown. Close the window first so it runs.
+                try:
+                    window.close()
+                except Exception:
+                    logger.exception('Unable to close the main window during failed startup.')
                 app.exit(1)
 
         def _start_hidden_startup() -> None:

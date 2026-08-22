@@ -449,14 +449,14 @@ class EconomicPageMixin:
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._p42_on_fetch_progress)
-        worker.finished.connect(lambda payload, item=token: self._p42_on_data_ready(item, payload))
-        worker.error.connect(lambda message, item=token: self._p42_on_fetch_error(item, message))
-        worker.cancelled.connect(lambda item=token: self._p42_on_fetch_cancelled(item))
+        self._connect_worker_signal(worker.finished, self._p42_on_data_ready, token)
+        self._connect_worker_signal(worker.error, self._p42_on_fetch_error, token)
+        self._connect_worker_signal(worker.cancelled, self._p42_on_fetch_cancelled, token)
         for signal in (worker.finished, worker.error, worker.cancelled):
             signal.connect(thread.quit)
             signal.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda w=worker, t=thread: self._p42_cleanup_worker(w, t))
+        self._connect_worker_signal(thread.finished, self._p42_cleanup_worker, worker, thread)
         self._p42_worker = worker
         self._p42_thread = thread
         self._p42_active_token = token

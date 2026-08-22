@@ -920,18 +920,16 @@ class FundamentalsSetupMixin:
         self.p2_fund_threads[slot] = thread
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(lambda data, req=request_id: self._p2_handle_result(req, data))
+        self._connect_worker_signal(worker.finished, self._p2_handle_result, request_id)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        worker.error.connect(lambda msg, req=request_id: self._page2_error(req, msg))
+        self._connect_worker_signal(worker.error, self._page2_error, request_id)
         worker.error.connect(thread.quit)
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        # The slot travels through the lambda because _p2_handle_result pops the request context
-        # before thread.finished fires, so it cannot be recovered from there.
-        thread.finished.connect(
-            lambda s=slot, req=request_id, w=worker, t=thread: self._p2_cleanup_worker_refs(s, req, w, t)
-        )
+        # The slot is bound here because _p2_handle_result pops the request context before
+        # thread.finished fires, so it cannot be recovered from there.
+        self._connect_worker_signal(thread.finished, self._p2_cleanup_worker_refs, slot, request_id, worker, thread)
         thread.start()
 
     def _p2_apply_compare(self, *_: Any) -> None:

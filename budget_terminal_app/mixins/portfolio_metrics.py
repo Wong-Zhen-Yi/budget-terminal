@@ -50,7 +50,6 @@ from budget_terminal_app.services.portfolio_analysis import (
     filtered_weights,
     margin_utilization,
     returns_cache_key,
-    settle_trade,
 )
 from budget_terminal_app.table_cells import TableCell
 from budget_terminal_app.widgets.batched_render import run_batched
@@ -1153,15 +1152,6 @@ class PortfolioMetricsMixin:
         elif hasattr(self, '_p6_populate_tables'):
             self._p6_populate_tables(force_progress_rebuild=True)
 
-    def _p4_tracker_entry_cost(self, tracker_entry: Any) -> float:
-        """Return one tracker entry's cost basis (shares times average price)."""
-        entry = tracker_entry if isinstance(tracker_entry, dict) else {}
-        try:
-            cost = float(entry.get('shares', 0) or 0) * float(entry.get('avg_price', 0) or 0)
-        except (TypeError, ValueError):
-            return 0.0
-        return cost if math.isfinite(cost) else 0.0
-
     def _p4_margin_utilization_percent(self, metrics_map: Any) -> float | None:
         """Return margin debt as a percent of gross assets for the active portfolio."""
         metrics = metrics_map if isinstance(metrics_map, dict) else {}
@@ -1193,55 +1183,6 @@ class PortfolioMetricsMixin:
                 f'QDoubleSpinBox[bt_role="cash_input"] {{ color: {color}; }}'
                 if percent is not None else ''
             )
-
-    def _p4_apply_trade_cash_flow(self, cost_delta: Any, ticker: Any = '') -> None:
-        """Settle a position's cost-basis change against brokerage cash, then margin."""
-        if getattr(self, '_p4_active_portfolio_is_combined', lambda: False)():
-            return
-        try:
-            delta = float(cost_delta or 0.0)
-        except (TypeError, ValueError):
-            return
-        if not math.isfinite(delta) or delta == 0.0:
-            return
-        previous_cash = self._p4_active_cash_balance()
-        previous_margin = self._p4_active_margin_debt()
-        cash, margin = settle_trade(previous_cash, previous_margin, delta)
-        if cash == previous_cash and margin == previous_margin:
-            return
-        self.active_cash_balance = cash
-        self.active_margin_debt = margin
-        entry = self._get_portfolio_entry(self.active_portfolio_id)
-        entry['cash_balance'] = cash
-        entry['margin_debt'] = margin
-        if self.active_portfolio_id == self.main_portfolio_id:
-            self.cash_balance = cash
-        self._persist_all_portfolios()
-        self._p4_sync_cash_input()
-        self._p4_invalidate_momentum_cache()
-        self._p4_invalidate_portfolio_analytics_cache()
-        self._p4_refresh_personal_finance_tables()
-        self._p4_report_trade_cash_flow(ticker, previous_cash - cash, margin - previous_margin)
-
-    def _p4_report_trade_cash_flow(self, ticker: Any, cash_used: float, margin_added: float) -> None:
-        """Announce an automatic cash/margin settlement so an accidental edit stays visible."""
-        status_bar = getattr(self, 'status_bar', None)
-        if status_bar is None or not hasattr(self, 'set_status_text'):
-            return
-        symbol = str(ticker or '').strip().upper()
-        parts = []
-        if abs(cash_used) >= 0.005:
-            parts.append(f'{self._p4_signed_currency_text(-cash_used)} cash')
-        if abs(margin_added) >= 0.005:
-            parts.append(f'{self._p4_signed_currency_text(margin_added)} margin')
-        if not parts:
-            return
-        prefix = f'{symbol}: ' if symbol else ''
-        self.set_status_text(
-            status_bar,
-            f'{prefix}{", ".join(parts)}',
-            status='warning' if margin_added > 0.0 else 'info',
-        )
 
     def _p4_update_margin_dependent_views(self) -> None:
         """Refresh displays whose net values include margin debt."""
@@ -2079,9 +2020,7 @@ class PortfolioMetricsMixin:
             self._p4_begin_position_entry(ticker, col)
         tracker_data = self._p4_active_tracker_data()
         tracker_entry = tracker_data.setdefault(ticker, {})
-        previous_cost = self._p4_tracker_entry_cost(tracker_entry)
         tracker_entry['shares' if col == P4_PORTFOLIO_COL_SHARES else 'avg_price'] = val
-        self._p4_apply_trade_cash_flow(self._p4_tracker_entry_cost(tracker_entry) - previous_cost, ticker)
         self._persist_all_portfolios()
         if self.last_data:
             self._recalc_tracker_row(row, ticker, self.last_data.get('portfolio', {}))
@@ -2355,12 +2294,8 @@ class PortfolioMetricsMixin:
             return
         tickers.remove(matched_ticker)
         tracker_data = self._p4_active_tracker_data()
-        removed_cost = self._p4_tracker_entry_cost(
-            tracker_data.get(matched_ticker) or tracker_data.get(clean_ticker)
-        )
         tracker_data.pop(matched_ticker, None)
         tracker_data.pop(clean_ticker, None)
-        self._p4_apply_trade_cash_flow(-removed_cost, clean_ticker)
         self._p4_invalidate_returns_cache()
         self._p4_invalidate_momentum_cache()
         self._p4_invalidate_portfolio_analytics_cache()

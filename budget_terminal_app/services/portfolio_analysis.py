@@ -81,28 +81,6 @@ def filtered_summary(
     }
 
 
-def settle_trade(cash_balance: Any, margin_debt: Any, cost_delta: Any) -> tuple[float, float]:
-    """Settle a cost-basis change against cash first, then margin.
-
-    A positive ``cost_delta`` (a buy) draws down cash and borrows the shortfall on margin.
-    A negative ``cost_delta`` (a sell) repays margin debt first and credits the rest to cash.
-    """
-    cash = _positive_amount(cash_balance)
-    margin = _positive_amount(margin_debt)
-    try:
-        delta = float(cost_delta or 0.0)
-    except (TypeError, ValueError):
-        delta = 0.0
-    if not math.isfinite(delta) or delta == 0.0:
-        return cash, margin
-    if delta > 0.0:
-        from_cash = min(cash, delta)
-        return cash - from_cash, margin + (delta - from_cash)
-    proceeds = -delta
-    repaid = min(margin, proceeds)
-    return cash + (proceeds - repaid), margin - repaid
-
-
 def margin_utilization(stock_market_value: Any, cash_balance: Any, margin_debt: Any) -> float | None:
     """Return margin debt as a percent of gross assets, or None when there is nothing to report."""
     margin = _positive_amount(margin_debt)

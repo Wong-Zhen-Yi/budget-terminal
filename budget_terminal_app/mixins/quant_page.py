@@ -482,14 +482,14 @@ class QuantPageMixin:
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._p41_on_scan_progress)
-        worker.finished.connect(lambda payload, item=token: self._p41_on_scan_ready(item, payload))
-        worker.error.connect(lambda message, item=token: self._p41_on_scan_error(item, message))
-        worker.cancelled.connect(lambda item=token: self._p41_on_scan_cancelled(item))
+        self._connect_worker_signal(worker.finished, self._p41_on_scan_ready, token)
+        self._connect_worker_signal(worker.error, self._p41_on_scan_error, token)
+        self._connect_worker_signal(worker.cancelled, self._p41_on_scan_cancelled, token)
         for signal in (worker.finished, worker.error, worker.cancelled):
             signal.connect(thread.quit)
             signal.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda w=worker, t=thread: self._p41_cleanup_worker(w, t))
+        self._connect_worker_signal(thread.finished, self._p41_cleanup_worker, worker, thread)
         self._p41_worker = worker
         self._p41_thread = thread
         self._p41_active_token = token

@@ -924,14 +924,14 @@ class ValuationMixin:
         self.valuation_thread = thread
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(lambda payload, req=request_id: self._valuation_handle_result(req, payload))
+        self._connect_worker_signal(worker.finished, self._valuation_handle_result, request_id)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        worker.error.connect(lambda message, req=request_id: self._valuation_handle_error(req, message))
+        self._connect_worker_signal(worker.error, self._valuation_handle_error, request_id)
         worker.error.connect(thread.quit)
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda req=request_id, w=worker, t=thread: self._valuation_cleanup_worker_refs(req, w, t))
+        self._connect_worker_signal(thread.finished, self._valuation_cleanup_worker_refs, request_id, worker, thread)
         thread.start()
 
     def _valuation_cleanup_worker_refs(self, request_id: int, worker: Any, thread: Any) -> None:

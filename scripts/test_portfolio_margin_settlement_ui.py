@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from PySide6.QtWidgets import QTableWidgetItem
 
 from budget_terminal_app.constants import P4_PORTFOLIO_COL_AVG_PRICE, P4_PORTFOLIO_COL_SHARES, P4_PORTFOLIO_COL_SYMBOL
-from budget_terminal_app.persistence import COMBINED_PORTFOLIO_ID, _normalize_multi_portfolio_state
+from budget_terminal_app.persistence import _normalize_multi_portfolio_state
 from scripts.test_tab_picker_search import _build_window
 
 
@@ -81,29 +81,11 @@ def _refresh_summary(window):
     return metrics_map
 
 
-def test_settlement_draws_cash_then_margin() -> None:
-    _app, window = _prepare()
-    try:
-        _assert(_balances(window) == (10000.0, 0.0), "unexpected starting balances")
-
-        window._p4_apply_trade_cash_flow(20 * 150.0, "AAPL")
-        _assert(_balances(window) == (7000.0, 0.0), "a covered buy should only draw cash")
-        _assert(window.p4_cash_input.value() == 7000.0, "cash spinbox should track the settlement")
-
-        window._p4_apply_trade_cash_flow(80 * 150.0, "AAPL")
-        _assert(_balances(window) == (0.0, 5000.0), "an overdrawing buy should borrow the shortfall")
-        _assert(window.p4_margin_input.value() == 5000.0, "margin spinbox should track the settlement")
-
-        window._p4_apply_trade_cash_flow(-(80 * 150.0), "AAPL")
-        _assert(_balances(window) == (7000.0, 0.0), "a sell should repay margin before crediting cash")
-    finally:
-        window.close()
-
-
 def test_margin_utilization_label() -> None:
     _app, window = _prepare()
     try:
-        window._p4_apply_trade_cash_flow(100 * 150.0, "AAPL")
+        window._p4_set_active_cash_balance(0.0)
+        window._p4_set_active_margin_debt(5000.0)
         window.active_tracker_data["AAPL"] = {"shares": 100, "avg_price": 150.0}
         metrics_map = _refresh_summary(window)
 
@@ -114,58 +96,64 @@ def test_margin_utilization_label() -> None:
         # 33.3% falls in the 25-40 orange band.
         _assert("#ff8f5a" in window.p4_margin_pct_label.styleSheet().lower(), "expected the orange band colour")
 
-        window._p4_apply_trade_cash_flow(-(100 * 150.0), "AAPL")
+        window._p4_set_active_margin_debt(0.0)
         _refresh_summary(window)
         _assert(window.p4_margin_pct_label.isHidden(), "percent label should hide once margin is repaid")
     finally:
         window.close()
 
 
-def test_cell_edits_settle_and_renders_do_not() -> None:
+def test_cell_edits_do_not_move_money() -> None:
     _app, window = _prepare()
     try:
         table = window.p4_table
         row = _stock_row(window, "AAPL")
-        _assert(_balances(window) == (10000.0, 0.0), "rendering the table must not move money")
+        _assert(_balances(window) == (10000.0, 0.0), "unexpected starting balances")
 
         table.setItem(row, P4_PORTFOLIO_COL_AVG_PRICE, QTableWidgetItem("150"))
         table.setItem(row, P4_PORTFOLIO_COL_SHARES, QTableWidgetItem("20"))
-        _assert(_balances(window) == (7000.0, 0.0), "typing a position should draw its cost basis from cash")
+        _assert(_balances(window) == (10000.0, 0.0), "typing a position must not draw cash or open margin")
 
         table.setItem(row, P4_PORTFOLIO_COL_SHARES, QTableWidgetItem("100"))
-        _assert(_balances(window) == (0.0, 5000.0), "increasing shares should borrow the shortfall")
+        _assert(_balances(window) == (10000.0, 0.0), "increasing shares must not borrow on margin")
 
         table.setItem(row, P4_PORTFOLIO_COL_SHARES, QTableWidgetItem("20"))
-        _assert(_balances(window) == (7000.0, 0.0), "reducing shares should repay margin first")
+        _assert(_balances(window) == (10000.0, 0.0), "reducing shares must not credit cash")
+
+        entry = window._get_portfolio_entry("portfolio_1")
+        _assert(
+            float(entry["portfolio_tracker"]["AAPL"]["shares"]) == 20.0,
+            "the edited share count should still persist",
+        )
 
         window.update_page4(window.last_data)
-        _assert(_balances(window) == (7000.0, 0.0), "a re-render must not trigger a phantom settlement")
+        _assert(_balances(window) == (10000.0, 0.0), "a re-render must not move money either")
     finally:
         window.close()
 
 
-def test_removing_a_position_returns_capital() -> None:
+def test_removing_a_position_does_not_move_money() -> None:
     _app, window = _prepare()
     try:
         window.active_tracker_data["AAPL"] = {"shares": 20, "avg_price": 150.0}
-        window._p4_apply_trade_cash_flow(20 * 150.0, "AAPL")
-        _assert(_balances(window) == (7000.0, 0.0), "unexpected balances before removal")
+        _assert(_balances(window) == (10000.0, 0.0), "unexpected balances before removal")
 
         window._p4_remove_active_ticker("AAPL")
-        _assert(_balances(window) == (10000.0, 0.0), "removing a position should return its capital")
+        _assert(_balances(window) == (10000.0, 0.0), "removing a position must leave cash and margin alone")
+        _assert("AAPL" not in window._p4_active_tickers(), "the ticker should still be removed")
     finally:
         window.close()
 
 
-def test_combined_portfolio_does_not_settle() -> None:
+def test_manual_balances_still_persist() -> None:
     _app, window = _prepare()
     try:
-        window.active_portfolio_id = COMBINED_PORTFOLIO_ID
-        if not window._p4_active_portfolio_is_combined():
-            return
-        before = window._p4_active_cash_balance()
-        window._p4_apply_trade_cash_flow(500.0, "AAPL")
-        _assert(window._p4_active_cash_balance() == before, "the read-only Combined portfolio must not settle")
+        window._p4_set_active_cash_balance(2500.0)
+        window._p4_set_active_margin_debt(750.0)
+        _assert(_balances(window) == (2500.0, 750.0), "the spin-box setters should persist to the portfolio entry")
+        window._p4_sync_cash_input()
+        _assert(window.p4_cash_input.value() == 2500.0, "cash spinbox should show the stored balance")
+        _assert(window.p4_margin_input.value() == 750.0, "margin spinbox should show the stored debt")
     finally:
         window.close()
 
@@ -175,7 +163,7 @@ def main() -> None:
         if name.startswith("test_") and callable(func):
             func()
             print(f"ok {name}")
-    print("portfolio margin settlement UI smoke passed")
+    print("portfolio cash and margin UI smoke passed")
 
 
 if __name__ == "__main__":

@@ -198,14 +198,14 @@ class SignalScanner2PageMixin:
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._p40_on_scan_progress)
-        worker.finished.connect(lambda payload, item=token: self._p40_on_scan_ready(item, payload))
-        worker.error.connect(lambda message, item=token: self._p40_on_scan_error(item, message))
-        worker.cancelled.connect(lambda item=token: self._p40_on_scan_cancelled(item))
+        self._connect_worker_signal(worker.finished, self._p40_on_scan_ready, token)
+        self._connect_worker_signal(worker.error, self._p40_on_scan_error, token)
+        self._connect_worker_signal(worker.cancelled, self._p40_on_scan_cancelled, token)
         for signal in (worker.finished, worker.error, worker.cancelled):
             signal.connect(thread.quit)
             signal.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda w=worker, t=thread: self._p40_cleanup_worker(w, t))
+        self._connect_worker_signal(thread.finished, self._p40_cleanup_worker, worker, thread)
         self._p40_worker = worker
         self._p40_thread = thread
         self._p40_active_token = token

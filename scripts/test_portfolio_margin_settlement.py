@@ -8,37 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from budget_terminal_app.mixins.portfolio_presenters import margin_health_color_token
-from budget_terminal_app.services.portfolio_analysis import margin_utilization, settle_trade
-
-
-def test_buy_covered_by_cash() -> None:
-    assert settle_trade(10000.0, 0.0, 4000.0) == (6000.0, 0.0)
-
-
-def test_buy_overdraws_into_margin() -> None:
-    assert settle_trade(1000.0, 0.0, 5000.0) == (0.0, 4000.0)
-
-
-def test_buy_with_margin_already_open() -> None:
-    assert settle_trade(0.0, 4000.0, 1000.0) == (0.0, 5000.0)
-
-
-def test_sell_repays_margin_first() -> None:
-    assert settle_trade(0.0, 4000.0, -1000.0) == (0.0, 3000.0)
-
-
-def test_sell_exceeding_margin_credits_cash() -> None:
-    assert settle_trade(0.0, 1000.0, -5000.0) == (4000.0, 0.0)
-
-
-def test_zero_and_invalid_deltas_are_no_ops() -> None:
-    assert settle_trade(500.0, 250.0, 0.0) == (500.0, 250.0)
-    assert settle_trade(500.0, 250.0, None) == (500.0, 250.0)
-    assert settle_trade(500.0, 250.0, float("nan")) == (500.0, 250.0)
-
-
-def test_negative_balances_are_clamped() -> None:
-    assert settle_trade(-100.0, -50.0, 200.0) == (0.0, 200.0)
+from budget_terminal_app.services.portfolio_analysis import margin_utilization
 
 
 def test_margin_utilization_percent() -> None:
@@ -63,18 +33,12 @@ def test_margin_health_bands() -> None:
     assert margin_health_color_token(40.1) == "accent_negative"
 
 
-def test_round_trip_restores_balances() -> None:
-    cash, margin = settle_trade(10000.0, 0.0, 15000.0)
-    assert (cash, margin) == (0.0, 5000.0)
-    assert settle_trade(cash, margin, -15000.0) == (10000.0, 0.0)
-
-
 def main() -> None:
     for name, func in sorted(globals().items()):
         if name.startswith("test_") and callable(func):
             func()
             print(f"ok {name}")
-    print("portfolio margin settlement checks passed")
+    print("portfolio margin utilization checks passed")
 
 
 if __name__ == "__main__":

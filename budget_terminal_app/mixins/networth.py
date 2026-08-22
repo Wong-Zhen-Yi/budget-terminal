@@ -59,6 +59,14 @@ class NetWorthFxWorker(QObject):
 
     def run(self) -> None:
         """Fetch the latest USD/SGD quote without blocking the UI thread."""
+        try:
+            self._run()
+        except Exception as exc:
+            # finished is the only signal wired to thread.quit(), so failing to emit it would
+            # leave the thread running and _p6_fx_loading stuck True for the rest of the session.
+            self.finished.emit({'ok': False, 'error': str(exc)})
+
+    def _run(self) -> None:
         errors = []
         rate = None
         try:
@@ -807,6 +815,11 @@ class NetWorthMixin:
     def _p6_refresh_fx_rate(self, *, force: bool=False) -> None:
         if getattr(self, '_p6_fx_loading', False):
             return
+        existing = getattr(self, '_p6_fx_thread', None)
+        if existing is not None and existing.isRunning():
+            # The flag above clears on worker.finished, which lands before the thread has actually
+            # exited. Starting a second run in that gap is what used to orphan the first thread.
+            return
         if not force and self._p6_valid_usd_sgd_rate() is not None:
             try:
                 age_seconds = datetime.datetime.now(datetime.timezone.utc).timestamp() - float(getattr(self, '_p6_fx_collected_at', 0.0) or 0.0)
@@ -825,10 +838,23 @@ class NetWorthMixin:
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, '_p6_fx_thread', None))
+        self._connect_worker_signal(thread.finished, self._p6_cleanup_fx_worker_refs, worker, thread)
         self._p6_fx_thread = thread
         self._p6_fx_worker = worker
         thread.start()
+
+    def _p6_cleanup_fx_worker_refs(self, worker: Any, thread: Any) -> None:
+        """Drop this run's worker and thread, but only if they are still the current ones.
+
+        `_p6_fx_loading` clears on worker.finished, which fires before thread.finished, so a
+        second refresh can already be running by the time this arrives. Without the identity
+        check it would null out the *new* thread's only Python reference, and PySide6 would
+        destroy a still-running QThread -- an immediate abort.
+        """
+        if getattr(self, '_p6_fx_thread', None) is thread:
+            self._p6_fx_thread = None
+        if getattr(self, '_p6_fx_worker', None) is worker:
+            self._p6_fx_worker = None
 
     def _p6_on_fx_rate_result(self, payload: dict[str, Any]) -> None:
         self._p6_fx_loading = False
