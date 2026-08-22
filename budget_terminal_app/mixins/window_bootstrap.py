@@ -895,7 +895,7 @@ class WindowBootstrapMixin:
             self._startup_dashboard_data_actual_done = False
             self._startup_dashboard_data_timed_out = False
             self._startup_page_prefetch_pending = False
-            self._startup_warmup_mode = 'full_blocking_with_skip'
+            self._startup_warmup_mode = 'full_blocking'
             self._startup_released_to_user = False
             self._startup_release_reason = ''
             self._startup_data_start_pending = False

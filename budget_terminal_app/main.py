@@ -13,12 +13,18 @@ from .data_service import EmbeddedDataServiceRuntime
 from .dpi import configure_qt_high_dpi_policy
 from .error_logging import error_log_path
 from .paths import resource_path
-from .startup_loading import StartupLoadingLogHandler, StartupLoadingScreen, StartupProgressReporter
+from .startup_loading import (
+    STARTUP_HOLD_SECONDS,
+    StartupLoadingLogHandler,
+    StartupLoadingScreen,
+    StartupProgressReporter,
+)
 from .startup_profile import StartupProfiler
 
 
 APP_USER_MODEL_ID = 'BudgetTerminal.Desktop'
 MINIMUM_YFINANCE_VERSION = (1, 5, 2)
+STARTUP_HOLD_MS = int(STARTUP_HOLD_SECONDS * 1000)
 
 
 def _version_tuple(value: Any) -> tuple[int, int, int]:
@@ -178,6 +184,7 @@ def _run_primary_application(
         startup_progress.begin('first_show', 'First usable view')
 
         startup_finished = {'done': False}
+        startup_state = {'ready': False}
 
         def _show_window_when_ready(reason: str = 'complete') -> None:
             if startup_finished['done']:
@@ -187,11 +194,12 @@ def _run_primary_application(
                 clean_reason = str(reason or 'complete').strip().lower()
                 setattr(window, '_startup_release_reason', clean_reason)
                 setattr(window, '_startup_released_to_user', True)
-                setattr(window, '_startup_ready_before_show', True)
-                if clean_reason == 'skip':
-                    logger.info('Startup loading skipped by user; remaining startup work will continue in the background.')
-                elif clean_reason == 'timeout':
-                    logger.warning('Startup loading reached 30s max wait; opening app while remaining work continues.')
+                setattr(window, '_startup_ready_before_show', bool(startup_state['ready']))
+                if clean_reason == 'timeout':
+                    logger.warning(
+                        'Startup work was still running at the %.0fs startup hold; opening app while it continues.',
+                        STARTUP_HOLD_SECONDS,
+                    )
                 profiler.stamp('show_requested')
                 window.show()
                 startup_progress.complete('first_show', 'First usable view')
@@ -221,9 +229,22 @@ def _run_primary_application(
                 logger.exception('Hidden startup preparation failed; showing the main window.')
                 _show_window_when_ready('startup_error')
 
-        startup_progress.on_ready(lambda: _show_window_when_ready('complete'))
-        startup_progress.on_skip(lambda: _show_window_when_ready('skip'))
-        QTimer.singleShot(30000, lambda: _show_window_when_ready('timeout'))
+        def _note_startup_ready() -> None:
+            if startup_state['ready']:
+                return
+            startup_state['ready'] = True
+            logger.info(
+                'Startup work complete; holding the loading screen for the rest of the %.0fs startup hold.',
+                STARTUP_HOLD_SECONDS,
+            )
+
+        def _release_after_hold() -> None:
+            _show_window_when_ready('complete' if startup_state['ready'] else 'timeout')
+
+        # The hold is the only release path: every launch shows the window once, at the same
+        # point, with as much hidden warmup finished as that window allows.
+        startup_progress.on_ready(_note_startup_ready)
+        QTimer.singleShot(STARTUP_HOLD_MS, _release_after_hold)
         QTimer.singleShot(0, _start_hidden_startup)
         return app.exec()
     finally:

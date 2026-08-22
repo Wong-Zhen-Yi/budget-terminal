@@ -286,7 +286,7 @@ class WindowLifecycleMixin:
             return
         self._startup_hidden_preparation_started = True
         self._startup_profiler_stamp('hidden_startup_start')
-        self._startup_warmup_mode = 'full_blocking_with_skip'
+        self._startup_warmup_mode = 'full_blocking'
         logger.info('Startup loading all pages before first interaction.')
         self._startup_metrics_set_stage(
             'dashboard_data',
@@ -295,6 +295,9 @@ class WindowLifecycleMixin:
         )
         self.refresh_data(force=True, reason='startup_blocking')
         self._start_lazy_warmup()
+        # The loading screen is held for a fixed window, so cache warmup starts now and spends
+        # that time instead of waiting for first paint. It self-retries until dashboard data lands.
+        self._schedule_startup_cache_warmup()
 
     def _on_startup_dashboard_timeout(self) -> None:
         """Release first UI if startup dashboard data is still loading."""
@@ -327,16 +330,14 @@ class WindowLifecycleMixin:
         profiler = getattr(self, '_startup_profiler', None)
         window_shown_seconds = profiler.latest('window_shown') if profiler is not None and hasattr(profiler, 'latest') else None
         reason = str(getattr(self, '_startup_release_reason', '') or 'complete').strip().lower()
-        if reason == 'skip':
-            first_ui_detail = 'Released by skip; remaining startup work continued in the background.'
-        elif reason == 'timeout':
-            first_ui_detail = 'Released after 30s max wait; remaining startup work continued in the background.'
+        if reason == 'timeout':
+            first_ui_detail = 'Released at the startup hold; remaining startup work continued in the background.'
         elif reason == 'startup_error':
             first_ui_detail = 'Released after startup preparation error.'
         elif getattr(self, '_startup_dashboard_data_timed_out', False):
             first_ui_detail = 'Main window shown after dashboard startup timeout; data refresh still running.'
         else:
-            first_ui_detail = 'Main window shown after full startup warmup.'
+            first_ui_detail = 'Main window shown after the fixed startup hold with all startup work complete.'
         self._startup_metrics_set_stage(
             'first_ui',
             status='complete',
@@ -354,7 +355,7 @@ class WindowLifecycleMixin:
             self._schedule_startup_refresh()
         self._start_lazy_warmup()
         self._schedule_startup_page_prefetches()
-        full_blocking = str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking_with_skip'
+        full_blocking = str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking'
         if not full_blocking or getattr(self, '_lazy_warmup_finished', False):
             self._schedule_startup_session_restores()
 
@@ -389,7 +390,7 @@ class WindowLifecycleMixin:
             return True
         hidden_full_startup = (
             getattr(self, '_startup_hidden_preparation_started', False)
-            and str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking_with_skip'
+            and str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking'
             and not getattr(self, '_startup_released_to_user', False)
         )
         return bool(hidden_full_startup)
@@ -420,11 +421,6 @@ class WindowLifecycleMixin:
     def _schedule_startup_cache_warmup(self) -> None:
         """Queue balanced cache warmup after the dashboard has loaded."""
         if getattr(self, '_startup_cache_warmup_pending', False) or getattr(self, '_startup_cache_warmup_started', False):
-            return
-        full_blocking = str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking_with_skip'
-        if full_blocking and not getattr(self, '_startup_show_completed', False):
-            self._startup_cache_warmup_pending = True
-            QTimer.singleShot(1000, self._retry_startup_cache_warmup)
             return
         if not self._startup_work_can_run():
             return
@@ -471,7 +467,7 @@ class WindowLifecycleMixin:
             {'label': 'chart cache', 'method': '_warm_startup_chart_cache'},
             {'label': 'portfolio metrics', 'method': '_warm_startup_portfolio_metrics'},
         ]
-        if mode not in {'full', 'full_blocking_with_skip'}:
+        if mode not in {'full', 'full_blocking'}:
             return minimal_specs
         return [
             *minimal_specs,
@@ -658,7 +654,7 @@ class WindowLifecycleMixin:
         """Queue hidden last-session tab restores after early startup work has settled."""
         if getattr(self, '_startup_session_restore_pending', False):
             return
-        full_blocking = str(getattr(self, '_startup_warmup_mode', 'minimal') or 'minimal').strip().lower() == 'full_blocking_with_skip'
+        full_blocking = str(getattr(self, '_startup_warmup_mode', 'minimal') or 'minimal').strip().lower() == 'full_blocking'
         self._startup_progress_begin('session_restore', 'Session Restore')
         if not full_blocking:
             queue = self._startup_session_restore_specs()
@@ -873,7 +869,7 @@ class WindowLifecycleMixin:
             )
             self._lazy_page_warmup_timer.start(getattr(self, '_LAZY_WARMUP_STEP_MS', 75))
             return
-        excluded_pages = set() if mode == 'full_blocking_with_skip' else {3, 12}
+        excluded_pages = set() if mode == 'full_blocking' else {3, 12}
         for button in getattr(self, '_nav_buttons', []):
             page_index = self._page_index_for_button(button)
             if page_index in (None, 0) or self._page_initialized(index=page_index):
@@ -922,7 +918,7 @@ class WindowLifecycleMixin:
                 count=0,
                 duration_seconds=0.0,
             )
-            if str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking_with_skip':
+            if str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking':
                 self._schedule_startup_session_restores()
             else:
                 self._startup_progress_finish_if_complete()
@@ -937,7 +933,7 @@ class WindowLifecycleMixin:
             count=self._lazy_warmup_total,
         )
         logger.info('Lazy page warmup queued for %s page(s): %s.', len(queue), ', '.join(self._page_label(index) for index in queue))
-        initial_delay = 0 if mode == 'full_blocking_with_skip' and not getattr(self, '_startup_show_completed', False) else getattr(self, '_LAZY_WARMUP_INITIAL_DELAY_MS', 500)
+        initial_delay = 0 if mode == 'full_blocking' and not getattr(self, '_startup_show_completed', False) else getattr(self, '_LAZY_WARMUP_INITIAL_DELAY_MS', 500)
         timer.start(initial_delay)
 
     def _note_navigation_activity(self) -> None:
@@ -1001,7 +997,7 @@ class WindowLifecycleMixin:
                 detail='Lazy page warmup finished with errors.' if failed else 'Lazy page warmup complete.',
                 count=getattr(self, '_lazy_warmup_total', 0),
             )
-            if str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking_with_skip':
+            if str(getattr(self, '_startup_warmup_mode', '') or '').strip().lower() == 'full_blocking':
                 self._schedule_startup_session_restores()
             else:
                 self._startup_progress_finish_if_complete()

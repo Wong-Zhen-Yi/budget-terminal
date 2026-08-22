@@ -147,10 +147,10 @@ def _ready_main_child() -> int:
 
     state: dict[str, Any] = {
         "constructed": False,
-        "fallback_fired": False,
+        "hold_fired": False,
+        "hold_registered": False,
         "prepare_calls": 0,
         "show_calls": 0,
-        "timeout_registered": False,
     }
     fake_app_module = types.ModuleType("budget_terminal_app.app")
 
@@ -161,14 +161,16 @@ def _ready_main_child() -> int:
     class DeterministicTimer:
         @staticmethod
         def singleShot(delay_ms: int, callback: Any) -> None:
-            if int(delay_ms) == 30000:
-                state["timeout_registered"] = True
+            if int(delay_ms) == main_module.STARTUP_HOLD_MS:
+                # The startup hold is the only release path; drive it by hand so the test does
+                # not wait 30 real seconds, and so it can prove nothing opened before it fired.
+                state["hold_registered"] = True
 
-                def mark_fallback() -> None:
-                    state["fallback_fired"] = True
+                def fire_hold() -> None:
+                    state["hold_fired"] = True
                     callback()
 
-                state["fallback_callback"] = mark_fallback
+                state["hold_callback"] = fire_hold
                 return
             RealQTimer.singleShot(int(delay_ms), callback)
 
@@ -187,6 +189,9 @@ def _ready_main_child() -> int:
             for page_key in tuple(screen._page_keys):
                 screen.complete_task(page_key, page_key)
             state["loader_finished"] = self._startup_progress.finish_if_complete()
+            # Completing every required task must not open the window on its own.
+            state["show_calls_before_hold"] = state["show_calls"]
+            RealQTimer.singleShot(0, state["hold_callback"])
 
         def show(self) -> None:
             super().show()
@@ -214,7 +219,7 @@ def _ready_main_child() -> int:
     elapsed_seconds = time.monotonic() - started_at
 
     _close_qt_windows(main_module.QApplication)
-    state.pop("fallback_callback", None)
+    state.pop("hold_callback", None)
     state.update({"elapsed_seconds": elapsed_seconds, "exit_code": exit_code})
     _emit_result(state)
     return 0
@@ -302,18 +307,19 @@ def test_main_failure_returns_one(root: Path) -> None:
     assert result["elapsed_seconds"] < 10.0, result
 
 
-def test_main_ready_path_does_not_use_fallback(root: Path) -> None:
+def test_main_holds_window_until_the_startup_hold_elapses(root: Path) -> None:
     result = _run_child("--ready-main-child", env=_isolated_environment(root / "ready-path"))
     assert result["exit_code"] == 0, result
     assert result["constructed"] is True, result
     assert result["prepare_calls"] == 1, result
     assert result["loader_finished"] is True, result
+    assert result["hold_registered"] is True, result
+    assert result["show_calls_before_hold"] == 0, result
+    assert result["hold_fired"] is True, result
     assert result["show_calls"] == 1, result
     assert result["visible_when_shown"] is True, result
     assert result["release_reason"] == "complete", result
     assert result["ready_before_show"] is True, result
-    assert result["timeout_registered"] is True, result
-    assert result["fallback_fired"] is False, result
     assert result["data_service_start_bypassed"] is True, result
     assert result["elapsed_seconds"] < 10.0, result
 
@@ -379,8 +385,8 @@ def main() -> int:
         test_two_launches_enter_application_concurrently(root)
         test_early_startup_failure_closes_partially_initialized_resources(root)
         test_main_failure_returns_one(root)
-        test_main_ready_path_does_not_use_fallback(root)
-    print("PASS concurrent launch, startup failure, and ready release paths")
+        test_main_holds_window_until_the_startup_hold_elapses(root)
+    print("PASS concurrent launch, startup failure, and startup-hold release paths")
     return 0
 
 

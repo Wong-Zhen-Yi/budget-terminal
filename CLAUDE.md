@@ -53,8 +53,10 @@ logging, then calls `budget_terminal_app.main.main()`.
 
 `main.py` enforces a minimum `yfinance` version, creates the `QApplication` (Fusion style), shows
 `StartupLoadingScreen`, imports `BudgetTerminalApp`, runs `_prepare_startup_before_show()` while the
-window is hidden, then shows it. A 30s timer force-shows the window if preparation stalls. Each
-launch is an independent process; multiple windows share the same on-disk state.
+window is hidden. The window is then shown on one fixed startup hold — `STARTUP_HOLD_SECONDS`
+in `startup_loading.py`, 30s — and on nothing else: finishing early only means the remaining time
+goes to background warmup, and unfinished work continues after the window opens. Each launch is an
+independent process; multiple windows share the same on-disk state.
 
 ### The main window is one mixin composition
 

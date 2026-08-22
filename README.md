@@ -180,7 +180,10 @@ UI and data-fetching changes should also be verified with a manual app launch.
 
 `budget_terminal_app/main.py` creates the Qt application, applies the Fusion style, configures
 pyqtgraph, shows the startup loading screen, imports `BudgetTerminalApp`, and prepares the main
-window before first show. After the first usable view is visible, the shared data coordinator starts
+window before first show. Every launch holds the loading screen for a fixed 30 seconds and then
+opens the window, so startup work — page builds, dashboard and startup data, last-session restores,
+cache warmup — gets the same predictable time to settle before you can interact. After the first
+usable view is visible, the shared data coordinator starts
 in-process. If it is unavailable, the app logs the issue and continues with direct worker behavior,
 so `self._data_service_client` may legitimately be `None`.
 

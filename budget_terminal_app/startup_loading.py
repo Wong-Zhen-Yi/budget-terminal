@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from typing import Any
@@ -657,7 +658,7 @@ class StartupLoadingScreen(QDialog):
             elapsed_text = f'{hours}:{minutes:02d}:{seconds:02d}'
         else:
             elapsed_text = f'{minutes}:{seconds:02d}'
-        remaining_seconds = int(max(0.0, STARTUP_HOLD_SECONDS - (time.monotonic() - self._elapsed_started_at)))
+        remaining_seconds = math.ceil(max(0.0, STARTUP_HOLD_SECONDS - (time.monotonic() - self._elapsed_started_at)))
         if remaining_seconds > 0:
             self.elapsed_label.setText(f'Loading: {elapsed_text}  ·  Opens in {remaining_seconds}s')
         else:
