@@ -5,13 +5,14 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from .dependencies import *
+from .dependencies import datetime, json, pd
 from .paths import user_data_path
+from .persistence_schema import TAB_SESSION_CACHE_SCHEMA_VERSION, migrate_tab_session_payload
 
 
-SESSION_CACHE_VERSION = 1
+SESSION_CACHE_VERSION = TAB_SESSION_CACHE_SCHEMA_VERSION
 SESSION_CACHE_FILE = user_data_path('tab_session_cache.json')
-_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube')
+_SESSION_TAB_KEYS = ('stocks', 'fundamentals', 'options', 'etf', 'politics', 'youtube', 'roll')
 _DATAFRAME_MARKER = '__bt_dataframe__'
 
 
@@ -80,7 +81,8 @@ def _default_session_cache() -> dict[str, Any]:
 def _normalize_session_cache(payload: Any) -> dict[str, Any]:
     """Normalize persisted session cache data into the supported shape."""
     normalized = _default_session_cache()
-    raw = payload if isinstance(payload, dict) else {}
+    migration = migrate_tab_session_payload(payload, _SESSION_TAB_KEYS)
+    raw = migration.payload if isinstance(migration.payload, dict) else {}
     raw_tabs = raw.get('tabs', raw)
     if not isinstance(raw_tabs, dict):
         return normalized

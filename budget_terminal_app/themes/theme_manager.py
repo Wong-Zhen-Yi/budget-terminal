@@ -37,6 +37,11 @@ QWidget[bt_role="panel"], QGroupBox[bt_role="panel"] {{
     border: 1px solid {theme.panel_border};
     border-radius: 6px;
 }}
+QFrame[bt_role="summary_chip"] {{
+    background: {theme.background_secondary};
+    border: 1px solid {theme.panel_border};
+    border-radius: 6px;
+}}
 QGroupBox[bt_role="panel"] {{
     margin-top: 10px;
     padding-top: 10px;
@@ -83,6 +88,11 @@ QLabel[bt_role="badge"] {{
     font-weight: 700;
     color: {theme.text_secondary};
 }}
+QLabel[bt_role="summary_chip_label"] {{
+    color: {theme.text_muted};
+    font-size: 11px;
+    font-weight: 700;
+}}
 QLabel[bt_role="index"] {{
     background: {theme.panel_background};
     border: 1px solid {theme.panel_border};
@@ -124,7 +134,7 @@ QPushButton[bt_variant="danger"] {{
     border-color: {theme.accent_negative};
     font-weight: 700;
 }}
-QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QListWidget, QTableWidget {{
+QLineEdit, QComboBox, QDoubleSpinBox, QAbstractSpinBox, QPlainTextEdit, QTextEdit, QListWidget, QTableWidget {{
     background: {theme.input_bg};
     color: {theme.text_primary};
     border: 1px solid {theme.input_border};
@@ -132,8 +142,19 @@ QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QListWidget, QTableWidget {{
     selection-background-color: {theme.selected_bg};
     alternate-background-color: {theme.table_row_alt_bg};
 }}
-QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QAbstractSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
     border-color: {theme.input_focus_border};
+}}
+QDoubleSpinBox[bt_role="cash_input"] {{
+    background: transparent;
+    border: 0;
+    color: {theme.warning};
+    font-size: 13px;
+    font-weight: 700;
+}}
+QDoubleSpinBox[bt_role="cash_input"]:focus {{
+    background: {theme.input_bg};
+    border: 1px solid {theme.input_focus_border};
 }}
 QComboBox::drop-down {{
     border: none;

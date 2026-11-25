@@ -34,6 +34,8 @@ class OptionsChainMixin:
         (_P5_TOP_VOLUME_VIEW_KEY, _P5_TOP_VOLUME_TAB_LABEL, ()),
     )
     _P5_TOP_VOLUME_GRID_COLUMNS = 3
+    _P5_STRIKE_TAB_LABEL = 'Options by Strike'
+    _P5_STRIKE_MATCH_TOLERANCE = 0.0001
 
     def init_page5(self) -> None:
         """Build the Options page UI."""
@@ -49,6 +51,12 @@ class OptionsChainMixin:
         self._p5_top_volume_payloads = {}
         self.p5_top_volume_views = {}
         self._p5_top_volume_tab_order = []
+        self._p5_strike_values_request_seq = 0
+        self._p5_strike_values_latest_request_id = 0
+        self._p5_strike_request_seq = 0
+        self._p5_strike_latest_request_id = 0
+        self._p5_strike_payload = self._p5_empty_strike_payload()
+        self._p5_strike_available_strikes = []
         shared_controls = QHBoxLayout()
         self.p5_shared_ticker_input = QLineEdit()
         self.p5_shared_ticker_input.setPlaceholderText('Enter Ticker (e.g. AAPL)')
@@ -75,6 +83,7 @@ class OptionsChainMixin:
             self._p5_top_volume_payloads[view_key] = self._p5_empty_top_volume_payload(bucket_config)
             self.p5_tabs.addTab(self._p5_build_top_volume_tab(view_key, tab_label, bucket_config), tab_label)
             self._p5_top_volume_tab_order.append(view_key)
+        self.p5_tabs.addTab(self._p5_build_strike_tab(), self._P5_STRIKE_TAB_LABEL)
         layout.addWidget(self.p5_tabs, 1)
 
     def _p5_build_chain_tab(self) -> Any:
@@ -183,6 +192,50 @@ class OptionsChainMixin:
         self._p5_set_top_volume_bucket_config(view_key, tuple(bucket_config))
         return tab
 
+    def _p5_build_strike_tab(self) -> Any:
+        """Build the Options by Strike subtab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QHBoxLayout()
+        load_strikes_btn = QPushButton('Load Strikes')
+        self.set_theme_variant(load_strikes_btn, 'accent')
+        load_strikes_btn.clicked.connect(self._p5_load_strike_values)
+        self.p5_strike_combo = QComboBox()
+        self.p5_strike_combo.setFixedWidth(90)
+        self.p5_strike_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._p5_reset_strike_combo()
+        self.p5_strike_combo.currentIndexChanged.connect(self._p5_on_strike_combo_changed)
+        load_options_btn = QPushButton('Load Options by Strike')
+        self.set_theme_variant(load_options_btn, 'accent')
+        load_options_btn.clicked.connect(self._p5_load_options_by_strike)
+        controls.addWidget(load_strikes_btn)
+        controls.addSpacing(10)
+        controls.addWidget(QLabel('<b>Strike:</b>'))
+        controls.addWidget(self.p5_strike_combo)
+        controls.addWidget(load_options_btn)
+        controls.addStretch()
+        layout.addLayout(controls, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_contents = QWidget()
+        self.p5_strike_grid_layout = QGridLayout(scroll_contents)
+        self.p5_strike_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.p5_strike_grid_layout.setHorizontalSpacing(10)
+        self.p5_strike_grid_layout.setVerticalSpacing(10)
+        scroll.setWidget(scroll_contents)
+        layout.addWidget(scroll, 1)
+        self.p5_strike_status_lbl = QLabel('Enter a ticker above, load strikes, then choose a strike to view matching options across all available expirations.')
+        self.p5_strike_status_lbl.setWordWrap(True)
+        self.p5_strike_status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.set_theme_role(self.p5_strike_status_lbl, 'status_muted')
+        layout.addWidget(self.p5_strike_status_lbl, 0)
+        self.p5_strike_sections = {}
+        self._p5_set_strike_bucket_config(())
+        return tab
+
     def _p5_top_volume_grid_column_count(self, count: int) -> int:
         """Return a compact grid width that adapts to the fetched expiration count."""
         total = max(int(count or 0), 0)
@@ -255,6 +308,120 @@ class OptionsChainMixin:
         for bucket_key, _bucket_label, _days_out in normalized_config:
             self._p5_set_top_volume_bucket_title(view_key, bucket_key, bucket_key)
 
+    def _p5_reset_strike_combo(self, selected_strike: float | None = None) -> None:
+        """Reset the strike dropdown to the placeholder plus any loaded strikes."""
+        if not hasattr(self, 'p5_strike_combo'):
+            return
+        self.p5_strike_combo.blockSignals(True)
+        self.p5_strike_combo.clear()
+        self.p5_strike_combo.addItem('Select strike', None)
+        selected_index = 0
+        for strike in list(getattr(self, '_p5_strike_available_strikes', []) or []):
+            try:
+                strike_value = float(strike)
+            except (TypeError, ValueError):
+                continue
+            label = f'{strike_value:.1f}' if strike_value == round(strike_value, 1) else f'{strike_value:g}'
+            self.p5_strike_combo.addItem(label, strike_value)
+            if selected_strike is not None and abs(strike_value - float(selected_strike)) <= self._P5_STRIKE_MATCH_TOLERANCE:
+                selected_index = self.p5_strike_combo.count() - 1
+        self.p5_strike_combo.setCurrentIndex(selected_index)
+        self.p5_strike_combo.blockSignals(False)
+
+    def _p5_selected_strike(self) -> float | None:
+        """Return the selected strike dropdown value, if any."""
+        if not hasattr(self, 'p5_strike_combo'):
+            return None
+        value = self.p5_strike_combo.currentData()
+        try:
+            strike = float(value)
+        except (TypeError, ValueError):
+            return None
+        if pd.isna(strike):
+            return None
+        return strike
+
+    def _p5_on_strike_combo_changed(self, *_: Any) -> None:
+        """Persist the current strike selection and load matching rows."""
+        payload = getattr(self, '_p5_strike_payload', {})
+        if not isinstance(payload, dict):
+            payload = self._p5_empty_strike_payload()
+        selected_strike = self._p5_selected_strike()
+        updated = dict(payload)
+        updated['selected_strike'] = selected_strike
+        updated['available_strikes'] = list(getattr(self, '_p5_strike_available_strikes', []) or [])
+        self._p5_strike_payload = updated
+        self._p5_save_session_snapshot()
+        if selected_strike is not None:
+            self._p5_load_options_by_strike()
+
+    def _p5_set_strike_bucket_config(self, bucket_config: tuple[tuple[str, str, int], ...]) -> None:
+        """Rebuild the strike grid to match the fetched expiration list."""
+        layout = getattr(self, 'p5_strike_grid_layout', None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        normalized_config = tuple(bucket_config) if isinstance(bucket_config, (list, tuple)) else ()
+        self._p5_strike_bucket_config = normalized_config
+        sections = {}
+        if not normalized_config:
+            self.p5_strike_sections = sections
+            return
+        grid_columns = self._p5_top_volume_grid_column_count(len(normalized_config))
+        for index, (bucket_key, _bucket_label, _days_out) in enumerate(normalized_config):
+            panel = QFrame()
+            self.set_theme_role(panel, 'panel')
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(6, 6, 6, 6)
+            panel_layout.setSpacing(4)
+            section_label = QLabel('')
+            self.set_theme_role(section_label, 'section_title')
+            table = self._make_top_volume_table()
+            panel_layout.addWidget(section_label)
+            panel_layout.addWidget(table, 1)
+            sections[bucket_key] = {'label': section_label, 'table': table, 'panel': panel}
+            row = index // grid_columns
+            col = index % grid_columns
+            layout.addWidget(panel, row, col)
+        for col in range(grid_columns):
+            layout.setColumnStretch(col, 1)
+        total_rows = max(1, math.ceil(len(normalized_config) / grid_columns))
+        for row in range(total_rows):
+            layout.setRowStretch(row, 1)
+        self.p5_strike_sections = sections
+        for bucket_key, _bucket_label, _days_out in normalized_config:
+            self._p5_set_strike_bucket_title(bucket_key, bucket_key)
+
+    def _p5_strike_buckets(self) -> tuple[tuple[str, str, int], ...]:
+        """Return the configured expiration buckets for the strike tab."""
+        raw = getattr(self, '_p5_strike_bucket_config', ())
+        return tuple(raw) if isinstance(raw, (list, tuple)) else ()
+
+    def _p5_set_strike_bucket_title(self, bucket_key: str, expiry: str = '') -> None:
+        """Refresh one strike section label."""
+        section = getattr(self, 'p5_strike_sections', {}).get(bucket_key, {}) if isinstance(getattr(self, 'p5_strike_sections', {}), dict) else {}
+        label_widget = section.get('label')
+        if label_widget is None:
+            return
+        expiry_display = self._p5_format_top_volume_expiration(expiry)
+        display_text = expiry_display or self._p5_format_top_volume_expiration(bucket_key) or bucket_key or 'Unavailable'
+        label_widget.setText(f'Options by Strike - {display_text}')
+
+    def _p5_clear_strike_tables(self) -> None:
+        """Reset all strike tables to an empty state."""
+        sections = getattr(self, 'p5_strike_sections', {}) if isinstance(getattr(self, 'p5_strike_sections', {}), dict) else {}
+        for bucket_key, _bucket_label, _days_out in self._p5_strike_buckets():
+            section = sections.get(bucket_key, {})
+            table = section.get('table')
+            if table is not None:
+                table.setRowCount(0)
+                table.setToolTip('')
+            self._p5_set_strike_bucket_title(bucket_key, bucket_key)
+
     def _make_chain_table(self) -> Any:
         """Create a shared options chain table."""
         t = QTableWidget(0, len(self._P5_CHAIN_COLUMNS))
@@ -303,6 +470,18 @@ class OptionsChainMixin:
             'expirations': {bucket_key: bucket_key for bucket_key in bucket_order},
         }
 
+    def _p5_empty_strike_payload(self, bucket_config: tuple[tuple[str, str, int], ...] = (), ticker: str = '', selected_strike: float | None = None) -> dict[str, Any]:
+        """Build an empty payload for the Options by Strike view."""
+        bucket_order = [bucket_key for bucket_key, _, _ in tuple(bucket_config or ())]
+        return {
+            'ticker': str(ticker or ''),
+            'selected_strike': selected_strike,
+            'available_strikes': list(getattr(self, '_p5_strike_available_strikes', []) or []),
+            'bucket_order': bucket_order,
+            'records': {bucket_key: [] for bucket_key in bucket_order},
+            'expirations': {bucket_key: bucket_key for bucket_key in bucket_order},
+        }
+
     def _p5_normalize_top_volume_payload(self, payload: Any, *, ticker: str = '') -> dict[str, Any]:
         """Normalize one cached/live top-volume payload into the dynamic all-expiry shape."""
         raw_payload = payload if isinstance(payload, dict) else {}
@@ -330,6 +509,49 @@ class OptionsChainMixin:
             },
         }
 
+    def _p5_normalize_strike_payload(self, payload: Any, *, ticker: str = '') -> dict[str, Any]:
+        """Normalize a cached/live strike payload into the all-expiry shape."""
+        raw_payload = payload if isinstance(payload, dict) else {}
+        raw_records = raw_payload.get('records', {}) if isinstance(raw_payload.get('records', {}), dict) else {}
+        raw_expirations = raw_payload.get('expirations', {}) if isinstance(raw_payload.get('expirations', {}), dict) else {}
+        raw_order = [str(value or '').strip() for value in list(raw_payload.get('bucket_order', [])) if str(value or '').strip()]
+        if not raw_order:
+            raw_order = [
+                str(value or '').strip()
+                for value in list(raw_expirations.keys()) + list(raw_records.keys())
+                if str(value or '').strip()
+            ]
+        bucket_config = self._p5_build_dynamic_top_volume_bucket_config(raw_order)
+        bucket_order = [bucket_key for bucket_key, _, _ in bucket_config]
+        selected_strike = raw_payload.get('selected_strike')
+        try:
+            selected_strike = float(selected_strike) if selected_strike is not None else None
+        except (TypeError, ValueError):
+            selected_strike = None
+        available_strikes = []
+        for strike in list(raw_payload.get('available_strikes', []) or []):
+            try:
+                strike_value = float(strike)
+            except (TypeError, ValueError):
+                continue
+            if not pd.isna(strike_value):
+                available_strikes.append(strike_value)
+        available_strikes = sorted(set(available_strikes))
+        return {
+            'ticker': str(raw_payload.get('ticker', ticker) or ticker).upper().strip(),
+            'selected_strike': selected_strike,
+            'available_strikes': available_strikes,
+            'bucket_order': bucket_order,
+            'records': {
+                bucket_key: list(raw_records.get(bucket_key, []))
+                for bucket_key in bucket_order
+            },
+            'expirations': {
+                bucket_key: str(raw_expirations.get(bucket_key, bucket_key) or bucket_key)
+                for bucket_key in bucket_order
+            },
+        }
+
     def _p5_shared_ticker(self) -> str:
         """Return the shared Options-page ticker symbol."""
         return str(getattr(self, 'p5_shared_ticker_input', None).text() if hasattr(self, 'p5_shared_ticker_input') else '').upper().strip()
@@ -342,7 +564,13 @@ class OptionsChainMixin:
             any(bool(records) for records in (payload.get('records', {}) if isinstance(payload, dict) else {}).values())
             for payload in getattr(self, '_p5_top_volume_payloads', {}).values()
         )
-        if not shared_ticker and not has_chain_data and not has_top_volume_data:
+        strike_payload = getattr(self, '_p5_strike_payload', {})
+        has_strike_data = (
+            bool(getattr(self, '_p5_strike_available_strikes', []) or [])
+            or any(bool(records) for records in (strike_payload.get('records', {}) if isinstance(strike_payload, dict) else {}).values())
+            or self._p5_selected_strike() is not None
+        )
+        if not shared_ticker and not has_chain_data and not has_top_volume_data and not has_strike_data:
             return None
         return {
             'shared_ticker': shared_ticker,
@@ -358,6 +586,7 @@ class OptionsChainMixin:
             'chain_dividend_source': str(getattr(self, '_p5_chain_dividend_source', 'default') or 'default'),
             'chain_df': serialize_session_value(getattr(self, '_p5_chain_df', pd.DataFrame())),
             'top_volume_payloads': serialize_session_value(getattr(self, '_p5_top_volume_payloads', {})),
+            'strike_payload': serialize_session_value(getattr(self, '_p5_strike_payload', {})),
         }
 
     def _p5_save_session_snapshot(self, *, immediate: bool=False) -> None:
@@ -430,19 +659,50 @@ class OptionsChainMixin:
                 status_lbl = view.get('status_lbl')
                 if status_lbl is not None:
                     self.set_status_text(status_lbl, f"Restored last session for {normalized_payload['ticker']}.", status='positive')
+        strike_payload = deserialize_session_value(payload.get('strike_payload'))
+        if isinstance(strike_payload, dict):
+            normalized_strike = self._p5_normalize_strike_payload(strike_payload, ticker=shared_ticker)
+            self._p5_strike_available_strikes = list(normalized_strike.get('available_strikes', []) or [])
+            self._p5_reset_strike_combo(normalized_strike.get('selected_strike'))
+            strike_bucket_config = self._p5_build_dynamic_top_volume_bucket_config(normalized_strike.get('bucket_order', []))
+            self._p5_set_strike_bucket_config(strike_bucket_config)
+            self._p5_strike_payload = normalized_strike
+            self._p5_render_strike_tables(
+                normalized_strike['ticker'],
+                normalized_strike.get('selected_strike'),
+                normalized_strike['records'],
+                normalized_strike['expirations'],
+            )
+            if hasattr(self, 'p5_strike_status_lbl'):
+                selected = normalized_strike.get('selected_strike')
+                if any(bool(records) for records in normalized_strike.get('records', {}).values()):
+                    self.set_status_text(self.p5_strike_status_lbl, f"Restored {self._P5_STRIKE_TAB_LABEL.lower()} for {normalized_strike['ticker']}.", status='positive')
+                elif self._p5_strike_available_strikes:
+                    strike_text = f'{selected:g}' if selected is not None else ''
+                    message = f'Restored strikes for {normalized_strike["ticker"]}.'
+                    if strike_text:
+                        message += f' Select Load Options by Strike to refresh {strike_text}.'
+                    self.set_status_text(self.p5_strike_status_lbl, message, status='muted')
         return bool(shared_ticker or (isinstance(chain_df, pd.DataFrame) and not chain_df.empty))
 
     def _p5_restore_startup_session(self, snapshot: Any) -> None:
         """Hydrate Options from the last session, then refresh it in the background."""
         restored = self._p5_restore_session_snapshot(snapshot)
         if restored and self._p5_shared_ticker():
-            self._p5_load_active_subtab()
+            self._p5_load_expiries()
+            for view_key in list(getattr(self, '_p5_top_volume_tab_order', [])):
+                self._p5_load_top_volume(view_key)
+            if self._p5_selected_strike() is not None:
+                self._p5_load_options_by_strike()
+            else:
+                self._p5_load_strike_values()
 
     def _p5_load_active_subtab(self) -> None:
         """Load all Options subtabs using the shared ticker."""
         self._p5_load_expiries()
         for view_key in list(getattr(self, '_p5_top_volume_tab_order', [])):
             self._p5_load_top_volume(view_key)
+        self._p5_load_strike_values()
 
     def _p5_top_volume_view(self, view_key: str) -> dict[str, Any]:
         """Return the metadata for one top-volume timeframe tab."""
@@ -643,6 +903,306 @@ class OptionsChainMixin:
             return []
         merged = pd.concat(frames, ignore_index=True)
         return self._p5_prepare_top_volume_records(merged, ticker, '')
+
+    def _p5_load_strike_values(self, *_: Any) -> None:
+        """Fetch all available strike values for the shared ticker."""
+        ticker = self._p5_shared_ticker()
+        if not ticker:
+            self._p5_strike_available_strikes = []
+            self._p5_reset_strike_combo()
+            self._p5_set_strike_bucket_config(())
+            self._p5_clear_strike_tables()
+            self._p5_strike_payload = self._p5_empty_strike_payload()
+            if hasattr(self, 'p5_strike_status_lbl'):
+                self.set_status_text(self.p5_strike_status_lbl, 'Enter a ticker above, load strikes, then choose a strike to view matching options across all available expirations.', status='muted')
+            return
+        current_payload = getattr(self, '_p5_strike_payload', {})
+        previous_ticker = str(current_payload.get('ticker', '') or '').upper().strip() if isinstance(current_payload, dict) else ''
+        previous_selected = self._p5_selected_strike() if previous_ticker == ticker else None
+        self._p5_strike_values_request_seq += 1
+        request_id = self._p5_strike_values_request_seq
+        self._p5_strike_values_latest_request_id = request_id
+        self._p5_strike_latest_request_id = 0
+        self._p5_strike_available_strikes = []
+        self._p5_reset_strike_combo()
+        self._p5_set_strike_bucket_config(())
+        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker)
+        if hasattr(self, 'p5_strike_status_lbl'):
+            self.set_status_text(self.p5_strike_status_lbl, f'Loading strikes for {ticker} across all available expirations...', status='warning')
+
+        def _run() -> None:
+            """Load all chains needed to build the strike dropdown."""
+            try:
+                expiries = self._get_cached_options_expiries(ticker)
+                if expiries is None:
+                    with YF_LOCK:
+                        ticker_obj = yf.Ticker(ticker)
+                        expiries = ticker_obj.options
+                    if expiries:
+                        self._save_cached_options_expiries(ticker, expiries)
+                bucket_config = self._p5_build_dynamic_top_volume_bucket_config(expiries)
+                strike_values = []
+                for bucket_key, _bucket_label, _days_out in bucket_config:
+                    try:
+                        chain_df = self._get_cached_option_chain(ticker, bucket_key)
+                        if chain_df is None or chain_df.empty or 'strike' not in chain_df.columns:
+                            continue
+                        strikes = pd.to_numeric(chain_df['strike'], errors='coerce').dropna()
+                        strike_values.extend(float(value) for value in strikes.tolist())
+                    except Exception as exc:
+                        logger.warning('Strike list load failed for %s %s: %s', ticker, bucket_key, exc)
+                if request_id != getattr(self, '_p5_strike_values_latest_request_id', 0):
+                    return
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, config=bucket_config, strikes=sorted(set(strike_values)), selected=previous_selected: self._p5_update_strike_values(
+                        rid,
+                        symbol,
+                        config,
+                        strikes,
+                        selected,
+                    )
+                )
+            except Exception as exc:
+                logger.error('P5 strike list load failed for %s: %s', ticker, exc)
+                if request_id != getattr(self, '_p5_strike_values_latest_request_id', 0):
+                    return
+                self._invoke_main.emit(lambda rid=request_id, symbol=ticker, message=str(exc): self._p5_handle_strike_values_error(rid, symbol, message))
+        self._submit_options_fetch(_run)
+
+    def _p5_update_strike_values(self, request_id: int, ticker: str, bucket_config: tuple[tuple[str, str, int], ...], strikes: list[float], selected_strike: float | None) -> None:
+        """Apply a loaded strike list if it still matches the active ticker."""
+        if request_id != getattr(self, '_p5_strike_values_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_strike_available_strikes = list(strikes or [])
+        selected = None
+        if selected_strike is not None:
+            for strike_value in self._p5_strike_available_strikes:
+                if abs(float(strike_value) - float(selected_strike)) <= self._P5_STRIKE_MATCH_TOLERANCE:
+                    selected = float(strike_value)
+                    break
+        self._p5_reset_strike_combo(selected)
+        self._p5_set_strike_bucket_config(bucket_config)
+        self._p5_clear_strike_tables()
+        self._p5_strike_payload = self._p5_empty_strike_payload(bucket_config, ticker=ticker, selected_strike=selected)
+        self._p5_save_session_snapshot()
+        expiry_count = len(bucket_config)
+        strike_count = len(self._p5_strike_available_strikes)
+        if not hasattr(self, 'p5_strike_status_lbl'):
+            return
+        if expiry_count <= 0:
+            self.set_status_text(self.p5_strike_status_lbl, f'No listed options expirations were available for {ticker}.', status='warning')
+        elif strike_count <= 0:
+            self.set_status_text(self.p5_strike_status_lbl, f'No strikes were available for {ticker} across {expiry_count} expirations.', status='warning')
+        elif selected is None:
+            self.set_status_text(self.p5_strike_status_lbl, f'Loaded {strike_count} strikes for {ticker}. Choose a strike, then load options by strike.', status='positive')
+        else:
+            self.set_status_text(self.p5_strike_status_lbl, f'Loaded {strike_count} strikes for {ticker}. Selected strike {selected:g}.', status='positive')
+
+    def _p5_handle_strike_values_error(self, request_id: int, ticker: str, message: str) -> None:
+        """Render a strike-list load failure if the request is still current."""
+        if request_id != getattr(self, '_p5_strike_values_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_strike_available_strikes = []
+        self._p5_reset_strike_combo()
+        self._p5_set_strike_bucket_config(())
+        self._p5_clear_strike_tables()
+        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker)
+        if hasattr(self, 'p5_strike_status_lbl'):
+            self.set_status_text(self.p5_strike_status_lbl, f'Error loading strikes for {ticker}: {message}', status='negative')
+
+    def _p5_load_options_by_strike(self, *_: Any) -> None:
+        """Fetch and render all contracts matching the selected strike across expirations."""
+        ticker = self._p5_shared_ticker()
+        selected_strike = self._p5_selected_strike()
+        if not ticker:
+            self._p5_set_strike_bucket_config(())
+            self._p5_clear_strike_tables()
+            self._p5_strike_payload = self._p5_empty_strike_payload()
+            if hasattr(self, 'p5_strike_status_lbl'):
+                self.set_status_text(self.p5_strike_status_lbl, 'Enter a ticker above, load strikes, then choose a strike to view matching options across all available expirations.', status='muted')
+            return
+        if selected_strike is None:
+            if hasattr(self, 'p5_strike_status_lbl'):
+                self.set_status_text(self.p5_strike_status_lbl, 'Choose a strike before loading options by strike.', status='warning')
+            return
+        self._p5_strike_request_seq += 1
+        request_id = self._p5_strike_request_seq
+        self._p5_strike_latest_request_id = request_id
+        self._p5_set_strike_bucket_config(())
+        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker, selected_strike=selected_strike)
+        if hasattr(self, 'p5_strike_status_lbl'):
+            self.set_status_text(self.p5_strike_status_lbl, f'Loading options by strike {selected_strike:g} for {ticker}...', status='warning')
+
+        def _run() -> None:
+            """Load and filter all expiration chains for one strike."""
+            try:
+                expiries = self._get_cached_options_expiries(ticker)
+                if expiries is None:
+                    with YF_LOCK:
+                        ticker_obj = yf.Ticker(ticker)
+                        expiries = ticker_obj.options
+                    if expiries:
+                        self._save_cached_options_expiries(ticker, expiries)
+                bucket_config = self._p5_build_dynamic_top_volume_bucket_config(expiries)
+                bucket_records = {bucket_key: [] for bucket_key, _, _ in bucket_config}
+                bucket_expirations = {bucket_key: bucket_key for bucket_key, _, _ in bucket_config}
+                for bucket_key, _bucket_label, _days_out in bucket_config:
+                    try:
+                        chain_df = self._get_cached_option_chain(ticker, bucket_key)
+                        bucket_records[bucket_key] = self._p5_prepare_strike_records(chain_df, ticker, bucket_key, selected_strike)
+                    except Exception as exc:
+                        logger.warning('Options by strike load failed for %s %s %.4f: %s', ticker, bucket_key, selected_strike, exc)
+                if request_id != getattr(self, '_p5_strike_latest_request_id', 0):
+                    return
+                self._invoke_main.emit(
+                    lambda rid=request_id, symbol=ticker, strike=selected_strike, config=bucket_config, records=bucket_records, expirations=bucket_expirations: self._p5_update_strike_view(
+                        rid,
+                        symbol,
+                        strike,
+                        config,
+                        records,
+                        expirations,
+                    )
+                )
+            except Exception as exc:
+                logger.error('P5 options by strike load failed for %s %.4f: %s', ticker, selected_strike, exc)
+                if request_id != getattr(self, '_p5_strike_latest_request_id', 0):
+                    return
+                self._invoke_main.emit(lambda rid=request_id, symbol=ticker, strike=selected_strike, message=str(exc): self._p5_handle_strike_error(rid, symbol, strike, message))
+        self._submit_options_fetch(_run)
+
+    def _p5_prepare_strike_records(self, chain_df: Any, ticker: str, expiry: str, selected_strike: float) -> list[dict[str, Any]]:
+        """Normalize one chain and return rows matching the selected strike."""
+        if chain_df is None or chain_df.empty:
+            return []
+        prepared = chain_df.copy()
+        if 'ticker' not in prepared.columns:
+            prepared['ticker'] = ticker
+        if 'type' not in prepared.columns:
+            prepared['type'] = ''
+        if 'expiration' not in prepared.columns:
+            prepared['expiration'] = expiry
+        for col in ('strike', 'lastPrice', 'volume', 'openInterest'):
+            if col not in prepared.columns:
+                prepared[col] = 0.0
+            prepared[col] = pd.to_numeric(prepared[col], errors='coerce')
+        strike_series = prepared['strike']
+        matches = prepared[(strike_series - float(selected_strike)).abs() <= self._P5_STRIKE_MATCH_TOLERANCE].copy()
+        if matches.empty:
+            return []
+        matches['volume'] = matches['volume'].fillna(0.0)
+        matches['openInterest'] = matches['openInterest'].fillna(0.0)
+        type_order = {'Call': 0, 'Put': 1}
+        matches['_type_order'] = matches['type'].map(type_order).fillna(2)
+        matches = matches.sort_values(by=['_type_order', 'volume', 'openInterest'], ascending=[True, False, False], na_position='last')
+        return matches.drop(columns=['_type_order'], errors='ignore').to_dict('records')
+
+    def _p5_update_strike_view(self, request_id: int, ticker: str, selected_strike: float, bucket_config: tuple[tuple[str, str, int], ...], bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+        """Store and render the latest Options by Strike payload."""
+        if request_id != getattr(self, '_p5_strike_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_set_strike_bucket_config(bucket_config)
+        normalized_payload = self._p5_normalize_strike_payload(
+            {
+                'ticker': ticker,
+                'selected_strike': selected_strike,
+                'available_strikes': list(getattr(self, '_p5_strike_available_strikes', []) or []),
+                'bucket_order': [bucket_key for bucket_key, _, _ in bucket_config],
+                'records': bucket_records,
+                'expirations': bucket_expirations,
+            },
+            ticker=ticker,
+        )
+        normalized_records = normalized_payload.get('records', {}) if isinstance(normalized_payload.get('records', {}), dict) else {}
+        normalized_expirations = normalized_payload.get('expirations', {}) if isinstance(normalized_payload.get('expirations', {}), dict) else {}
+        self._p5_strike_payload = normalized_payload
+        self._p5_save_session_snapshot()
+        self._p5_render_strike_tables(ticker, selected_strike, normalized_records, normalized_expirations)
+        row_total = sum(len(records) for records in normalized_records.values())
+        expiry_count = len(normalized_payload.get('bucket_order', []))
+        populated_count = sum(1 for records in normalized_records.values() if records)
+        if not hasattr(self, 'p5_strike_status_lbl'):
+            return
+        if expiry_count <= 0:
+            self.set_status_text(self.p5_strike_status_lbl, f'No listed options expirations were available for {ticker}.', status='warning')
+            return
+        if row_total <= 0:
+            self.set_status_text(self.p5_strike_status_lbl, f'No options by strike data was available for {ticker} at strike {selected_strike:g} across {expiry_count} expirations.', status='warning')
+            return
+        status_text = f"Options by Strike updated for {ticker} strike {selected_strike:g} at {datetime.datetime.now().strftime('%H:%M:%S')}"
+        status_text += f' | {row_total} rows across {expiry_count} expirations'
+        if populated_count < expiry_count:
+            status_text += f' | {expiry_count - populated_count} expirations returned no matching rows'
+        self.set_status_text(self.p5_strike_status_lbl, status_text, status='positive' if populated_count == expiry_count else 'warning')
+
+    def _p5_handle_strike_error(self, request_id: int, ticker: str, selected_strike: float, message: str) -> None:
+        """Render an Options by Strike load failure if the request is still current."""
+        if request_id != getattr(self, '_p5_strike_latest_request_id', 0):
+            return
+        if ticker != self._p5_shared_ticker():
+            return
+        self._p5_set_strike_bucket_config(())
+        self._p5_clear_strike_tables()
+        self._p5_strike_payload = self._p5_empty_strike_payload((), ticker=ticker, selected_strike=selected_strike)
+        if hasattr(self, 'p5_strike_status_lbl'):
+            self.set_status_text(self.p5_strike_status_lbl, f'Error loading options by strike for {ticker}: {message}', status='negative')
+
+    def _p5_render_strike_tables(self, ticker: str, selected_strike: float | None, bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
+        """Render strike-matched records into the UI tables."""
+        sections = getattr(self, 'p5_strike_sections', {}) if isinstance(getattr(self, 'p5_strike_sections', {}), dict) else {}
+        for bucket_key, _bucket_label, _days_out in self._p5_strike_buckets():
+            section = sections.get(bucket_key, {})
+            table = section.get('table')
+            expiry = str(bucket_expirations.get(bucket_key, '') or '')
+            expiry_display = self._p5_format_top_volume_expiration(expiry)
+            self._p5_set_strike_bucket_title(bucket_key, expiry)
+            if table is None:
+                continue
+            table.setRowCount(0)
+            strike_text = f'{selected_strike:g}' if selected_strike is not None else 'unselected'
+            table.setToolTip(f'Using expiration {expiry_display} and strike {strike_text}' if expiry_display else f'No expiration available for strike {strike_text}')
+            for opt in list(bucket_records.get(bucket_key, [])):
+                row = table.rowCount()
+                table.insertRow(row)
+                ticker_item = QTableWidgetItem(str(opt.get('ticker', ticker) or ticker))
+                ticker_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 0, ticker_item)
+                type_value = str(opt.get('type', '') or '')
+                type_item = QTableWidgetItem(type_value)
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if type_value == 'Call':
+                    type_item.setForeground(self.theme_qcolor('accent_positive'))
+                elif type_value == 'Put':
+                    type_item.setForeground(self.theme_qcolor('accent_negative'))
+                table.setItem(row, 1, type_item)
+                strike = opt.get('strike')
+                strike_item = QTableWidgetItem(f'{float(strike):.1f}' if strike is not None and not pd.isna(strike) else '')
+                strike_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 2, strike_item)
+                exp_value = str(opt.get('expiration', '') or expiry)
+                exp_item = QTableWidgetItem(self._p5_format_top_volume_expiration(exp_value))
+                exp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 3, exp_item)
+                last_price = opt.get('lastPrice')
+                price_item = QTableWidgetItem(f'{float(last_price):.2f}' if last_price is not None and not pd.isna(last_price) else '')
+                price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 4, price_item)
+                volume = opt.get('volume', 0)
+                vol_text = '0'
+                if volume is not None and not pd.isna(volume):
+                    try:
+                        vol_text = f'{int(float(volume)):,}'
+                    except (TypeError, ValueError, OverflowError):
+                        vol_text = str(volume)
+                vol_item = QTableWidgetItem(vol_text)
+                vol_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 5, vol_item)
 
     def _p5_update_top_volume_view(self, view_key: str, request_id: int, ticker: str, bucket_config: tuple[tuple[str, str, int], ...], bucket_records: dict[str, list[dict[str, Any]]], bucket_expirations: dict[str, str]) -> None:
         """Store and render the latest all-expiry top-volume payload."""
@@ -1502,6 +2062,25 @@ class OptionsChainMixin:
                     normalized_payload.get('records', {}) if isinstance(normalized_payload.get('records', {}), dict) else {},
                     normalized_payload.get('expirations', {}) if isinstance(normalized_payload.get('expirations', {}), dict) else {},
                 )
+        if hasattr(self, 'p5_strike_status_lbl'):
+            self.set_status_text(
+                self.p5_strike_status_lbl,
+                self.p5_strike_status_lbl.text(),
+                status=self.p5_strike_status_lbl.property('bt_status') or 'muted',
+            )
+        strike_payload = getattr(self, '_p5_strike_payload', {})
+        if isinstance(strike_payload, dict) and hasattr(self, 'p5_strike_grid_layout'):
+            normalized_strike = self._p5_normalize_strike_payload(strike_payload)
+            self._p5_strike_available_strikes = list(normalized_strike.get('available_strikes', []) or [])
+            self._p5_reset_strike_combo(normalized_strike.get('selected_strike'))
+            bucket_config = self._p5_build_dynamic_top_volume_bucket_config(normalized_strike.get('bucket_order', []))
+            self._p5_set_strike_bucket_config(bucket_config)
+            self._p5_render_strike_tables(
+                str(normalized_strike.get('ticker', '') or ''),
+                normalized_strike.get('selected_strike'),
+                normalized_strike.get('records', {}) if isinstance(normalized_strike.get('records', {}), dict) else {},
+                normalized_strike.get('expirations', {}) if isinstance(normalized_strike.get('expirations', {}), dict) else {},
+            )
 
     def _p5_format_chain_value(self, value: Any, fmt: str) -> str:
         """Format a chain cell value for display."""

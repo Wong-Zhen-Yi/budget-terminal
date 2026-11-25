@@ -43,6 +43,18 @@ _P13_MAX_NAMED_SLICES = 12
 _P13_MIN_REMAINDER_WEIGHT = 0.001
 
 
+class _AumTableWidgetItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by its raw numeric AUM value."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        try:
+            left = float(self.data(Qt.ItemDataRole.UserRole))
+            right = float(other.data(Qt.ItemDataRole.UserRole))
+            return left < right
+        except Exception:
+            return super().__lt__(other)
+
+
 class EtfAnalyserMixin:
     def _p13_build_service(self) -> Any:
         """Import and construct the ETF holdings service only when the page is initialized."""
@@ -61,6 +73,7 @@ class EtfAnalyserMixin:
         self._p13_aum_cache: dict[str, float] = {}
         self._p13_active_aum_range: int = -1
         self._p13_aum_fetch_in_progress: bool = False
+        self._p13_aum_missing_count: int = 0
 
         outer_layout = QHBoxLayout(self.page13)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -542,30 +555,42 @@ class EtfAnalyserMixin:
 
         def _fetch() -> None:
             cache: dict[str, float] = {}
+            missing_count = 0
             total = len(ETF_UNIVERSE)
             for i, ticker in enumerate(ETF_UNIVERSE):
-                try:
-                    with YF_LOCK:
-                        info = yf.Ticker(ticker).info
-                    assets = info.get('totalAssets')
-                    if assets and assets > 0:
-                        cache[ticker] = float(assets)
-                except Exception:
-                    pass
+                assets = self._p13_fetch_aum(ticker)
+                if assets is None:
+                    missing_count += 1
+                else:
+                    cache[ticker] = assets
                 if (i + 1) % 10 == 0 or i == total - 1:
-                    progress_msg = f'Fetching AUM data... {i + 1}/{total}'
+                    progress_msg = f'Fetching AUM data... {i + 1}/{total} ({len(cache)} loaded)'
                     self._invoke_main.emit(lambda m=progress_msg: self._p13_aum_status_lbl.setText(m))
-            self._invoke_main.emit(lambda c=cache: self._p13_on_aum_data_ready(c))
+            self._invoke_main.emit(
+                lambda c=cache, m=missing_count, t=total: self._p13_on_aum_data_ready(c, m, t)
+            )
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _p13_on_aum_data_ready(self, cache: dict[str, float]) -> None:
+    def _p13_on_aum_data_ready(
+        self,
+        cache: dict[str, float],
+        missing_count: int=0,
+        total_count: int | None=None,
+    ) -> None:
         """Store AUM cache and apply the active filter."""
         self._p13_aum_cache = cache
+        self._p13_aum_missing_count = max(0, int(missing_count or 0))
         self._p13_aum_fetch_in_progress = False
         for btn in self._p13_aum_buttons:
             btn.setEnabled(True)
-        self._p13_aum_status_lbl.setText(f'Loaded AUM for {len(cache)} ETFs.')
+        total = total_count if total_count is not None else len(cache) + self._p13_aum_missing_count
+        if self._p13_aum_missing_count:
+            self._p13_aum_status_lbl.setText(
+                f'Loaded AUM for {len(cache)}/{total} ETFs; {self._p13_aum_missing_count} unavailable.'
+            )
+        else:
+            self._p13_aum_status_lbl.setText(f'Loaded AUM for {len(cache)} ETFs.')
         self._p13_apply_aum_filter()
 
     def _p13_apply_aum_filter(self) -> None:
@@ -586,14 +611,64 @@ class EtfAnalyserMixin:
         self._p13_aum_table.setRowCount(len(filtered))
         for row, (ticker, aum) in enumerate(filtered):
             t_item = QTableWidgetItem(ticker)
+            t_item.setData(Qt.ItemDataRole.UserRole, ticker)
+            t_item.setData(Qt.ItemDataRole.UserRole + 1, aum)
             t_item.setForeground(self.theme_qcolor('text_primary'))
-            a_item = QTableWidgetItem(self._p13_format_aum(aum))
+            a_item = _AumTableWidgetItem(self._p13_format_aum(aum))
+            a_item.setData(Qt.ItemDataRole.UserRole, aum)
+            a_item.setData(Qt.ItemDataRole.UserRole + 1, ticker)
             a_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             a_item.setForeground(self.theme_qcolor('accent_positive'))
             self._p13_aum_table.setItem(row, 0, t_item)
             self._p13_aum_table.setItem(row, 1, a_item)
         self._p13_aum_table.setSortingEnabled(True)
-        self._p13_aum_status_lbl.setText(f'{len(filtered)} ETFs in {_label} range.')
+        self._p13_aum_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+        if not self._p13_aum_cache:
+            self._p13_aum_status_lbl.setText('No usable AUM data returned by Yahoo Finance.')
+        elif self._p13_aum_missing_count:
+            self._p13_aum_status_lbl.setText(
+                f'{len(filtered)} ETFs in {_label} range. '
+                f'AUM unavailable for {self._p13_aum_missing_count} ETFs.'
+            )
+        else:
+            self._p13_aum_status_lbl.setText(f'{len(filtered)} ETFs in {_label} range.')
+
+    @staticmethod
+    def _p13_fetch_aum(ticker: str) -> float | None:
+        """Fetch one ETF AUM value from Yahoo Finance with a normalized fallback."""
+        try:
+            with YF_LOCK:
+                ticker_obj = yf.Ticker(ticker)
+                info = ticker_obj.info or {}
+                assets = EtfAnalyserMixin._p13_positive_float(info.get('totalAssets'))
+                if assets is not None:
+                    return assets
+                funds_data = ticker_obj.funds_data
+                fund_ops = funds_data.fund_operations.copy()
+        except Exception:
+            return None
+
+        if fund_ops is None or getattr(fund_ops, 'empty', True):
+            return None
+        try:
+            assets_value = fund_ops.at['Total Net Assets', ticker]
+        except Exception:
+            return None
+        assets = EtfAnalyserMixin._p13_positive_float(assets_value)
+        if assets is None:
+            return None
+        return assets * 1_000_000.0
+
+    @staticmethod
+    def _p13_positive_float(value: Any) -> float | None:
+        """Return a positive finite float or None for missing Yahoo values."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        return number
 
     def _apply_etf_theme(self) -> None:
         """Refresh ETF page colors and chart styling after a theme change."""

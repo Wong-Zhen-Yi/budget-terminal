@@ -31,6 +31,8 @@ class ThemeSupportMixin:
             ("_apply_news_theme", "page3"),
             ("_apply_networth_theme", "page6"),
             ("_apply_sectors_theme", "page8"),
+            ("_apply_spy_heatmap_theme", "page17"),
+            ("_apply_random_recommender_theme", "page18"),
             ("_apply_settings_theme", "page9"),
             ("_apply_charts_page_theme", "page10"),
             ("_apply_stocks_theme", "page12"),

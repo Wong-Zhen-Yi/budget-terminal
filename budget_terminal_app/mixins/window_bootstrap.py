@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import deque
 from copy import deepcopy
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 from .. import __version__
 from ..compat import *
@@ -36,7 +36,19 @@ def _window_bootstrap_default_portfolio_entry(portfolio_id: Any) -> Any:
         'chart_slots': list(DEFAULT_CHART_SLOTS),
         'portfolio_tracker': {},
         'options_tracker': [],
+        'cash_balance': 0.0,
     }
+
+
+def _window_bootstrap_normalize_cash_balance(value: Any) -> float:
+    """Return a non-negative brokerage cash balance."""
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    return max(amount, 0.0)
 
 
 def _window_bootstrap_normalize_portfolio_order(raw_order: Any, raw_portfolios: Any=None) -> list[str]:
@@ -75,6 +87,52 @@ class WindowBootstrapMixin:
         if profiler is None:
             return nullcontext()
         return profiler.step(name)
+
+    @contextmanager
+    def _startup_progress_step(self, key: str, label: str | None = None) -> Any:
+        """Update the startup loading screen around one synchronous step."""
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin(key, label)
+        try:
+            yield
+        finally:
+            if progress is not None:
+                progress.complete(key, label)
+
+    def _startup_progress_begin(self, key: str, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin(key, label)
+
+    def _startup_progress_complete(self, key: str, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.complete(key, label)
+
+    def _startup_progress_begin_page(self, index: Any, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.begin_page(index, label)
+
+    def _startup_progress_complete_page(self, index: Any, label: str | None = None) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.complete_page(index, label)
+
+    def _startup_progress_register_pages(self, page_labels: Any) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.register_pages(page_labels)
+
+    def _startup_progress_switch_to_compact(self) -> None:
+        progress = getattr(self, '_startup_progress', None)
+        if progress is not None:
+            progress.switch_to_compact(self)
+
+    def _startup_progress_finish_if_complete(self) -> bool:
+        progress = getattr(self, '_startup_progress', None)
+        return bool(progress is not None and progress.finish_if_complete())
 
     def _get_cache_manager(self) -> Any:
         """Return the shared cache manager for the running app session."""
@@ -143,11 +201,13 @@ class WindowBootstrapMixin:
             'chart_slots': list(DEFAULT_CHART_SLOTS),
             'portfolio_tracker': {},
             'options_tracker': [],
+            'cash_balance': 0.0,
         })
         entry.setdefault('portfolio', [])
         entry.setdefault('chart_slots', list(DEFAULT_CHART_SLOTS))
         entry.setdefault('portfolio_tracker', {})
         entry.setdefault('options_tracker', [])
+        entry['cash_balance'] = _window_bootstrap_normalize_cash_balance(entry.get('cash_balance'))
         return entry
 
     def _apply_main_portfolio_runtime(self) -> None:
@@ -156,6 +216,7 @@ class WindowBootstrapMixin:
         self.tickers = entry['portfolio']
         self.chart_slots = entry['chart_slots']
         self.tracker_data = entry['portfolio_tracker']
+        self.cash_balance = entry['cash_balance']
         if not getattr(self, '_dashboard_chart_initialized', False):
             fallback_symbol = str((self.chart_slots[0] if self.chart_slots else '') or '').upper().strip()
             current_symbol = str(getattr(self, 'dashboard_chart_state', {}).get('symbol', '') or '').upper().strip()
@@ -173,6 +234,7 @@ class WindowBootstrapMixin:
         self.active_tracker_data = entry['portfolio_tracker']
         self.options_data = entry['options_tracker']
         self.active_options_data = self.options_data
+        self.active_cash_balance = entry['cash_balance']
 
     def _save_active_options_data(self) -> None:
         """Persist page-4 options rows to the selected active portfolio."""
@@ -510,17 +572,17 @@ class WindowBootstrapMixin:
         self._sync_after_portfolio_change(refresh_main=deleted_main)
         return True
 
-    def __init__(self, startup_profiler: Any=None, data_service_client: Any=None) -> None:
+    def __init__(self, startup_profiler: Any=None, data_service_client: Any=None, startup_progress: Any=None) -> None:
         """Initialize the object."""
         super().__init__()
         self._startup_profiler = startup_profiler
+        self._startup_progress = startup_progress
         self._data_service_client = data_service_client
         self._invoke_main.connect(self._on_invoke_main)
-        with self._startup_profiler_step('window_init'):
+        with self._startup_profiler_step('window_init'), self._startup_progress_step('window_init', 'Main window'):
             self._init_session_log_capture()
             self.setWindowTitle(f'Budget Terminal v{__version__}')
-            self.resize(1280, 600)
-            with self._startup_profiler_step('state_load'):
+            with self._startup_profiler_step('state_load'), self._startup_progress_step('state_load', 'Saved state'):
                 self.all_portfolios_state = load_all_portfolios_state()
                 self.main_portfolio_id = self.all_portfolios_state.get('main_portfolio_id', DEFAULT_MAIN_PORTFOLIO_ID)
                 self.active_portfolio_id = self.all_portfolios_state.get('active_portfolio_id', self.main_portfolio_id)
@@ -598,6 +660,7 @@ class WindowBootstrapMixin:
             self._startup_page_prefetch_pending = False
             self._startup_session_restore_pending = False
             self._startup_session_restore_queue = []
+            self._startup_dashboard_data_done = False
             self._lazy_warmup_queue = []
             self._lazy_page_warmup_timer = QTimer(self)
             self._lazy_page_warmup_timer.setSingleShot(True)
@@ -614,22 +677,37 @@ class WindowBootstrapMixin:
             self.active_tickers = []
             self.active_tracker_data = {}
             self.active_options_data = []
-            with self._startup_profiler_step('theme_init'):
+            with self._startup_profiler_step('theme_init'), self._startup_progress_step('theme_init', 'Theme system'):
                 self.init_theme_system(apply=False)
             self.dashboard_chart_rows = []
             self.dashboard_chart_ma200 = None
             self.dashboard_chart_view_guard = False
             self._apply_main_portfolio_runtime()
             self._apply_active_portfolio_editor_state()
-            with self._startup_profiler_step('ui_build'):
+            with self._startup_profiler_step('ui_build'), self._startup_progress_step('ui_build', 'UI layout'):
                 self.init_ui()
-            with self._startup_profiler_step('theme_apply'):
+            with self._startup_profiler_step('theme_apply'), self._startup_progress_step('theme_apply', 'Theme styling'):
                 self.theme_manager.apply_theme(self.current_theme_id, persist=False)
             self._sync_after_portfolio_change(refresh_main=False)
+            self._apply_startup_window_size()
 
     def _on_invoke_main(self, fn: Any) -> None:
         """Handle invoke main."""
         fn()
+
+    def _apply_startup_window_size(self) -> None:
+        """Apply one stable startup size after the initial UI has its final size hints."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 800)
+            return
+        available = screen.availableGeometry()
+        width = min(1280, max(640, available.width() - 80))
+        height = min(800, max(480, available.height() - 100))
+        minimum_hint = self.minimumSizeHint()
+        width = max(width, minimum_hint.width())
+        height = max(height, minimum_hint.height())
+        self.resize(width, height)
 
     def _start_clock_timer(self) -> None:
         """Handle start clock timer."""

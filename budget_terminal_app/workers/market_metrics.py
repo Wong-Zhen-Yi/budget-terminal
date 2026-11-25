@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any
-from ..dependencies import *
+from ..dependencies import QObject, ThreadPoolExecutor, YF_LOCK, is_yahoo_unauthorized_error, logger, math, pd, pyqtSignal, yf
 
 
 def _worker_count(tickers: Any, upper_bound: int = 8) -> int:
@@ -56,10 +56,51 @@ class MonthReturnWorker(QObject):
         """Handle run."""
         self.finished.emit(self.fetch())
 
+def _normalize_cash_amount(value: Any) -> float:
+    """Return a non-negative finite cash amount."""
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    return max(amount, 0.0)
+
+
+def _synthetic_business_index(*, start: Any=None, period: str='1mo') -> Any:
+    """Build a simple business-day index for flat cash-only histories."""
+    today = pd.Timestamp.today().normalize()
+    if start is not None:
+        try:
+            start_ts = pd.Timestamp(start).normalize()
+        except Exception:
+            start_ts = today - pd.tseries.offsets.BDay(22)
+        index = pd.bdate_range(start=start_ts, end=today)
+    else:
+        period_key = str(period or '1mo').strip().lower()
+        periods = {
+            '1d': 2,
+            '5d': 5,
+            '1mo': 23,
+            '3mo': 64,
+            '6mo': 127,
+            'ytd': max(len(pd.bdate_range(start=pd.Timestamp(today.year, 1, 1), end=today)), 2),
+            '1y': 253,
+            '2y': 505,
+            '3y': 757,
+            '5y': 1261,
+            'max': 1261,
+        }.get(period_key, 23)
+        index = pd.bdate_range(end=today, periods=max(int(periods), 2))
+    if len(index) < 2:
+        index = pd.bdate_range(end=today, periods=2)
+    return index
+
+
 class PortfolioMomentumWorker(QObject):
     finished = pyqtSignal(dict)
 
-    def __init__(self, tickers: Any, shares_map: Any, period: str='1mo', interval: str='1d', start: Any=None) -> None:
+    def __init__(self, tickers: Any, shares_map: Any, period: str='1mo', interval: str='1d', start: Any=None, cash_amount: Any=0.0) -> None:
         """Initialize the object."""
         super().__init__()
         self.tickers = tickers
@@ -67,6 +108,7 @@ class PortfolioMomentumWorker(QObject):
         self.period = period
         self.interval = interval
         self.start = start
+        self.cash_amount = _normalize_cash_amount(cash_amount)
 
     def _empty_payload(self, reason: str, *, included: Any=None, excluded: Any=None) -> dict[str, Any]:
         """Build a normalized empty momentum payload."""
@@ -105,8 +147,23 @@ class PortfolioMomentumWorker(QObject):
                     positive_positions.append((ticker, shares))
                 else:
                     excluded_tickers.append(ticker)
-            if not positive_positions:
+            if not positive_positions and self.cash_amount <= 0.0:
                 return self._empty_payload('No positive-share positions', excluded=excluded_tickers)
+
+            def cash_payload() -> dict[str, Any]:
+                """Build a flat momentum payload for cash-only portfolios."""
+                cash_index = _synthetic_business_index(start=self.start, period=self.period)
+                dates = [pd.Timestamp(ts).date() for ts in cash_index]
+                return {
+                    'dates': dates,
+                    'returns': [0.0 for _ts in cash_index],
+                    'start_value': self.cash_amount,
+                    'end_value': self.cash_amount,
+                    'included_tickers': ['CASH'],
+                    'excluded_tickers': excluded_tickers,
+                    'start_date': dates[0].isoformat() if dates else None,
+                    'reason': '',
+                }
 
             def fetch_position_series(position: Any) -> Any:
                 """Fetch one adjusted price series and convert it to position value."""
@@ -152,6 +209,8 @@ class PortfolioMomentumWorker(QObject):
                 position_series[ticker] = series
             included_tickers = [ticker for ticker, _shares in positive_positions if ticker in position_series]
             if not included_tickers:
+                if self.cash_amount > 0.0:
+                    return cash_payload()
                 return self._empty_payload('No historical data available', included=included_tickers, excluded=excluded_tickers)
 
             common_index = None
@@ -172,6 +231,9 @@ class PortfolioMomentumWorker(QObject):
             total_series = pd.to_numeric(total_series, errors='coerce').dropna()
             if total_series.empty or len(total_series.index) < 2:
                 return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
+            if self.cash_amount > 0.0:
+                total_series = total_series + self.cash_amount
+                included_tickers = [*included_tickers, 'CASH']
             start_value = float(total_series.iloc[0])
             if start_value <= 0:
                 return self._empty_payload('No common historical window', included=included_tickers, excluded=excluded_tickers)
@@ -215,6 +277,7 @@ class PortfolioAnalyticsWorker(QObject):
         prices_map: Any=None,
         benchmark_symbol: str='SPY',
         lookback_key: str='1y',
+        cash_amount: Any=0.0,
     ) -> None:
         """Initialize the object."""
         super().__init__()
@@ -223,6 +286,7 @@ class PortfolioAnalyticsWorker(QObject):
         self.prices_map = prices_map if isinstance(prices_map, dict) else {}
         self.benchmark_symbol = str(benchmark_symbol or 'SPY').upper().strip() or 'SPY'
         self.lookback_key = str(lookback_key or '1y').strip().lower()
+        self.cash_amount = _normalize_cash_amount(cash_amount)
 
     def _empty_exposure(self, *, holdings_count: int=0) -> dict[str, Any]:
         """Build a normalized empty exposure payload."""
@@ -285,6 +349,17 @@ class PortfolioAnalyticsWorker(QObject):
     def _history_period(self) -> str:
         """Return the yfinance period string for the selected lookback."""
         return self._LOOKBACK_PERIODS.get(self.lookback_key, self._LOOKBACK_PERIODS['1y'])
+
+    def _cash_history_index(self, benchmark_series: Any=None) -> Any:
+        """Return an index for a flat cash-only analytics series."""
+        if benchmark_series is not None:
+            try:
+                index = pd.Index(benchmark_series.index).sort_values()
+                if len(index) >= 2:
+                    return index
+            except Exception:
+                pass
+        return _synthetic_business_index(period=self._history_period())
 
     def _fetch_price_series(self, symbol: str) -> Any:
         """Fetch one normalized adjusted-close history series."""
@@ -388,7 +463,7 @@ class PortfolioAnalyticsWorker(QObject):
                     shares = 0.0
                 if shares > 0:
                     positive_positions.append((ticker, shares))
-            if not positive_positions:
+            if not positive_positions and self.cash_amount <= 0.0:
                 return self._empty_payload('No positive-share holdings')
 
             def fetch_position_series(position: Any) -> Any:
@@ -420,42 +495,54 @@ class PortfolioAnalyticsWorker(QObject):
                 position_series[ticker] = series
                 if ticker not in current_values:
                     current_values[ticker] = float(series.iloc[-1])
-            exposure = self._compute_exposure(positive_positions, current_values)
+            exposure_positions = list(positive_positions)
+            if self.cash_amount > 0.0:
+                current_values['CASH'] = self.cash_amount
+                exposure_positions.append(('CASH', 1.0))
+            exposure = self._compute_exposure(exposure_positions, current_values)
 
             included_tickers = [ticker for ticker, _shares in positive_positions if ticker in position_series]
             if not included_tickers:
-                return self._empty_payload(
-                    'No historical data available',
-                    exposure=exposure,
-                    included=included_tickers,
-                    excluded=excluded_tickers,
-                )
+                if self.cash_amount <= 0.0:
+                    return self._empty_payload(
+                        'No historical data available',
+                        exposure=exposure,
+                        included=included_tickers,
+                        excluded=excluded_tickers,
+                    )
+                benchmark_series = self._fetch_price_series(self.benchmark_symbol)
+                cash_index = self._cash_history_index(benchmark_series)
+                total_series = pd.Series([self.cash_amount for _ts in cash_index], index=cash_index, dtype='float64')
+                included_tickers = ['CASH']
+            else:
+                common_index = None
+                for ticker in included_tickers:
+                    idx = pd.Index(position_series[ticker].index)
+                    common_index = idx if common_index is None else common_index.intersection(idx)
+                if common_index is None or len(common_index) < 2:
+                    return self._empty_payload(
+                        'No common historical window',
+                        exposure=exposure,
+                        included=included_tickers,
+                        excluded=excluded_tickers,
+                    )
+                common_index = common_index.sort_values()
+                aligned_positions = pd.concat(
+                    [position_series[ticker].reindex(common_index) for ticker in included_tickers],
+                    axis=1,
+                ).dropna(how='any')
+                if aligned_positions.empty or len(aligned_positions.index) < 2:
+                    return self._empty_payload(
+                        'No common historical window',
+                        exposure=exposure,
+                        included=included_tickers,
+                        excluded=excluded_tickers,
+                    )
 
-            common_index = None
-            for ticker in included_tickers:
-                idx = pd.Index(position_series[ticker].index)
-                common_index = idx if common_index is None else common_index.intersection(idx)
-            if common_index is None or len(common_index) < 2:
-                return self._empty_payload(
-                    'No common historical window',
-                    exposure=exposure,
-                    included=included_tickers,
-                    excluded=excluded_tickers,
-                )
-            common_index = common_index.sort_values()
-            aligned_positions = pd.concat(
-                [position_series[ticker].reindex(common_index) for ticker in included_tickers],
-                axis=1,
-            ).dropna(how='any')
-            if aligned_positions.empty or len(aligned_positions.index) < 2:
-                return self._empty_payload(
-                    'No common historical window',
-                    exposure=exposure,
-                    included=included_tickers,
-                    excluded=excluded_tickers,
-                )
-
-            total_series = pd.to_numeric(aligned_positions.sum(axis=1), errors='coerce').dropna()
+                total_series = pd.to_numeric(aligned_positions.sum(axis=1), errors='coerce').dropna()
+                if self.cash_amount > 0.0:
+                    total_series = total_series + self.cash_amount
+                    included_tickers = [*included_tickers, 'CASH']
             if total_series.empty or len(total_series.index) < 2:
                 return self._empty_payload(
                     'No common historical window',
@@ -480,6 +567,8 @@ class PortfolioAnalyticsWorker(QObject):
                 if std_return > 0:
                     metrics['volatility'] = std_return * math.sqrt(self._ANNUALIZATION_DAYS) * 100.0
                     metrics['sharpe'] = (mean_return / std_return) * math.sqrt(self._ANNUALIZATION_DAYS)
+                else:
+                    metrics['volatility'] = 0.0
                 downside_returns = portfolio_returns.clip(upper=0.0)
                 downside_deviation = math.sqrt(float(downside_returns.pow(2).mean())) if not downside_returns.empty else 0.0
                 if downside_deviation > 0:
@@ -489,6 +578,8 @@ class PortfolioAnalyticsWorker(QObject):
                         metrics['skewness'] = float(portfolio_returns.skew())
                     except Exception:
                         metrics['skewness'] = None
+                    if metrics['skewness'] is not None and not math.isfinite(metrics['skewness']):
+                        metrics['skewness'] = 0.0
                 try:
                     var_cutoff = float(portfolio_returns.quantile(0.05))
                     cvar_tail = portfolio_returns[portfolio_returns <= var_cutoff]
@@ -514,7 +605,7 @@ class PortfolioAnalyticsWorker(QObject):
                     metrics['cagr'] = None
 
             note = ''
-            benchmark_series = self._fetch_price_series(self.benchmark_symbol)
+            benchmark_series = benchmark_series if 'benchmark_series' in locals() else self._fetch_price_series(self.benchmark_symbol)
             if benchmark_series is None:
                 note = f'Benchmark {self.benchmark_symbol} unavailable; alpha and beta omitted.'
             else:

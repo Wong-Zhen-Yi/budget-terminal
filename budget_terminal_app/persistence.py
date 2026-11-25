@@ -9,15 +9,17 @@ if __package__ in {None, ''}:
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
     from budget_terminal_app import __version__ as APP_VERSION
-    from budget_terminal_app.dependencies import *
+    from budget_terminal_app.dependencies import datetime, json, logger, math, pd
     from budget_terminal_app.paths import legacy_documents_user_data_path, user_data_path
+    from budget_terminal_app.persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
 else:
     from . import __version__ as APP_VERSION
-    from .dependencies import *
+    from .dependencies import datetime, json, logger, math, pd
     from .paths import legacy_documents_user_data_path, user_data_path
+    from .persistence_schema import USER_DATA_SCHEMA_VERSION, migrate_user_data_payload
 
 DEFAULT_CHART_SLOTS = ['AAPL', 'TSLA', 'NVDA']
-USER_DATA_BACKUP_VERSION = 8
+USER_DATA_BACKUP_VERSION = USER_DATA_SCHEMA_VERSION
 USER_DATA_FILE = user_data_path('user_data.json')
 LEGACY_USER_DATA_FILE = legacy_documents_user_data_path('user_data.json')
 ROLLBACK_BACKUPS_DIR = user_data_path('backups', 'rollbacks')
@@ -213,6 +215,17 @@ def _normalize_portfolio_names(raw_names: Any) -> Any:
     return names
 
 
+def _normalize_cash_balance(value: Any) -> float:
+    """Normalize a persisted brokerage cash balance."""
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    return max(amount, 0.0)
+
+
 def _empty_multi_portfolio_payload(chart_slots: Any=None) -> Any:
     """Create an empty normalized multi-portfolio payload."""
     return {'chart_slots': _normalize_chart_slots(chart_slots), 'portfolios': {portfolio_id: [] for portfolio_id in PORTFOLIO_IDS}}
@@ -283,6 +296,7 @@ def _normalize_portfolio_state(state: Any, chart_slots: Any=None) -> Any:
             'tickers': _normalize_unique_symbol_list(raw_entry.get('tickers', raw_entry.get('portfolio', []))),
             'tracker_data': tracker_data,
             'options_data': options_data,
+            'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
         }
     return {
         'chart_slots': base['chart_slots'],
@@ -306,6 +320,7 @@ def _default_portfolio_entry(portfolio_id: Any, chart_slots: Any=None) -> Any:
         'chart_slots': _sanitize_chart_slots(chart_slots),
         'portfolio_tracker': {},
         'options_tracker': [],
+        'cash_balance': 0.0,
     }
 
 
@@ -416,6 +431,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'chart_slots': _sanitize_chart_slots(portfolio_payload.get('chart_slots')),
             'portfolio_tracker': tracker_payload if isinstance(tracker_payload, dict) else {},
             'options_tracker': list(options_payload) if isinstance(options_payload, list) else [],
+            'cash_balance': _normalize_cash_balance(raw_entry.get('cash_balance')),
         }
     if 'portfolio' in payload or 'portfolio_tracker' in payload or 'options_tracker' in payload:
         legacy_portfolio = _portfolio_payload_with_chart_slots(payload.get('portfolio', []), chart_slots)
@@ -430,6 +446,7 @@ def _normalize_multi_portfolio_state(payload: Any, chart_slots: Any=None) -> Any
             'chart_slots': _sanitize_chart_slots(legacy_portfolio.get('chart_slots')),
             'portfolio_tracker': legacy_tracker if isinstance(legacy_tracker, dict) else {},
             'options_tracker': list(legacy_options) if isinstance(legacy_options, list) else [],
+            'cash_balance': _normalize_cash_balance(payload.get('cash_balance')),
         }
         normalized['main_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('main_portfolio_id'), normalized['portfolio_order'], DEFAULT_MAIN_PORTFOLIO_ID)
         normalized['active_portfolio_id'] = _normalize_selected_portfolio_id(payload.get('active_portfolio_id', normalized['main_portfolio_id']), normalized['portfolio_order'], normalized['main_portfolio_id'])
@@ -571,7 +588,8 @@ def _default_user_data_document() -> Any:
 def _normalize_user_data_document(payload: Any) -> Any:
     """Normalize persisted single-file user data into the canonical shape."""
     default = _default_user_data_document()
-    saved = payload if isinstance(payload, dict) else {}
+    migration = migrate_user_data_payload(payload, default)
+    saved = migration.payload if isinstance(migration.payload, dict) else {}
     portfolio_state = _normalize_multi_portfolio_state(saved)
     chart_page_payload = saved.get('chart_page', default['chart_page'])
     exported_compare_presets = saved.get('compare_presets')
@@ -681,6 +699,7 @@ def load_active_portfolio_state(portfolio_id: Any=None) -> Any:
         'chart_slots': _sanitize_chart_slots(active.get('chart_slots')),
         'portfolio_tracker': dict(active.get('portfolio_tracker', {})),
         'options_tracker': list(active.get('options_tracker', [])),
+        'cash_balance': _normalize_cash_balance(active.get('cash_balance')),
     }
 
 def load_tickers() -> Any:
@@ -872,6 +891,7 @@ def _validate_backup_payload(payload: Any) -> Any:
     """Validate imported backup data and return a normalized payload."""
     if not isinstance(payload, dict):
         raise ValueError('Backup file must contain a JSON object.')
+    payload = migrate_user_data_payload(payload, _default_user_data_document(), strict_future=True).payload
     has_multi_portfolios = isinstance(payload.get('portfolios'), dict)
     has_legacy_payload = any((key in payload for key in ('portfolio', 'portfolio_tracker', 'options_tracker')))
     if not has_multi_portfolios and not has_legacy_payload:

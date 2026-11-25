@@ -14,6 +14,7 @@ from ..workers.market_metrics import (
     PortfolioAnalyticsWorker,
     PortfolioMomentumWorker,
 )
+from .tasks import MarketDataTaskRunner
 
 
 class DashboardFetchCoordinator:
@@ -21,6 +22,7 @@ class DashboardFetchCoordinator:
 
     def __init__(self, max_workers: int = 3) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._task_runner = MarketDataTaskRunner(default_timeout_seconds=180.0, default_retries=1)
         self._lock = threading.Lock()
         self._inflight: dict[tuple[Any, ...], Future] = {}
 
@@ -32,7 +34,12 @@ class DashboardFetchCoordinator:
         with self._lock:
             future = self._inflight.get(key)
             if future is None:
-                future = self._executor.submit(self._run_fetch, request)
+                future = self._executor.submit(
+                    self._run_task,
+                    "dashboard_refresh",
+                    lambda: self._run_fetch(request),
+                    failure_reason="Dashboard market data could not be loaded.",
+                )
                 self._inflight[key] = future
         try:
             result = copy.deepcopy(future.result())
@@ -64,11 +71,13 @@ class DashboardFetchCoordinator:
     def fetch_portfolio_momentum(self, request: dict[str, Any]) -> dict[str, Any]:
         tickers = self._symbols(request.get("tickers", []))
         shares_map = self._number_map(request.get("shares_map", {}))
+        cash_amount = self._number_value(request.get("cash_amount", 0.0))
         return self._coalesced_fetch(
             "portfolio_momentum",
             (
                 tuple(tickers),
                 tuple(sorted(shares_map.items())),
+                cash_amount,
                 str(request.get("period", "1mo") or "1mo"),
                 str(request.get("interval", "1d") or "1d"),
                 str(request.get("start") or ""),
@@ -79,6 +88,7 @@ class DashboardFetchCoordinator:
                 period=str(request.get("period", "1mo") or "1mo"),
                 interval=str(request.get("interval", "1d") or "1d"),
                 start=request.get("start"),
+                cash_amount=cash_amount,
             ).fetch(),
         )
 
@@ -86,12 +96,14 @@ class DashboardFetchCoordinator:
         tickers = self._symbols(request.get("tickers", []))
         shares_map = self._number_map(request.get("shares_map", {}))
         prices_map = self._number_map(request.get("prices_map", {}))
+        cash_amount = self._number_value(request.get("cash_amount", 0.0))
         return self._coalesced_fetch(
             "portfolio_analytics",
             (
                 tuple(tickers),
                 tuple(sorted(shares_map.items())),
                 tuple(sorted(prices_map.items())),
+                cash_amount,
                 str(request.get("benchmark_symbol", "SPY") or "SPY").upper(),
                 str(request.get("lookback_key", "1y") or "1y").lower(),
             ),
@@ -101,6 +113,7 @@ class DashboardFetchCoordinator:
                 prices_map=prices_map,
                 benchmark_symbol=str(request.get("benchmark_symbol", "SPY") or "SPY"),
                 lookback_key=str(request.get("lookback_key", "1y") or "1y"),
+                cash_amount=cash_amount,
             ).fetch(),
         )
 
@@ -117,7 +130,12 @@ class DashboardFetchCoordinator:
         with self._lock:
             future = self._inflight.get(key)
             if future is None:
-                future = self._executor.submit(fetch_fn)
+                future = self._executor.submit(
+                    self._run_task,
+                    namespace,
+                    fetch_fn,
+                    failure_reason=f"{namespace.replace('_', ' ').title()} data could not be loaded.",
+                )
                 self._inflight[key] = future
         try:
             return copy.deepcopy(future.result())
@@ -126,6 +144,17 @@ class DashboardFetchCoordinator:
                 with self._lock:
                     if self._inflight.get(key) is future:
                         self._inflight.pop(key, None)
+
+    def _run_task(self, operation: str, fetch_fn: Any, *, failure_reason: str) -> dict[str, Any]:
+        result = self._task_runner.run(
+            operation,
+            fetch_fn,
+            source="yfinance",
+            success_check=lambda payload: isinstance(payload, dict),
+            failure_reason=failure_reason,
+        )
+        payload = result.attach()
+        return payload if isinstance(payload, dict) else {}
 
     def _request_key(self, request: dict[str, Any]) -> tuple[Any, ...]:
         tickers = tuple(str(item or "").upper().strip() for item in request.get("tickers", []) if str(item or "").strip())
@@ -164,6 +193,13 @@ class DashboardFetchCoordinator:
             except (TypeError, ValueError):
                 normalized[symbol] = 0.0
         return normalized
+
+    def _number_value(self, value: Any) -> float:
+        try:
+            number = float(value or 0.0)
+        except (TypeError, ValueError):
+            number = 0.0
+        return max(number, 0.0)
 
     def _run_fetch(self, request: dict[str, Any]) -> dict[str, Any]:
         worker = DataWorker(

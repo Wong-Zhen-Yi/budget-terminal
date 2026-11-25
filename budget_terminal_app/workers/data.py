@@ -6,8 +6,19 @@ import time
 from typing import Any
 
 from ..cache import CacheManager
-from ..constants import *
-from ..dependencies import *
+from ..constants import SECTOR_DATA
+from ..data_service.results import attach_market_data_result, make_market_data_error, make_market_data_meta
+from ..dependencies import (
+    QObject,
+    ThreadPoolExecutor,
+    datetime,
+    is_yahoo_unauthorized_error,
+    logger,
+    pd,
+    pyqtSignal,
+    threading,
+    yf,
+)
 
 DEFAULT_BATCH_SYMBOLS = ['SPY', 'DX-Y.NYB', '^VIX', 'GLD', 'CL=F']
 MACRO_TICKERS = ['SPY', 'QQQ', 'GLD', 'CL=F', '^VIX', '^TNX', 'DX-Y.NYB']
@@ -954,7 +965,46 @@ class DataWorker(QObject):
         if self._is_cancelled():
             logger.info('Worker %s cancelled after parallel fetch.', self.request_id)
             return None
-        return {
+        chart_symbol = dashboard_chart_config[0] if dashboard_chart_config else ''
+        chart_frame = charts.get(chart_symbol) if chart_symbol else None
+        chart_missing = bool(
+            chart_symbol
+            and (
+                chart_frame is None
+                or (hasattr(chart_frame, 'empty') and bool(chart_frame.empty))
+            )
+        )
+        errors = []
+        if non_chart_payload is None:
+            errors.append(
+                make_market_data_error(
+                    source='yfinance',
+                    reason='Dashboard quote, market, targets, and news data were unavailable.',
+                    operation='dashboard_non_chart',
+                )
+            )
+        if chart_missing and not skip_chart_refresh:
+            errors.append(
+                make_market_data_error(
+                    source='yfinance/cache',
+                    reason=f'Dashboard chart data was unavailable for {chart_symbol}.',
+                    operation='dashboard_chart',
+                    symbol=chart_symbol,
+                )
+            )
+        if non_chart_payload is None and (not charts or chart_missing):
+            freshness = 'failed'
+            failure_reason = 'Dashboard market data could not be loaded.'
+        elif errors:
+            freshness = 'partial'
+            failure_reason = '; '.join(error.get('reason', '') for error in errors if error.get('reason'))
+        else:
+            freshness = 'fresh'
+            failure_reason = ''
+        source_parts = ['yfinance']
+        if non_chart_reused:
+            source_parts.append('memory cache')
+        payload = {
             'request_id': self.request_id,
             'chart_configs': list(dashboard_chart_configs),
             'portfolio': dict((non_chart_payload or {}).get('portfolio', {})),
@@ -969,7 +1019,7 @@ class DataWorker(QObject):
             '_dashboard_refresh_meta': {
                 'refresh_reason': self.refresh_reason,
                 'non_chart_reused': non_chart_reused,
-                'chart_symbol': dashboard_chart_config[0] if dashboard_chart_config else '',
+                'chart_symbol': chart_symbol,
                 'fetch_ticker_signature': list(fetch_ticker_signature),
                 'non_chart_cache_age_seconds': float(cache_age_seconds),
                 'worker_timings_ms': {
@@ -979,6 +1029,16 @@ class DataWorker(QObject):
                 },
             },
         }
+        return attach_market_data_result(
+            payload,
+            meta=make_market_data_meta(
+                source=', '.join(source_parts),
+                freshness=freshness,
+                cache_age_seconds=float(cache_age_seconds) if non_chart_reused else None,
+                failure_reason=failure_reason,
+            ),
+            errors=errors,
+        )
 
     def run(self) -> Any:
         try:

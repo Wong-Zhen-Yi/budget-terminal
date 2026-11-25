@@ -17,6 +17,7 @@ class PieChartWidget(QWidget):
         self._center_text = ''
         self._center_subtext = ''
         self._start_angle_degrees = 90.0
+        self._animation_progress = 1.0
         self.setMinimumWidth(200)
 
     def set_theme(self, slice_colors: Any, legend_text_color: Any) -> None:
@@ -50,6 +51,15 @@ class PieChartWidget(QWidget):
         except (TypeError, ValueError):
             value = 90.0
         self._start_angle_degrees = value % 360.0
+        self.update()
+
+    def set_animation_progress(self, progress: float=1.0) -> None:
+        """Set how much of the pie sweep is visible, from 0.0 to 1.0."""
+        try:
+            value = float(progress)
+        except (TypeError, ValueError):
+            value = 1.0
+        self._animation_progress = max(0.0, min(1.0, value))
         self.update()
 
     def set_data(self, weights: dict) -> None:
@@ -87,12 +97,18 @@ class PieChartWidget(QWidget):
                 self._draw_donut_center(painter, cx, cy, diameter)
             return
         angle = int(self._start_angle_degrees * 16)
+        remaining_span = int(360 * 16 * max(0.0, min(1.0, self._animation_progress)))
         for label, val, color in self.slices:
-            span = int(-(val / total) * 360 * 16)
+            if remaining_span <= 0:
+                break
+            full_span = int((val / total) * 360 * 16)
+            visible_span = min(full_span, remaining_span)
+            span = -visible_span
             painter.setBrush(QColor(color))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPie(rect, angle, span)
             angle += span
+            remaining_span -= visible_span
         if self._donut_enabled:
             self._draw_donut_center(painter, cx, cy, diameter)
         lx = int(left + diameter + margin)

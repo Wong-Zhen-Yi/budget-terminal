@@ -55,10 +55,18 @@ class PoliticsMixin:
 
         # Filter row
         filter_row = QHBoxLayout()
+
+        def add_filter_combo(label_text: str, combo: QComboBox) -> None:
+            label = QLabel(label_text)
+            label.setBuddy(combo)
+            combo.setAccessibleName(label_text)
+            filter_row.addWidget(label)
+            filter_row.addWidget(combo)
+
         self.p15_politician_combo = QComboBox()
         self.p15_politician_combo.setFixedWidth(220)
         self.p15_politician_combo.addItem('All')
-        filter_row.addWidget(self.p15_politician_combo)
+        add_filter_combo('Politician', self.p15_politician_combo)
 
         self.p15_search_ticker = QLineEdit()
         self.p15_search_ticker.setPlaceholderText('Search ticker...')
@@ -68,22 +76,22 @@ class PoliticsMixin:
         self.p15_chamber_combo = QComboBox()
         self.p15_chamber_combo.addItems(['All', 'House', 'Senate'])
         self.p15_chamber_combo.setFixedWidth(100)
-        filter_row.addWidget(self.p15_chamber_combo)
+        add_filter_combo('Chamber', self.p15_chamber_combo)
 
         self.p15_party_combo = QComboBox()
         self.p15_party_combo.addItems(['All', 'Democrat', 'Republican', 'Independent'])
         self.p15_party_combo.setFixedWidth(120)
-        filter_row.addWidget(self.p15_party_combo)
+        add_filter_combo('Party', self.p15_party_combo)
 
         self.p15_type_combo = QComboBox()
         self.p15_type_combo.addItems(['All', 'Purchase', 'Sale (Full)', 'Sale (Partial)', 'Exchange'])
         self.p15_type_combo.setFixedWidth(120)
-        filter_row.addWidget(self.p15_type_combo)
+        add_filter_combo('Type', self.p15_type_combo)
 
         self.p15_theme_combo = QComboBox()
         self.p15_theme_combo.setFixedWidth(150)
         self.p15_theme_combo.addItem('All')
-        filter_row.addWidget(self.p15_theme_combo)
+        add_filter_combo('Theme', self.p15_theme_combo)
 
         filter_btn = QPushButton('Apply')
         filter_btn.setFixedWidth(70)
@@ -664,8 +672,8 @@ class PoliticsMixin:
                 **self.chart_page_state,
                 'symbol': ticker,
             }
-        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
-        target_index = page_index if page_index >= 0 else 8
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 9
+        target_index = page_index if page_index >= 0 else 9
         page_ready = self._page_initialized(index=target_index)
         self.switch_page(target_index)
         if hasattr(self, 'p10_symbol_input'):

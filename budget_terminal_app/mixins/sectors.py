@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from ..compat import *
+from budget_terminal_app.data_service.results import strip_market_data_keys
 from budget_terminal_app.workers.market_metrics import MarketCapWorker
 
 
@@ -483,6 +484,7 @@ class SectorsMixin:
         self._p8_mktcap_worker = None
         updates = {}
         fetched_at = self._p8_mktcap_cache_now()
+        results = strip_market_data_keys(results) if isinstance(results, dict) else results
         if isinstance(results, dict):
             for ticker, mc in results.items():
                 symbol = str(ticker or '').strip().upper()
@@ -700,8 +702,8 @@ class SectorsMixin:
                 **self.chart_page_state,
                 'symbol': symbol,
             }
-        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 8
-        target_index = page_index if page_index >= 0 else 8
+        page_index = self.stacked_widget.indexOf(self.page10) if hasattr(self, 'stacked_widget') and hasattr(self, 'page10') else 9
+        target_index = page_index if page_index >= 0 else 9
         page_ready = self._page_initialized(index=target_index)
         self.switch_page(target_index)
         if hasattr(self, 'p10_symbol_input'):
