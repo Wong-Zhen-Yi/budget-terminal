@@ -76,6 +76,12 @@ REQUEST_HEADERS = {
 REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_WORKERS = 6
 
+#: home.treasury.gov renders each yearly CSV on demand and takes 18-20s to answer even when it
+#: is perfectly healthy, so the shared 15s timeout expired on every request and lost all 16
+#: treasury-backed series. Give that one host a timeout above its measured latency; the fan-out
+#: over HISTORY_YEARS still bounds the wall time because MAX_WORKERS years run at once.
+TREASURY_REQUEST_TIMEOUT_SECONDS = 45.0
+
 #: A short probe timeout for the first fallback download. A reachable FRED answers in under a
 #: second; a blocked one only reveals itself by timing out, and paying the full timeout once per
 #: series would add minutes to every refresh on a network that cannot reach it.
@@ -626,7 +632,7 @@ def fetch_treasury_curve(
     *,
     kind: str = TREASURY_KIND_NOMINAL,
     years: Any = HISTORY_YEARS,
-    timeout: float = REQUEST_TIMEOUT_SECONDS,
+    timeout: float = TREASURY_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, list[tuple[str, float]]]:
     """Download the daily par yield curve and merge the yearly files into one series per tenor.
 
@@ -1106,14 +1112,22 @@ class EconomicDataService:
             or (series.provider == PROVIDER_TREASURY and series.provider_key.startswith('real:'))
             for series in catalog
         )
-        nominal = fetch_treasury_curve(kind=TREASURY_KIND_NOMINAL)
         real: dict[str, list[tuple[str, float]]] = {}
-        if needs_real:
-            try:
-                real = fetch_treasury_curve(kind=TREASURY_KIND_REAL)
-            except Exception as exc:
-                # The nominal curve is the important one; losing TIPS costs only breakevens.
-                logger.debug('Treasury real yield curve unavailable: %s', exc)
+        if not needs_real:
+            nominal = fetch_treasury_curve(kind=TREASURY_KIND_NOMINAL)
+        else:
+            # The two curves are independent downloads of about 40s each against a host that
+            # takes 18-20s per yearly file, so running them back to back doubled the refresh
+            # for no reason. Overlap them; each still fans its years out over MAX_WORKERS.
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                nominal_future = executor.submit(fetch_treasury_curve, kind=TREASURY_KIND_NOMINAL)
+                real_future = executor.submit(fetch_treasury_curve, kind=TREASURY_KIND_REAL)
+                nominal = nominal_future.result()
+                try:
+                    real = real_future.result()
+                except Exception as exc:
+                    # The nominal curve is the important one; losing TIPS costs only breakevens.
+                    logger.debug('Treasury real yield curve unavailable: %s', exc)
         resolved: dict[str, list[tuple[str, float]]] = {}
         for series in catalog:
             key = series.provider_key
@@ -1201,7 +1215,9 @@ class EconomicDataService:
             completed += 1
             if progress is not None:
                 try:
-                    progress(completed, max(total, 1), label)
+                    # `total` is planned before we know which batches fail, and the fallback
+                    # picks up their orphans, so completed can overshoot the estimate.
+                    progress(completed, max(total, completed, 1), label)
                 except Exception:
                     pass
 
@@ -1222,12 +1238,23 @@ class EconomicDataService:
                         unreachable.append(name)
                     _report(label)
 
-        fallback = [
-            series for series in catalog
-            if not resolved.get(series.series_id) and (fetcher is not None or series.provider == PROVIDER_FRED)
-        ]
+        # Every catalog entry is keyed by its FRED series id even where a direct provider serves
+        # it, so anything a batch left empty can still be retried against FRED. Restricting this
+        # to FRED-native series meant one slow or blocked host blanked its whole group while the
+        # same numbers sat on the fallback a second away.
+        fallback = [series for series in catalog if not resolved.get(series.series_id)]
         if fallback:
             resolved.update(self._fetch_fallback(fallback, fetcher, cancelled, _report, unreachable))
+
+        # A provider whose series were all recovered from FRED is not worth reporting as down:
+        # the page has the numbers, so the status line should name only the real gaps.
+        if unreachable:
+            unresolved_providers = {
+                self._resolver_group(series.provider)
+                for series in catalog
+                if not resolved.get(series.series_id)
+            }
+            unreachable = [name for name in unreachable if name in unresolved_providers]
 
         rows: list[dict[str, Any]] = []
         missing: list[str] = []
