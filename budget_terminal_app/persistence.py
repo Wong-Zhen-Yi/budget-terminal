@@ -97,6 +97,11 @@ DEFAULT_PORTFOLIO_METRICS_SETTINGS = {'benchmark_symbol': 'SPY', 'lookback_key':
 DEFAULT_MULTI_CHARTS_SETTINGS = {'custom_symbols': [], 'order': []}
 DEFAULT_YOUTUBE_SETTINGS = {'sort_column': -1, 'sort_descending': False}
 DEFAULT_OPTIONS_CHAIN_SETTINGS = {'default_risk_free_rate': 0.04}
+DEFAULT_MARKET_DATA_PROVIDER_SETTINGS = {
+    'enabled': True,
+    'mode': 'massive_free_safe',
+    'api_key_source': 'missing',
+}
 DEFAULT_NAVIGATION_PAGE_ORDER = [0, 25, 1, 2, 19, 4, 11, 7, 22, 8, 9, 13, 6, 5, 12, 14, 15, 3, 20, 23, 16, 18, 24, 17, 21]
 SETTINGS_PAGE_INDEX = 17
 DEFAULT_NAVIGATION_SETTINGS = {'page_order': list(DEFAULT_NAVIGATION_PAGE_ORDER), 'hidden_pages': [21]}
@@ -129,6 +134,23 @@ def normalize_clock_country_code(value: Any) -> str:
     """Normalize the persisted top-bar clock market-country code."""
     code = str(value or '').strip().upper()
     return code if code in CLOCK_COUNTRY_CODES else CLOCK_DEFAULT_COUNTRY_CODE
+
+
+def _normalize_market_data_provider_settings(settings: Any) -> dict[str, Any]:
+    """Normalize persisted market-data provider settings without API-key material."""
+    saved = settings if isinstance(settings, dict) else {}
+    enabled = saved.get('enabled', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS['enabled'])
+    mode = str(saved.get('mode', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS['mode']) or '').strip().lower()
+    if mode != 'massive_free_safe':
+        mode = DEFAULT_MARKET_DATA_PROVIDER_SETTINGS['mode']
+    api_key_source = str(saved.get('api_key_source', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS['api_key_source']) or '').strip().lower()
+    if api_key_source not in {'settings', 'env', 'missing'}:
+        api_key_source = DEFAULT_MARKET_DATA_PROVIDER_SETTINGS['api_key_source']
+    return {
+        'enabled': bool(enabled),
+        'mode': mode,
+        'api_key_source': api_key_source,
+    }
 
 
 def _backup_unreadable_json_file(path: Any, *, reason: str='unreadable') -> str:
@@ -750,6 +772,7 @@ def _default_user_data_document() -> Any:
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'market_data_provider': _normalize_market_data_provider_settings(DEFAULT_MARKET_DATA_PROVIDER_SETTINGS),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
         'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
@@ -794,6 +817,7 @@ def _normalize_user_data_document(payload: Any) -> Any:
         'youtube': _normalize_youtube_settings(saved.get('youtube', default['youtube'])),
         'net_worth': _normalize_networth_payload(saved.get('net_worth', default['net_worth'])),
         'options_chain': _normalize_options_chain_payload(saved.get('options_chain', default['options_chain'])),
+        'market_data_provider': _normalize_market_data_provider_settings(saved.get('market_data_provider', default['market_data_provider'])),
         'navigation': normalize_navigation_settings(saved.get('navigation', default['navigation'])),
         'clock_country_code': normalize_clock_country_code(saved.get('clock_country_code', default['clock_country_code'])),
         'time_12h': bool(saved.get('time_12h', False)),
@@ -1062,6 +1086,10 @@ def build_ai_user_data_export() -> str:
         '',
         _json_block(payload.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
         '',
+        '## Market Data Provider Settings',
+        '',
+        _json_block(_normalize_market_data_provider_settings(payload.get('market_data_provider', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS))),
+        '',
         '## Navigation Settings',
         '',
         _json_block(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
@@ -1139,6 +1167,7 @@ def reset_user_data(chart_slots: Any=None) -> Any:
         'youtube': DEFAULT_YOUTUBE_SETTINGS.copy(),
         'net_worth': default_networth_data(),
         'options_chain': DEFAULT_OPTIONS_CHAIN_SETTINGS.copy(),
+        'market_data_provider': _normalize_market_data_provider_settings(DEFAULT_MARKET_DATA_PROVIDER_SETTINGS),
         'navigation': normalize_navigation_settings(DEFAULT_NAVIGATION_SETTINGS),
         'clock_country_code': CLOCK_DEFAULT_COUNTRY_CODE,
         'time_12h': False,
@@ -1167,6 +1196,7 @@ def load_app_config() -> Any:
         'multi_charts': dict(document.get('multi_charts', DEFAULT_MULTI_CHARTS_SETTINGS)),
         'youtube': dict(document.get('youtube', DEFAULT_YOUTUBE_SETTINGS)),
         'options_chain': dict(document.get('options_chain', DEFAULT_OPTIONS_CHAIN_SETTINGS)),
+        'market_data_provider': _normalize_market_data_provider_settings(document.get('market_data_provider', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS)),
         'navigation': normalize_navigation_settings(document.get('navigation', DEFAULT_NAVIGATION_SETTINGS)),
         'clock_country_code': normalize_clock_country_code(document.get('clock_country_code', CLOCK_DEFAULT_COUNTRY_CODE)),
         'time_12h': bool(document.get('time_12h', False)),
@@ -1221,6 +1251,8 @@ def save_app_config(data: Any) -> None:
         current['youtube'] = _normalize_youtube_settings(saved.get('youtube'))
     if 'options_chain' in saved:
         current['options_chain'] = _normalize_options_chain_payload(saved.get('options_chain'))
+    if 'market_data_provider' in saved:
+        current['market_data_provider'] = _normalize_market_data_provider_settings(saved.get('market_data_provider'))
     if 'navigation' in saved:
         current['navigation'] = normalize_navigation_settings(saved.get('navigation'))
     if 'clock_country_code' in saved:
@@ -2011,6 +2043,21 @@ def save_options_chain_settings(settings: Any) -> Any:
         except (TypeError, ValueError):
             state['default_risk_free_rate'] = DEFAULT_OPTIONS_CHAIN_SETTINGS['default_risk_free_rate']
     current['options_chain'] = state
+    save_app_config(current)
+    return state
+
+
+def load_market_data_provider_settings() -> Any:
+    """Load persisted market-data provider settings."""
+    config = load_app_config()
+    return _normalize_market_data_provider_settings(config.get('market_data_provider', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS))
+
+
+def save_market_data_provider_settings(settings: Any) -> Any:
+    """Persist market-data provider settings without API-key material."""
+    current = load_app_config()
+    state = _normalize_market_data_provider_settings(settings)
+    current['market_data_provider'] = state
     save_app_config(current)
     return state
 

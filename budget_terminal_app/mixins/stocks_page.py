@@ -3,6 +3,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from budget_terminal_app.data_service.results import (
+    attach_market_data_result,
+    data_sources_from_meta,
+    make_market_data_meta,
+    market_data_errors,
+    market_data_meta,
+)
+from budget_terminal_app.services.market_data_provider import get_market_data_provider
 from ..compat import *
 
 
@@ -627,8 +635,40 @@ class StocksPageMixin:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _stocks_append_source(self, sources: list[str], source: Any) -> None:
+        for part in [item.strip() for item in str(source or '').split(',') if item.strip()]:
+            if part and part not in sources:
+                sources.append(part)
+
+    def _stocks_record_provider_result(self, sources: list[str], errors: list[dict[str, Any]], result: Any) -> None:
+        if result is None:
+            return
+        has_data = False
+        try:
+            has_data = bool(result.has_data())
+        except Exception:
+            has_data = bool(getattr(result, 'data', None))
+        result_errors = [dict(error) for error in list(getattr(result, 'errors', []) or []) if isinstance(error, dict)]
+        if has_data or bool(getattr(result, 'used_provider', False)) or result_errors:
+            self._stocks_append_source(sources, getattr(result, 'source', ''))
+        errors.extend(result_errors)
+
+    def _stocks_merge_info(self, fallback: Any, preferred: Any) -> dict[str, Any]:
+        merged = dict(fallback) if isinstance(fallback, dict) else {}
+        if not isinstance(preferred, dict):
+            return merged
+        for key, value in preferred.items():
+            if value not in (None, ''):
+                merged[key] = value
+        return merged
+
     def _stocks_fetch_payload(self, symbol: str) -> dict[str, Any]:
         chart_payload = self._chart_fetch_payload(symbol, period=STOCKS_CHART_PERIOD, interval=STOCKS_CHART_INTERVAL, timeframe_label='3 Years', include_rsi=False, include_ma200=False)
+        sources = []
+        errors = market_data_errors(chart_payload)
+        chart_meta = market_data_meta(chart_payload)
+        if chart_meta.get('source') and chart_meta.get('source') != 'unknown':
+            self._stocks_append_source(sources, chart_meta.get('source'))
         ticker_obj = yf.Ticker(symbol)
         try:
             info = ticker_obj.info or {}
@@ -640,6 +680,24 @@ class StocksPageMixin:
             info = {}
         if not isinstance(info, dict):
             info = {}
+        provider = get_market_data_provider()
+        try:
+            overview_result = provider.get_company_overview(symbol)
+            self._stocks_record_provider_result(sources, errors, overview_result)
+            info = self._stocks_merge_info(info, getattr(overview_result, 'data', None))
+        except Exception as exc:
+            logger.info('Massive reference overview unavailable for Stocks page %s: %s', symbol, exc)
+        news_items = []
+        try:
+            news_result = provider.get_stock_news(symbol, limit=STOCKS_NEWS_LIMIT, category='stock')
+            self._stocks_record_provider_result(sources, errors, news_result)
+            news_items = list(getattr(news_result, 'data', None) or [])
+        except Exception as exc:
+            logger.info('Massive news unavailable for Stocks page %s: %s', symbol, exc)
+        if not news_items:
+            news_items = self._stocks_fetch_news_items(ticker_obj, symbol)
+            if news_items:
+                self._stocks_append_source(sources, 'yfinance fallback')
         try:
             financials = ticker_obj.financials
         except Exception as exc:
@@ -670,7 +728,9 @@ class StocksPageMixin:
             if is_yahoo_unauthorized_error(exc):
                 logger.info('Yahoo refused optional stocks earnings dates for %s.', symbol)
             earnings_dates = None
-        return {
+        self._stocks_append_source(sources, 'yfinance')
+        freshness = 'partial' if errors else 'fresh'
+        payload = {
             'symbol': symbol,
             'chart': chart_payload,
             'info': info,
@@ -679,10 +739,20 @@ class StocksPageMixin:
             'balance_sheet': balance_sheet,
             'quarterly_balance_sheet': quarterly_balance_sheet,
             'earnings_dates': earnings_dates,
-            'news': self._stocks_fetch_news_items(ticker_obj, symbol),
+            'news': news_items,
             'institutional_rows': self._stocks_fetch_institutional_rows(ticker_obj),
             'insider_rows': self._stocks_fetch_insider_rows(ticker_obj),
+            'sources': list(sources),
         }
+        return attach_market_data_result(
+            payload,
+            meta=make_market_data_meta(
+                source=', '.join(sources) or 'yfinance',
+                freshness=freshness,
+                failure_reason='; '.join(error.get('reason', '') for error in errors if error.get('reason')),
+            ),
+            errors=errors,
+        )
 
     def _stocks_fetch_institutional_rows(self, ticker_obj: Any) -> list[dict[str, Any]]:
         raw_rows = None
@@ -779,7 +849,7 @@ class StocksPageMixin:
         self.stocks_load_btn.setEnabled(True)
         self._stocks_pending_x_range = None
         if update_collection_info:
-            self._set_data_collection_info(['yfinance'])
+            self._set_data_collection_info(data_sources_from_meta(payload, 'yfinance'))
         self._stocks_set_status(status_text or f'Loaded {self.stocks_symbol}.', 'positive', include_global=include_global_status)
         self._stocks_save_session_snapshot()
 

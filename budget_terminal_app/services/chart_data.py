@@ -6,6 +6,7 @@ from ..cache import CacheManager
 from ..data_service.results import attach_market_data_result, make_market_data_meta
 from ..data_service.tasks import MarketDataTaskRunner
 from ..dependencies import logger, pd, yf
+from ..services.market_data_provider import get_market_data_provider
 
 
 CHART_CACHE_PERIOD_DAY_MAP = {
@@ -195,10 +196,21 @@ class ChartDataService:
                 )
 
         stale_frame, stale_meta = self.load_cached_frame(symbol_text, period=period, interval=interval, allow_stale=True)
+        provider_source = ""
+        provider_errors: list[dict[str, Any]] = []
 
         def download_frame() -> Any:
+            nonlocal provider_source, provider_errors
             fetch_interval = "1h" if str(interval or "").strip().lower() == "4h" else interval
-            raw_df = yf.download(symbol_text, period=period, interval=fetch_interval, progress=False, auto_adjust=False)
+            provider_result = get_market_data_provider().get_ohlcv(
+                symbol_text,
+                period=period,
+                interval=fetch_interval,
+                auto_adjust=False,
+            )
+            provider_source = str(getattr(provider_result, "source", "") or "").strip()
+            provider_errors = [dict(error) for error in list(getattr(provider_result, "errors", []) or []) if isinstance(error, dict)]
+            raw_df = getattr(provider_result, "data", None)
             frame = self.normalize_frame(symbol_text, raw_df)
             if str(interval or "").strip().lower() == "4h":
                 frame = self.aggregate_hourly_to_four_hour_frame(frame)
@@ -211,12 +223,20 @@ class ChartDataService:
         result = self.task_runner.run(
             f"chart_fetch:{symbol_text}:{period}:{interval}",
             download_frame,
-            source="yfinance",
+            source="Massive EOD/yfinance fallback",
             cache_fallback=(lambda: stale_frame) if stale_frame is not None and not stale_frame.empty else None,
             cache_age_seconds=stale_meta.get("cache_age_seconds") if isinstance(stale_meta, dict) else None,
             success_check=lambda frame: frame is not None and not getattr(frame, "empty", True),
             failure_reason=f"No chart data returned for {symbol_text}.",
         )
+        if provider_source and result.meta.get("source") != "cache":
+            result.meta["source"] = provider_source
+        if provider_errors:
+            result.errors = [*provider_errors, *result.errors]
+            if result.meta.get("freshness") == "fresh":
+                result.meta["freshness"] = "partial"
+                result.meta["is_partial"] = True
+                result.meta["failure_reason"] = "; ".join(error.get("reason", "") for error in provider_errors if error.get("reason"))
         frame = result.data if result.data is not None and not isinstance(result.data, dict) else pd.DataFrame()
         return attach_market_data_result({"df": frame}, meta=result.meta, errors=result.errors)
 
@@ -274,30 +294,38 @@ class ChartDataService:
         daily_df = self.normalize_frame(symbol_text, raw_daily_df)
         if daily_df is None or daily_df.empty or self.frame_coverage_days(daily_df) < 260.0:
             source = "yfinance"
+            provider_errors: list[dict[str, Any]] = []
             try:
-                raw_daily_df = yf.download(symbol_text, period="5y", interval="1d", progress=False, auto_adjust=False)
+                provider_result = get_market_data_provider().get_ohlcv(symbol_text, period="5y", interval="1d", auto_adjust=False)
+                source = str(getattr(provider_result, "source", "") or source).strip() or source
+                provider_errors = [dict(error) for error in list(getattr(provider_result, "errors", []) or []) if isinstance(error, dict)]
+                raw_daily_df = getattr(provider_result, "data", None)
                 daily_df = self.normalize_frame(symbol_text, raw_daily_df)
                 if daily_df is not None and not daily_df.empty:
                     self.cache_manager.save_data(symbol_text, "1d", daily_df)
             except Exception as exc:
                 logger.info("Daily MA200 fetch failed for %s: %s", symbol_text, exc)
                 daily_df = None
+        else:
+            provider_errors = []
         empty = pd.Series(index=source_df.index, dtype=float)
         if daily_df is None or getattr(daily_df, "empty", True):
             return attach_market_data_result(
                 {"series": empty},
                 meta=make_market_data_meta(source=source, freshness="partial", failure_reason="200-day moving average data unavailable."),
+                errors=provider_errors,
             )
         frame = self.normalize_frame(symbol_text, daily_df)
         if frame is None or frame.empty or "Close" not in frame.columns:
-            return attach_market_data_result({"series": empty}, meta=make_market_data_meta(source=source, freshness="partial"))
+            return attach_market_data_result({"series": empty}, meta=make_market_data_meta(source=source, freshness="partial"), errors=provider_errors)
         daily_ma = pd.Series(frame["Close"]).astype(float).rolling(200, min_periods=200).mean().dropna()
         if daily_ma.empty:
-            return attach_market_data_result({"series": empty}, meta=make_market_data_meta(source=source, freshness="partial"))
+            return attach_market_data_result({"series": empty}, meta=make_market_data_meta(source=source, freshness="partial"), errors=provider_errors)
         source_index = self.normalize_datetime_index(source_df.index)
         daily_index = self.normalize_datetime_index(daily_ma.index)
         source_frame = pd.DataFrame(index=source_index).sort_index()
         daily_frame = pd.DataFrame({"ma200": list(daily_ma.values)}, index=daily_index).sort_index()
         aligned = pd.merge_asof(source_frame, daily_frame, left_index=True, right_index=True, direction="backward")["ma200"]
         aligned.index = source_df.index
-        return attach_market_data_result({"series": aligned}, meta=make_market_data_meta(source=source, freshness="fresh"))
+        freshness = "partial" if provider_errors else "fresh"
+        return attach_market_data_result({"series": aligned}, meta=make_market_data_meta(source=source, freshness=freshness), errors=provider_errors)

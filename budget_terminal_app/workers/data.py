@@ -8,6 +8,7 @@ from typing import Any
 from ..cache import CacheManager
 from ..constants import SECTOR_DATA
 from ..data_service.results import attach_market_data_result, make_market_data_error, make_market_data_meta
+from ..services.market_data_provider import get_market_data_provider
 from .news_sources import fetch_keyless_trader_news
 from ..dependencies import (
     QObject,
@@ -86,6 +87,9 @@ class DataWorker(QObject):
         self._cache_manager = cache_manager if cache_manager is not None else CacheManager()
         self.refresh_reason = str(refresh_reason or 'full')
         self.allow_non_chart_reuse = bool(allow_non_chart_reuse)
+        self._provider_meta_lock = threading.Lock()
+        self._provider_source_parts: list[str] = []
+        self._provider_errors: list[dict[str, Any]] = []
 
     def _is_cancelled(self) -> bool:
         """Return whether the parent request no longer needs this worker result."""
@@ -101,6 +105,37 @@ class DataWorker(QObject):
             ticker_obj = yf.Ticker(key)
             self._ticker_cache[key] = ticker_obj
         return ticker_obj
+
+    def _market_provider(self) -> Any:
+        """Return the shared market-data provider facade."""
+        return get_market_data_provider()
+
+    def _record_provider_result(self, result: Any) -> None:
+        """Collect provider source labels and structured fallback errors for data health."""
+        if result is None:
+            return
+        source = str(getattr(result, 'source', '') or '').strip()
+        has_data = False
+        try:
+            has_data = bool(result.has_data())
+        except Exception:
+            has_data = bool(getattr(result, 'data', None))
+        errors = list(getattr(result, 'errors', []) or [])
+        used_provider = bool(getattr(result, 'used_provider', False))
+        with self._provider_meta_lock:
+            if source and (used_provider or has_data or errors):
+                for part in [item.strip() for item in source.split(',') if item.strip()]:
+                    if part and part not in self._provider_source_parts:
+                        self._provider_source_parts.append(part)
+            self._provider_errors.extend(error for error in errors if isinstance(error, dict))
+
+    def _provider_source_snapshot(self) -> list[str]:
+        with self._provider_meta_lock:
+            return list(self._provider_source_parts)
+
+    def _provider_errors_snapshot(self) -> list[dict[str, Any]]:
+        with self._provider_meta_lock:
+            return [dict(error) for error in self._provider_errors if isinstance(error, dict)]
 
     def _normalize_chart_configs(self) -> list[tuple[str, Any, Any]]:
         configs = []
@@ -224,6 +259,14 @@ class DataWorker(QObject):
     def _download_symbol_frame(self, symbol: str, period: Any, interval: Any, *, auto_adjust: bool = False) -> Any:
         """Fetch one symbol's OHLCV frame with a history fallback for brittle assets like ETFs."""
         try:
+            provider_result = self._market_provider().get_ohlcv(symbol, period=period, interval=interval, auto_adjust=auto_adjust)
+            self._record_provider_result(provider_result)
+            normalized = self._normalize_chart_frame(symbol, getattr(provider_result, 'data', None))
+            if normalized is not None:
+                return normalized
+        except Exception as exc:
+            logger.info('Market-data provider OHLCV fetch failed for %s period=%s interval=%s: %s', symbol, period, interval, exc)
+        try:
             frame = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=auto_adjust)
         except Exception as exc:
             logger.info('Primary download failed for %s period=%s interval=%s: %s', symbol, period, interval, exc)
@@ -239,8 +282,14 @@ class DataWorker(QObject):
         return self._normalize_chart_frame(symbol, history)
 
     def _collect_portfolio_quotes(self, batch_data: Any, all_symbols: list[str]) -> dict[str, dict[str, float]]:
-        portfolio_info = {}
-        for symbol in self.tickers:
+        try:
+            provider_result = self._market_provider().get_stock_prices(self.tickers)
+            self._record_provider_result(provider_result)
+            portfolio_info = dict(getattr(provider_result, 'data', None) or {})
+        except Exception as exc:
+            logger.info('Market-data provider quote fetch failed; using yfinance batch fallback: %s', exc)
+            portfolio_info = {}
+        for symbol in [ticker for ticker in self.tickers if ticker not in portfolio_info]:
             try:
                 payload = self._build_price_payload(self._load_close_series(symbol, batch_data, all_symbols))
             except Exception:
@@ -594,13 +643,15 @@ class DataWorker(QObject):
                 },
             },
         }
+        provider_errors = self._provider_errors_snapshot()
         return attach_market_data_result(
             payload,
             meta=make_market_data_meta(
-                source='yfinance, keyless news feeds',
-                freshness='fresh',
+                source=', '.join([*self._provider_source_snapshot(), 'yfinance', 'keyless news feeds']),
+                freshness='partial' if provider_errors else 'fresh',
+                failure_reason='; '.join(error.get('reason', '') for error in provider_errors if error.get('reason')),
             ),
-            errors=[],
+            errors=provider_errors,
         )
 
     def _normalize_chart_frame(self, symbol: str, df: Any) -> Any:
@@ -1020,7 +1071,7 @@ class DataWorker(QObject):
                 or (hasattr(chart_frame, 'empty') and bool(chart_frame.empty))
             )
         )
-        errors = []
+        errors = self._provider_errors_snapshot()
         if non_chart_payload is None:
             errors.append(
                 make_market_data_error(
@@ -1047,9 +1098,10 @@ class DataWorker(QObject):
         else:
             freshness = 'fresh'
             failure_reason = ''
-        source_parts = ['yfinance', 'keyless news feeds']
+        source_parts = [*self._provider_source_snapshot(), 'yfinance', 'keyless news feeds']
         if non_chart_reused:
             source_parts.append('memory cache')
+        source_parts = list(dict.fromkeys(part for part in source_parts if part))
         payload = {
             'request_id': self.request_id,
             'chart_configs': list(dashboard_chart_configs),

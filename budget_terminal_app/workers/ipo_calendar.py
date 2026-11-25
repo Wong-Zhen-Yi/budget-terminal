@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 
 from ..dependencies import *
 from ..paths import user_data_path
+from ..services.market_data_provider import MASSIVE_IPO_URL, get_market_data_provider
 
 IPO_CALENDAR_CACHE_TTL_SECONDS = 24 * 60 * 60
 IPO_CALENDAR_SOURCE_NAME = 'StockAnalysis IPO Calendar'
@@ -141,10 +142,24 @@ class IpoCalendarWorker(QObject):
                 'source_url': IPO_CALENDAR_SOURCE_URL,
             }
         except Exception as exc:
-            logger.info('StockAnalysis IPO calendar fetch failed; trying yfinance fallback: %s', exc)
+            logger.info('StockAnalysis IPO calendar fetch failed; trying Massive/yfinance fallback: %s', exc)
         today = datetime.date.today()
+        end_date = cls._upcoming_end_date(today)
+        try:
+            provider_result = get_market_data_provider().get_ipos(today, end_date, completed=False)
+            rows = list(getattr(provider_result, 'data', None) or [])
+            if rows:
+                return {
+                    'rows': rows,
+                    'source': 'Massive IPOs',
+                    'source_url': MASSIVE_IPO_URL,
+                }
+            if getattr(provider_result, 'errors', None):
+                logger.info('Massive IPO fallback unavailable; trying yfinance fallback: %s', provider_result.errors)
+        except Exception as exc:
+            logger.info('Massive IPO fallback failed; trying yfinance fallback: %s', exc)
         return {
-            'rows': cls._fetch_yfinance_rows(today, cls._upcoming_end_date(today), completed=False),
+            'rows': cls._fetch_yfinance_rows(today, end_date, completed=False),
             'source': IPO_YFINANCE_SOURCE_NAME,
             'source_url': IPO_YFINANCE_SOURCE_URL,
         }
@@ -575,9 +590,23 @@ class CompletedIpoWorker(QObject):
                 'year': target_year,
             }
         except Exception as exc:
-            logger.info('StockAnalysis completed IPO fetch failed; trying yfinance fallback: %s', exc)
+            logger.info('StockAnalysis completed IPO fetch failed; trying Massive/yfinance fallback: %s', exc)
         start_date = datetime.date(target_year, 1, 1)
         end_date = datetime.date.today() if target_year == datetime.date.today().year else datetime.date(target_year, 12, 31)
+        try:
+            provider_result = get_market_data_provider().get_ipos(start_date, end_date, completed=True)
+            rows = list(getattr(provider_result, 'data', None) or [])
+            if rows:
+                return {
+                    'rows': rows,
+                    'source': 'Massive IPOs',
+                    'source_url': MASSIVE_IPO_URL,
+                    'year': target_year,
+                }
+            if getattr(provider_result, 'errors', None):
+                logger.info('Massive completed IPO fallback unavailable; trying yfinance fallback: %s', provider_result.errors)
+        except Exception as exc:
+            logger.info('Massive completed IPO fallback failed; trying yfinance fallback: %s', exc)
         return {
             'rows': IpoCalendarWorker._fetch_yfinance_rows(start_date, end_date, completed=True),
             'source': IPO_YFINANCE_SOURCE_NAME,

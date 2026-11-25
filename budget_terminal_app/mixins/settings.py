@@ -10,6 +10,12 @@ from budget_terminal_app.workers import earnings_calendar as earnings_calendar_w
 from budget_terminal_app.workers.data import DataWorker
 from budget_terminal_app.workers.politics import CACHE_DIR as POLITICS_CACHE_DIR
 from budget_terminal_app.workers.youtube import YOUTUBE_CACHE_DIR
+from budget_terminal_app.services.market_data_provider import (
+    clear_market_data_provider_secret_key,
+    describe_market_data_provider_key_status,
+    get_market_data_provider,
+    save_market_data_provider_secret_key,
+)
 
 
 class SettingsMixin:
@@ -79,6 +85,7 @@ class SettingsMixin:
         self._refresh_data_health_views()
         self._refresh_settings_log_controls()
         self._refresh_run_on_startup_controls()
+        self._refresh_market_data_provider_controls()
         self._refresh_startup_performance_views()
         logger.info('Settings page initialization complete.')
 
@@ -122,6 +129,34 @@ class SettingsMixin:
         self.settings_startup_hint = QLabel('Checking startup registration...')
         self.settings_startup_hint.setWordWrap(True)
         self.set_theme_role(self.settings_startup_hint, 'muted')
+        self.settings_market_data_enabled_checkbox = QCheckBox('Use Massive/Polygon when Basic Free supports the data')
+        self.settings_market_data_enabled_checkbox.toggled.connect(self._on_toggle_market_data_provider)
+        self.settings_market_data_status_label = QLabel('Checking market data provider...')
+        self.settings_market_data_status_label.setWordWrap(True)
+        self.set_theme_role(self.settings_market_data_status_label, 'muted')
+        self.settings_market_data_key_input = QLineEdit()
+        self.settings_market_data_key_input.setMinimumHeight(28)
+        self.settings_market_data_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.settings_market_data_key_input.setPlaceholderText('Massive API key (saved locally)')
+        provider_button_row = self._settings_transparent_widget()
+        provider_button_layout = QHBoxLayout(provider_button_row)
+        provider_button_layout.setContentsMargins(0, 0, 0, 0)
+        provider_button_layout.setSpacing(8)
+        self.settings_market_data_save_btn = QPushButton('Save Key')
+        self.settings_market_data_save_btn.setMinimumHeight(28)
+        self.set_theme_variant(self.settings_market_data_save_btn, 'accent')
+        self.settings_market_data_save_btn.clicked.connect(self._on_save_market_data_provider_key)
+        self.settings_market_data_clear_btn = QPushButton('Clear Key')
+        self.settings_market_data_clear_btn.setMinimumHeight(28)
+        self.set_theme_variant(self.settings_market_data_clear_btn, 'danger')
+        self.settings_market_data_clear_btn.clicked.connect(self._on_clear_market_data_provider_key)
+        self.settings_market_data_refresh_btn = QPushButton('Refresh Status')
+        self.settings_market_data_refresh_btn.setMinimumHeight(28)
+        self.settings_market_data_refresh_btn.clicked.connect(self._on_refresh_market_data_provider_status)
+        provider_button_layout.addWidget(self.settings_market_data_save_btn)
+        provider_button_layout.addWidget(self.settings_market_data_clear_btn)
+        provider_button_layout.addWidget(self.settings_market_data_refresh_btn)
+        provider_button_layout.addStretch(1)
         preferences_layout.addWidget(self._settings_section_header('Clock', 'Set the top-bar market country and display format.'))
         preferences_layout.addWidget(self.settings_clock_country_combo)
         preferences_layout.addWidget(self.settings_time_format_checkbox)
@@ -129,6 +164,12 @@ class SettingsMixin:
         preferences_layout.addWidget(self._settings_section_header('Windows Startup', 'Control whether the packaged app starts when you sign in.'))
         preferences_layout.addWidget(self.settings_startup_checkbox)
         preferences_layout.addWidget(self.settings_startup_hint)
+        preferences_layout.addWidget(self._settings_separator())
+        preferences_layout.addWidget(self._settings_section_header('Market Data Provider', 'Prefer Massive/Polygon free-safe endpoints and fall back to yfinance when data is unsupported or denied.'))
+        preferences_layout.addWidget(self.settings_market_data_enabled_checkbox)
+        preferences_layout.addWidget(self.settings_market_data_status_label)
+        preferences_layout.addWidget(self.settings_market_data_key_input)
+        preferences_layout.addWidget(provider_button_row)
         return preferences_box
 
     def _settings_action_button(self, text: str, variant: str, slot: Any) -> QPushButton:
@@ -491,6 +532,78 @@ class SettingsMixin:
             self._apply_navigation_settings_to_shell()
         self._refresh_settings_navigation_list()
         self._set_settings_status('Page navigation reset.', 'positive')
+
+    def _market_data_provider_state(self) -> dict[str, Any]:
+        state = getattr(self, 'market_data_provider_state', None)
+        if not isinstance(state, dict):
+            state = load_market_data_provider_settings()
+        return dict(state)
+
+    def _save_market_data_provider_state(self, state: Any) -> dict[str, Any]:
+        self.market_data_provider_state = save_market_data_provider_settings(state)
+        get_market_data_provider(self.market_data_provider_state, refresh=True)
+        return dict(self.market_data_provider_state)
+
+    def _refresh_market_data_provider_controls(self) -> None:
+        if not hasattr(self, 'settings_market_data_enabled_checkbox'):
+            return
+        status = describe_market_data_provider_key_status(self._market_data_provider_state())
+        state = self._market_data_provider_state()
+        state['api_key_source'] = status.get('api_key_source', 'missing')
+        self.market_data_provider_state = save_market_data_provider_settings(state)
+        get_market_data_provider(self.market_data_provider_state, refresh=True)
+        enabled = bool(self.market_data_provider_state.get('enabled', True))
+        self.settings_market_data_enabled_checkbox.blockSignals(True)
+        self.settings_market_data_enabled_checkbox.setChecked(enabled)
+        self.settings_market_data_enabled_checkbox.blockSignals(False)
+        source = str(status.get('api_key_source') or 'missing')
+        mode = str(self.market_data_provider_state.get('mode') or 'massive_free_safe')
+        status_text = str(status.get('message') or '')
+        state_text = 'enabled' if enabled else 'disabled'
+        self.settings_market_data_status_label.setText(f'Mode: {mode} | Provider: {state_text} | Key source: {source}. {status_text}')
+        if source == 'settings':
+            self.settings_market_data_key_input.setPlaceholderText('Saved Massive API key (local secret)')
+        elif source == 'env':
+            self.settings_market_data_key_input.setPlaceholderText('Environment key is active')
+        else:
+            self.settings_market_data_key_input.setPlaceholderText('Massive API key (saved locally)')
+        self.settings_market_data_key_input.clear()
+
+    def _on_toggle_market_data_provider(self, checked: Any) -> None:
+        state = self._market_data_provider_state()
+        state['enabled'] = bool(checked)
+        self._save_market_data_provider_state(state)
+        self._refresh_market_data_provider_controls()
+        self._set_settings_status('Market data provider settings updated.', 'positive')
+
+    def _on_save_market_data_provider_key(self) -> None:
+        key = str(self.settings_market_data_key_input.text() or '').strip() if hasattr(self, 'settings_market_data_key_input') else ''
+        if not key:
+            self._set_settings_status('Enter a Massive API key before saving.', 'muted')
+            return
+        try:
+            save_market_data_provider_secret_key(key)
+            state = self._market_data_provider_state()
+            state['api_key_source'] = 'settings'
+            self._save_market_data_provider_state(state)
+            self._refresh_market_data_provider_controls()
+        except Exception as exc:
+            self._set_settings_status(f'Market data key save failed: {exc}', 'negative')
+            return
+        self._set_settings_status('Massive API key saved locally.', 'positive')
+
+    def _on_clear_market_data_provider_key(self) -> None:
+        try:
+            clear_market_data_provider_secret_key()
+            self._refresh_market_data_provider_controls()
+        except Exception as exc:
+            self._set_settings_status(f'Market data key clear failed: {exc}', 'negative')
+            return
+        self._set_settings_status('Saved Massive API key cleared.', 'positive')
+
+    def _on_refresh_market_data_provider_status(self) -> None:
+        self._refresh_market_data_provider_controls()
+        self._set_settings_status('Market data provider status refreshed.', 'positive')
 
     def _settings_transparent_widget(self) -> QWidget:
         """Create a Settings helper widget that does not paint a panel background."""
@@ -1045,6 +1158,10 @@ class SettingsMixin:
         self.dashboard_chart_state = save_dashboard_chart_settings(payload.get('dashboard_chart', DEFAULT_DASHBOARD_CHART_SETTINGS)) if isinstance(payload, dict) else save_dashboard_chart_settings(DEFAULT_DASHBOARD_CHART_SETTINGS)
         dashboard_chart_state = dict(self.dashboard_chart_state)
         self.navigation_state = save_navigation_settings(payload.get('navigation', DEFAULT_NAVIGATION_SETTINGS)) if isinstance(payload, dict) else save_navigation_settings(DEFAULT_NAVIGATION_SETTINGS)
+        self.market_data_provider_state = save_market_data_provider_settings(payload.get('market_data_provider', DEFAULT_MARKET_DATA_PROVIDER_SETTINGS)) if isinstance(payload, dict) else save_market_data_provider_settings(DEFAULT_MARKET_DATA_PROVIDER_SETTINGS)
+        get_market_data_provider(self.market_data_provider_state, refresh=True)
+        if hasattr(self, '_refresh_market_data_provider_controls'):
+            self._refresh_market_data_provider_controls()
         if hasattr(self, '_apply_navigation_settings_to_shell'):
             self._apply_navigation_settings_to_shell()
         if hasattr(self, '_refresh_settings_navigation_list'):
