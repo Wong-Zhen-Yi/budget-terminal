@@ -55,6 +55,7 @@ jobs:
           python scripts/test_bulk_render_responsiveness.py
           python scripts/test_networth_fx_hidden_render.py
           python scripts/test_portfolio_positions_row_stability.py
+          python scripts/test_portfolio_positions_layout.py
           python scripts/test_portfolio_margin_settlement_ui.py
           python scripts/test_portfolio_editing_safety.py
           python scripts/test_options_refresh_responsiveness.py
